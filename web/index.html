@@ -1086,26 +1086,37 @@
             <div class="card">
                 <div class="card-header"><span class="card-title" data-i18n="settings.promptFilter"></span></div>
                 <div class="form-group">
-                    <label style="display:flex;align-items:center;gap:10px">
-                        <label class="switch"><input type="checkbox" id="sanitizeClaudeCodePrompt"><span class="slider"></span></label>
-                        <span data-i18n="settings.sanitizeClaudeCode"></span>
-                    </label>
-                    <small style="color:#64748b;font-size:12px;margin-top:4px;display:block" data-i18n="settings.sanitizeClaudeCodeHint"></small>
+                    <label style="font-weight:600;margin-bottom:12px;display:block" data-i18n="settings.builtinFilters"></label>
+                    <div style="display:flex;flex-direction:column;gap:12px">
+                        <div>
+                            <label style="display:flex;align-items:center;gap:10px">
+                                <label class="switch"><input type="checkbox" id="filterClaudeCode"><span class="slider"></span></label>
+                                <span data-i18n="settings.filterClaudeCode"></span>
+                            </label>
+                            <small style="color:#64748b;font-size:12px;margin-top:4px;display:block;margin-left:54px" data-i18n="settings.filterClaudeCodeHint"></small>
+                        </div>
+                        <div>
+                            <label style="display:flex;align-items:center;gap:10px">
+                                <label class="switch"><input type="checkbox" id="filterEnvNoise"><span class="slider"></span></label>
+                                <span data-i18n="settings.filterEnvNoise"></span>
+                            </label>
+                            <small style="color:#64748b;font-size:12px;margin-top:4px;display:block;margin-left:54px" data-i18n="settings.filterEnvNoiseHint"></small>
+                        </div>
+                        <div>
+                            <label style="display:flex;align-items:center;gap:10px">
+                                <label class="switch"><input type="checkbox" id="filterStripBoundaries"><span class="slider"></span></label>
+                                <span data-i18n="settings.filterStripBoundaries"></span>
+                            </label>
+                            <small style="color:#64748b;font-size:12px;margin-top:4px;display:block;margin-left:54px" data-i18n="settings.filterStripBoundariesHint"></small>
+                        </div>
+                    </div>
                 </div>
                 <div class="form-group" style="margin-top:16px">
                     <label style="font-weight:600;margin-bottom:8px;display:block" data-i18n="settings.customRules"></label>
                     <div id="promptFilterRules" style="margin-bottom:8px"></div>
                     <div style="display:flex;gap:8px;flex-wrap:wrap">
                         <button class="btn btn-sm btn-secondary" onclick="addPromptRule('regex')" data-i18n="promptFilter.addRegex"></button>
-                        <button class="btn btn-sm btn-secondary" onclick="addPromptRule('contains')" data-i18n="promptFilter.addContains"></button>
-                        <button class="btn btn-sm btn-secondary" onclick="addPromptRule('template')" data-i18n="promptFilter.addTemplate"></button>
-                        <select id="templatePreset" style="padding:4px 8px;border-radius:4px;border:1px solid #d1d5db;font-size:12px">
-                            <option value="" data-i18n="promptFilter.presets"></option>
-                            <option value="claude-code">Claude Code</option>
-                            <option value="strip-boundaries">Strip Boundaries</option>
-                            <option value="strip-env-noise">Strip Env Noise</option>
-                        </select>
-                        <button class="btn btn-sm btn-secondary" onclick="addPresetRule()" data-i18n="promptFilter.addPreset"></button>
+                        <button class="btn btn-sm btn-secondary" onclick="addPromptRule('lines-containing')" data-i18n="promptFilter.addContains"></button>
                     </div>
                 </div>
                 <button class="btn btn-primary" onclick="savePromptFilter()" data-i18n="settings.savePromptFilter"></button>
@@ -1257,8 +1268,13 @@
                 'settings.saveProxy': '保存代理设置',
                 'settings.proxySaved': '代理设置已保存',
                 'settings.promptFilter': 'System Prompt 过滤',
-                'settings.sanitizeClaudeCode': '过滤 Claude Code CLI 系统提示',
-                'settings.sanitizeClaudeCodeHint': '开启后，检测到 Claude Code 内置系统提示时将替换为精简版本，并过滤环境信息、Git 状态等噪音',
+                'settings.builtinFilters': '内置过滤器',
+                'settings.filterClaudeCode': '替换 Claude Code CLI 系统提示',
+                'settings.filterClaudeCodeHint': '检测到 Claude Code 内置系统提示时，替换为精简的后端提示词，避免泄露大量 CLI 指令到请求体。',
+                'settings.filterEnvNoise': '过滤环境噪音行',
+                'settings.filterEnvNoiseHint': '移除系统提示中注入的环境变量、Git 状态、最近提交等噪音内容。',
+                'settings.filterStripBoundaries': '移除边界标记',
+                'settings.filterStripBoundariesHint': '移除 --- SYSTEM PROMPT --- / --- END SYSTEM PROMPT --- 等边界标记行。',
                 'settings.savePromptFilter': '保存过滤设置',
                 'settings.promptFilterSaved': '过滤设置已保存',
                 'settings.customRules': '自定义过滤规则',
@@ -1437,14 +1453,13 @@
                 'accounts.testLog.error': '✗ {0} 异常: {1}',
                 'promptFilter.noRules': '暂无自定义规则',
                 'promptFilter.unnamed': '未命名',
+                'promptFilter.typeRegex': '正则替换',
+                'promptFilter.typeContains': '行级过滤',
                 'promptFilter.match': '匹配',
-                'promptFilter.replace': '替换',
-                'promptFilter.emptyRemove': '（留空则删除）',
-                'promptFilter.addRegex': '+ 正则',
-                'promptFilter.addContains': '+ 包含',
-                'promptFilter.addTemplate': '+ 模板',
-                'promptFilter.presets': '-- 预设 --',
-                'promptFilter.addPreset': '添加预设'
+                'promptFilter.replace': '替换为（留空则删除）',
+                'promptFilter.emptyRemove': '留空则删除匹配内容',
+                'promptFilter.addRegex': '+ 正则替换规则',
+                'promptFilter.addContains': '+ 行级过滤规则'
             },
             en: {
                 'login.subtitle': 'Enter admin password to login',
@@ -1533,8 +1548,13 @@
                 'settings.saveProxy': 'Save Proxy Settings',
                 'settings.proxySaved': 'Proxy settings saved',
                 'settings.promptFilter': 'System Prompt Filter',
-                'settings.sanitizeClaudeCode': 'Filter Claude Code CLI system prompts',
-                'settings.sanitizeClaudeCodeHint': 'When enabled, Claude Code built-in system prompts are replaced with a minimal backend prompt and noise (env info, git status, etc.) is stripped',
+                'settings.builtinFilters': 'Built-in Filters',
+                'settings.filterClaudeCode': 'Replace Claude Code CLI system prompts',
+                'settings.filterClaudeCodeHint': 'Detects Claude Code built-in system prompts and replaces them with a compact backend prompt.',
+                'settings.filterEnvNoise': 'Strip environment noise lines',
+                'settings.filterEnvNoiseHint': 'Removes injected env vars, git status, recent commits and similar noise from system prompts.',
+                'settings.filterStripBoundaries': 'Remove boundary markers',
+                'settings.filterStripBoundariesHint': 'Strips --- SYSTEM PROMPT --- / --- END SYSTEM PROMPT --- marker lines.',
                 'settings.savePromptFilter': 'Save Filter Settings',
                 'settings.promptFilterSaved': 'Filter settings saved',
                 'settings.customRules': 'Custom Filter Rules',
@@ -1707,16 +1727,15 @@
                 'accounts.testLog.success': '✓ {0} OK ({1}s) Reply: {2}',
                 'accounts.testLog.failed': '✗ {0} Failed ({1}s): {2}',
                 'accounts.testLog.error': '✗ {0} Error: {1}',
-                'promptFilter.noRules': 'No custom rules',
+                'promptFilter.noRules': 'No custom rules yet',
                 'promptFilter.unnamed': 'Unnamed',
+                'promptFilter.typeRegex': 'Regex Replace',
+                'promptFilter.typeContains': 'Line Filter',
                 'promptFilter.match': 'Match',
-                'promptFilter.replace': 'Replace',
-                'promptFilter.emptyRemove': '(empty = remove)',
-                'promptFilter.addRegex': '+ Regex',
-                'promptFilter.addContains': '+ Contains',
-                'promptFilter.addTemplate': '+ Template',
-                'promptFilter.presets': '-- Presets --',
-                'promptFilter.addPreset': 'Add Preset'
+                'promptFilter.replace': 'Replace with (empty = remove)',
+                'promptFilter.emptyRemove': 'empty removes matched content',
+                'promptFilter.addRegex': '+ Regex Replace Rule',
+                'promptFilter.addContains': '+ Line Filter Rule'
             }
         };
         let currentLang = localStorage.getItem('kiro_lang') || 'zh';
@@ -2454,14 +2473,21 @@
         async function loadPromptFilter() {
             const res = await fetch('/admin/api/prompt-filter', { headers: { 'X-Admin-Password': password } });
             const d = await res.json();
-            document.getElementById('sanitizeClaudeCodePrompt').checked = !!d.sanitizeClaudeCodePrompt;
+            document.getElementById('filterClaudeCode').checked = !!d.filterClaudeCode;
+            document.getElementById('filterEnvNoise').checked = !!d.filterEnvNoise;
+            document.getElementById('filterStripBoundaries').checked = !!d.filterStripBoundaries;
             promptRules = d.rules || [];
             renderPromptRules();
         }
         async function savePromptFilter() {
             const res = await fetch('/admin/api/prompt-filter', {
                 method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password },
-                body: JSON.stringify({ sanitizeClaudeCodePrompt: document.getElementById('sanitizeClaudeCodePrompt').checked, rules: promptRules })
+                body: JSON.stringify({
+                    filterClaudeCode: document.getElementById('filterClaudeCode').checked,
+                    filterEnvNoise: document.getElementById('filterEnvNoise').checked,
+                    filterStripBoundaries: document.getElementById('filterStripBoundaries').checked,
+                    rules: promptRules
+                })
             });
             const d = await res.json();
             if (d.success) { alert(t('settings.promptFilterSaved')); } else { alert(t('common.saveFailed') + ': ' + d.error); }
@@ -2470,15 +2496,17 @@
             const container = document.getElementById('promptFilterRules');
             if (!promptRules.length) { container.innerHTML = '<small style="color:#94a3b8">' + t('promptFilter.noRules') + '</small>'; return; }
             container.innerHTML = promptRules.map((r, i) => {
-                const replaceRow = r.type !== 'template'
-                    ? '<div style="margin-top:4px"><b>' + t('promptFilter.replace') + ':</b> <input value="' + (r.replace||'').replace(/"/g,'&quot;') + '" onchange="updateRule(' + i + ',\'replace\',this.value)" style="width:70%;padding:2px 6px;border:1px solid #d1d5db;border-radius:3px;font-size:12px;font-family:monospace" placeholder="' + t('promptFilter.emptyRemove') + '"></div>'
+                const typeLabel = r.type === 'lines-containing' ? t('promptFilter.typeContains') : t('promptFilter.typeRegex');
+                const replacePlaceholder = r.type === 'lines-containing' ? '' : t('promptFilter.emptyRemove');
+                const replaceRow = r.type !== 'lines-containing'
+                    ? '<div style="margin-top:4px"><b>' + t('promptFilter.replace') + ':</b> <input value="' + (r.replace||'').replace(/"/g,'&quot;') + '" onchange="updateRule(' + i + ',\'replace\',this.value)" style="width:70%;padding:2px 6px;border:1px solid #d1d5db;border-radius:3px;font-size:12px;font-family:monospace" placeholder="' + replacePlaceholder + '"></div>'
                     : '';
                 return '<div style="border:1px solid #e2e8f0;border-radius:6px;padding:8px 12px;margin-bottom:6px;background:' + (r.enabled?'#f0fdf4':'#fef2f2') + '">' +
                     '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">' +
                     '<label class="switch" style="transform:scale(0.8)"><input type="checkbox" ' + (r.enabled?'checked':'') + ' onchange="toggleRule(' + i + ')"><span class="slider"></span></label>' +
-                    '<strong style="font-size:13px">' + (r.name || t('promptFilter.unnamed')) + '</strong>' +
-                    '<span style="font-size:11px;color:#64748b;background:#f1f5f9;padding:2px 6px;border-radius:3px">' + r.type + '</span>' +
-                    '<button onclick="removeRule(' + i + ')" style="margin-left:auto;background:none;border:none;color:#ef4444;cursor:pointer;font-size:16px">&times;</button>' +
+                    '<input value="' + (r.name||'').replace(/"/g,'&quot;') + '" onchange="updateRule(' + i + ',\'name\',this.value)" style="font-size:13px;font-weight:600;border:none;border-bottom:1px dashed #cbd5e1;background:transparent;outline:none;flex:1" placeholder="' + t('promptFilter.unnamed') + '">' +
+                    '<span style="font-size:11px;color:#64748b;background:#f1f5f9;padding:2px 6px;border-radius:3px;white-space:nowrap">' + typeLabel + '</span>' +
+                    '<button onclick="removeRule(' + i + ')" style="margin-left:4px;background:none;border:none;color:#ef4444;cursor:pointer;font-size:16px;line-height:1">&times;</button>' +
                     '</div>' +
                     '<div style="font-size:12px;color:#475569">' +
                     '<div><b>' + t('promptFilter.match') + ':</b> <input value="' + (r.match||'').replace(/"/g,'&quot;') + '" onchange="updateRule(' + i + ',\'match\',this.value)" style="width:70%;padding:2px 6px;border:1px solid #d1d5db;border-radius:3px;font-size:12px;font-family:monospace"></div>' +
@@ -2489,15 +2517,7 @@
         }
         function addPromptRule(type) {
             const id = 'rule-' + Date.now();
-            promptRules.push({ id, name: 'New ' + type + ' rule', type, match: '', replace: '', enabled: true });
-            renderPromptRules();
-        }
-        function addPresetRule() {
-            const preset = document.getElementById('templatePreset').value;
-            if (!preset) return;
-            const names = { 'claude-code': 'Claude Code Replacement', 'strip-boundaries': 'Strip Boundary Markers', 'strip-env-noise': 'Strip Environment Noise' };
-            const id = 'rule-' + Date.now();
-            promptRules.push({ id, name: names[preset] || preset, type: 'template', match: preset, replace: '', enabled: true });
+            promptRules.push({ id, name: '', type, match: '', replace: '', enabled: true });
             renderPromptRules();
         }
         function removeRule(i) { promptRules.splice(i, 1); renderPromptRules(); }

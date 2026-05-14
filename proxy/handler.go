@@ -555,6 +555,12 @@ func (h *Handler) refreshModelsCache() {
 			logger.Warnf("[ModelsCache] Failed to refresh for %s: %v", account.Email, err)
 			continue
 		}
+		// 缓存每账号可用模型，用于路由时过滤
+		modelIDs := make([]string, 0, len(models))
+		for _, m := range models {
+			modelIDs = append(modelIDs, m.ModelId)
+		}
+		h.pool.SetModelList(account.ID, modelIDs)
 		aggregated = mergeUniqueModels(aggregated, models)
 	}
 
@@ -702,8 +708,9 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// 获取账号
-	account := h.pool.GetNext()
+	// 获取账号（按模型过滤，优先选支持该模型的账号）
+	actualModel, _ := ParseModelAndThinking(req.Model, config.GetThinkingConfig().Suffix)
+	account := h.pool.GetNextForModel(actualModel)
 	if account == nil {
 		h.sendClaudeError(w, 503, "api_error", "No available accounts")
 		return
@@ -1359,7 +1366,8 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	account := h.pool.GetNext()
+	actualModel, _ := ParseModelAndThinking(req.Model, config.GetThinkingConfig().Suffix)
+	account := h.pool.GetNextForModel(actualModel)
 	if account == nil {
 		h.sendOpenAIError(w, 503, "server_error", "No available accounts")
 		return
@@ -1920,7 +1928,7 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/models") && r.Method == "GET":
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/models")
 		h.apiGetAccountModels(w, r, id)
-	
+
 	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/full") && r.Method == "GET":
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/full")
 		h.apiGetAccountFull(w, r, id)
@@ -2612,35 +2620,44 @@ func (h *Handler) apiGetSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) apiGetPromptFilter(w http.ResponseWriter, r *http.Request) {
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"sanitizeClaudeCodePrompt": config.GetSanitizeClaudeCodePrompt(),
-		"rules":                    config.GetPromptFilterRules(),
-	})
+	json.NewEncoder(w).Encode(config.GetPromptFilterConfig())
 }
 
 func (h *Handler) apiUpdatePromptFilter(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		SanitizeClaudeCodePrompt *bool                     `json:"sanitizeClaudeCodePrompt,omitempty"`
-		Rules                    *[]config.PromptFilterRule `json:"rules,omitempty"`
+		FilterClaudeCode      *bool                      `json:"filterClaudeCode,omitempty"`
+		FilterEnvNoise        *bool                      `json:"filterEnvNoise,omitempty"`
+		FilterStripBoundaries *bool                      `json:"filterStripBoundaries,omitempty"`
+		Rules                 *[]config.PromptFilterRule `json:"rules,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
 		return
 	}
-	if req.SanitizeClaudeCodePrompt != nil {
-		if err := config.UpdatePromptFilter(*req.SanitizeClaudeCodePrompt); err != nil {
-			w.WriteHeader(500)
-			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-			return
-		}
+
+	// Read current config to fill in any fields not provided in the request.
+	current := config.GetPromptFilterConfig()
+	fcc := current.FilterClaudeCode
+	fen := current.FilterEnvNoise
+	fsb := current.FilterStripBoundaries
+	rules := current.Rules
+	if req.FilterClaudeCode != nil {
+		fcc = *req.FilterClaudeCode
+	}
+	if req.FilterEnvNoise != nil {
+		fen = *req.FilterEnvNoise
+	}
+	if req.FilterStripBoundaries != nil {
+		fsb = *req.FilterStripBoundaries
 	}
 	if req.Rules != nil {
-		if err := config.UpdatePromptFilterRules(*req.Rules); err != nil {
-			w.WriteHeader(500)
-			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-			return
-		}
+		rules = *req.Rules
+	}
+	if err := config.UpdatePromptFilterConfig(fcc, fen, fsb, rules); err != nil {
+		w.WriteHeader(500)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
 	}
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }
@@ -2750,11 +2767,11 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 
 	var content string
 	callback := &KiroStreamCallback{
-		OnText:     func(text string, isThinking bool) { content += text },
-		OnToolUse:  func(tu KiroToolUse) {},
-		OnComplete: func(inTok, outTok int) {},
-		OnError:    func(err error) {},
-		OnCredits:  func(c float64) {},
+		OnText:         func(text string, isThinking bool) { content += text },
+		OnToolUse:      func(tu KiroToolUse) {},
+		OnComplete:     func(inTok, outTok int) {},
+		OnError:        func(err error) {},
+		OnCredits:      func(c float64) {},
 		OnContextUsage: func(pct float64) {},
 	}
 
