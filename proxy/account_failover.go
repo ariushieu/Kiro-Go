@@ -74,12 +74,17 @@ func (h *Handler) disableAccountOverage(account *config.Account) {
 		return
 	}
 
-	if err := config.DisableAccountOverage(account.ID); err != nil {
-		logger.Warnf("[AccountFailover] Failed to disable overage for %s: %v", account.Email, err)
+	snap, fetchErr := FetchOverageStatus(account)
+	if fetchErr != nil {
+		logger.Warnf("[AccountFailover] Failed to refresh overage status for %s: %v", account.Email, fetchErr)
+		return
+	}
+	if persistErr := PersistOverageSnapshot(account.ID, snap); persistErr != nil {
+		logger.Warnf("[AccountFailover] Failed to persist overage snapshot for %s: %v", account.Email, persistErr)
 		return
 	}
 
-	logger.Warnf("[AccountFailover] Disabled overage for %s after upstream overage limit error", account.Email)
+	logger.Warnf("[AccountFailover] Refreshed overage status for %s after upstream overage limit error: %s", account.Email, snap.Status)
 	h.pool.Reload()
 }
 

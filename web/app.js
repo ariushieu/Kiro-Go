@@ -812,7 +812,7 @@
       const isSelected = selectedAccounts.has(a.id);
       const weight = a.weight || 0;
       const weightBadge = weight >= 2 ? '<span class="badge badge-warning">' + escapeHtml(t('accounts.weightShort')) + ':' + weight + '</span>' : '';
-      const overageBadge = a.allowOverage ? '<span class="badge badge-warning">' + escapeHtml(t('accounts.overage')) + ':' + (a.overageWeight || 1) + '</span>' : '';
+      const overageBadge = renderOverageBadge(a);
       const banned = a.banStatus && a.banStatus !== 'ACTIVE';
       const idAttr = escapeAttr(a.id);
       const displayEmail = getDisplayEmail(a.email, a.id);
@@ -1050,16 +1050,12 @@
       '<button class="btn btn-sm btn-primary" data-detail-action="saveWeight" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.save')) + '</button>' +
       '</div>' +
 
-      '<div class="detail-section"><h4>' + escapeHtml(t('detail.overage')) + '</h4>' +
-      '<div class="form-group">' +
-      '<label class="flex items-center gap-2"><span class="switch"><input type="checkbox" id="allowOverageInput" ' + (a.allowOverage ? 'checked' : '') + ' /><span class="slider"></span></span><span>' + escapeHtml(t('detail.allowOverage')) + '</span></label>' +
-      '</div>' +
-      '<div class="form-group">' +
-      '<label>' + escapeHtml(t('detail.overageWeight')) + '</label>' +
-      '<input type="number" id="overageWeightInput" value="' + (a.overageWeight || 1) + '" min="1" max="10" />' +
-      '<small>' + escapeHtml(t('detail.overageHint')) + '</small>' +
-      '</div>' +
-      '<button class="btn btn-sm btn-primary" data-detail-action="saveOverage" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.save')) + '</button>' +
+      '<div class="detail-section">' +
+      '<h4>' + escapeHtml(t('detail.overage')) +
+      ' <button class="btn btn-sm btn-outline" data-detail-action="refreshOverage" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.overageRefresh')) + '</button>' +
+      '</h4>' +
+      '<p class="help-block">' + escapeHtml(t('detail.overageHint')) + '</p>' +
+      renderOverageBlock(a, idAttr) +
       '</div>' +
 
       '<div class="detail-section"><h4>' + escapeHtml(t('detail.proxyURL')) + '</h4><div class="machine-id-row">' +
@@ -1159,12 +1155,80 @@
     const weight = parseInt($('weightInput').value, 10) || 0;
     await putAccount(id, { weight }, t('detail.saved'));
   }
-  async function saveOverage(id) {
-    const allowOverage = $('allowOverageInput').checked;
-    let overageWeight = parseInt($('overageWeightInput').value, 10) || 1;
-    overageWeight = Math.max(1, Math.min(10, overageWeight));
-    $('overageWeightInput').value = overageWeight;
-    await putAccount(id, { allowOverage, overageWeight }, t('detail.saved'));
+  function renderOverageBadge(a) {
+    const status = (a.overageStatus || '').toUpperCase();
+    if (status === 'ENABLED') {
+      return '<span class="badge badge-warning">' + escapeHtml(t('accounts.overageOn')) + '</span>';
+    }
+    if (status === 'DISABLED') {
+      return '<span class="badge badge-muted">' + escapeHtml(t('accounts.overageOff')) + '</span>';
+    }
+    return '';
+  }
+  function renderOverageBlock(a, idAttr) {
+    const status = (a.overageStatus || '').toUpperCase();
+    const capable = !a.overageCapability || a.overageCapability === 'OVERAGE_CAPABLE';
+    const checked = status === 'ENABLED';
+    const checkedAt = a.overageCheckedAt ? new Date(a.overageCheckedAt * 1000).toLocaleString() : '-';
+    const statusText = status === 'ENABLED' ? t('detail.overageEnabled')
+      : status === 'DISABLED' ? t('detail.overageDisabled')
+      : t('detail.overageUnknown');
+    const disabledAttr = capable ? '' : ' disabled';
+    return '<div class="form-group flex items-center gap-2">' +
+      '<label class="switch"><input type="checkbox" id="overageSwitchInput-' + idAttr + '" data-detail-action="toggleOverage" data-id="' + idAttr + '" ' + (checked ? 'checked' : '') + disabledAttr + ' /><span class="slider"></span></label>' +
+      '<span id="overageSwitchLabel-' + idAttr + '">' + escapeHtml(statusText) + '</span>' +
+      '</div>' +
+      (capable ? '' : '<p class="help-block" style="color:#ef4444">' + escapeHtml(t('detail.overageNotCapable')) + '</p>') +
+      '<div class="detail-grid">' +
+      detailItem(t('detail.overageStatus'), status || '-') +
+      detailItem(t('detail.overageCap'), a.overageCap ? '$' + Number(a.overageCap).toFixed(2) : '-') +
+      detailItem(t('detail.overageRate'), a.overageRate ? '$' + Number(a.overageRate).toFixed(4) : '-') +
+      detailItem(t('detail.overageCurrent'), a.currentOverages ? '$' + Number(a.currentOverages).toFixed(4) : '$0') +
+      detailItem(t('detail.overageCheckedAt'), checkedAt) +
+      '</div>';
+  }
+  async function toggleOverageSwitch(id, inputEl) {
+    const desired = inputEl.checked;
+    const labelEl = $('overageSwitchLabel-' + id);
+    const oldLabel = labelEl ? labelEl.textContent : '';
+    inputEl.disabled = true;
+    if (labelEl) labelEl.textContent = t('detail.overageSwitching');
+    try {
+      const res = await api('/accounts/' + encodeURIComponent(id) + '/overage', {
+        method: 'POST',
+        body: JSON.stringify({ enabled: desired }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok || d.success === false) {
+        throw new Error(d.error || t('accounts.overageSwitchFailed'));
+      }
+      if (labelEl) {
+        labelEl.textContent = d.overageStatus === 'ENABLED' ? t('detail.overageEnabled')
+          : d.overageStatus === 'DISABLED' ? t('detail.overageDisabled')
+          : t('detail.overageUnknown');
+      }
+      inputEl.checked = d.overageStatus === 'ENABLED';
+      await loadAccounts();
+    } catch (e) {
+      inputEl.checked = !desired;
+      if (labelEl) labelEl.textContent = oldLabel;
+      toast(t('accounts.overageSwitchFailed') + ': ' + (e.message || e), 'warning');
+    } finally {
+      inputEl.disabled = false;
+    }
+  }
+  async function refreshAccountOverage(id) {
+    try {
+      const res = await api('/accounts/' + encodeURIComponent(id) + '/overage', { method: 'GET' });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok || d.success === false) {
+        throw new Error(d.error || t('accounts.overageSwitchFailed'));
+      }
+      await loadAccounts();
+      showDetail(id);
+    } catch (e) {
+      toast(t('accounts.overageSwitchFailed') + ': ' + (e.message || e), 'warning');
+    }
   }
   async function saveProxyURL(id) {
     const url = $('proxyURLInput').value.trim();
@@ -2623,7 +2687,8 @@
       const a = b.dataset.detailAction;
       if (a === 'saveMachineId') saveMachineId(id);
       else if (a === 'saveWeight') saveWeight(id);
-      else if (a === 'saveOverage') saveOverage(id);
+      else if (a === 'toggleOverage') toggleOverageSwitch(id, b);
+      else if (a === 'refreshOverage') refreshAccountOverage(id);
       else if (a === 'saveProxyURL') saveProxyURL(id);
       else if (a === 'loadModels') loadModels(id);
       else if (a === 'refreshModels') refreshAccountModels(id);

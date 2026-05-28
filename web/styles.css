@@ -667,6 +667,11 @@ select.custom-select-native {
   color: #ffffff;
   border-color: #2563eb;
 }
+.badge-muted {
+  background: #94a3b8;
+  color: #ffffff;
+  border-color: #94a3b8;
+}
 .badge-error {
   background: #dc2626;
   color: #ffffff;

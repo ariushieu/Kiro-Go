@@ -58,7 +58,9 @@ func TestClaudeNonStreamRetriesNextAccountAfterPreResponseFailure(t *testing.T) 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		requestTokens = append(requestTokens, token)
-		if token == "token-first" {
+		// Fail the first attempted account (whichever it is) so the handler
+		// is forced to add it to `excluded` and retry the other one.
+		if len(requestTokens) == 1 {
 			http.Error(w, "temporary upstream failure", http.StatusInternalServerError)
 			return
 		}
@@ -104,8 +106,12 @@ func TestClaudeNonStreamRetriesNextAccountAfterPreResponseFailure(t *testing.T) 
 	if len(requestTokens) != 2 {
 		t.Fatalf("expected two account attempts, got %v", requestTokens)
 	}
-	if requestTokens[0] != "token-first" || requestTokens[1] != "token-second" {
+	if requestTokens[0] == requestTokens[1] {
 		t.Fatalf("expected first account to be excluded before retry, got %v", requestTokens)
+	}
+	tokenSet := map[string]bool{requestTokens[0]: true, requestTokens[1]: true}
+	if !tokenSet["token-first"] || !tokenSet["token-second"] {
+		t.Fatalf("expected both accounts to be tried, got %v", requestTokens)
 	}
 
 	var resp ClaudeResponse

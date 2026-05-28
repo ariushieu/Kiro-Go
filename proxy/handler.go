@@ -2082,6 +2082,13 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/models")
 		h.apiGetAccountModels(w, r, id)
 
+	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/overage") && r.Method == "POST":
+		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/overage")
+		h.apiSetAccountOverage(w, r, id)
+	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/overage") && r.Method == "GET":
+		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/overage")
+		h.apiGetAccountOverage(w, r, id)
+
 	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/full") && r.Method == "GET":
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/full")
 		h.apiGetAccountFull(w, r, id)
@@ -2184,8 +2191,12 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 			"hasToken":          a.AccessToken != "",
 			"machineId":         a.MachineId,
 			"weight":            a.Weight,
-			"allowOverage":      a.AllowOverage,
-			"overageWeight":     a.OverageWeight,
+			"overageStatus":     a.OverageStatus,
+			"overageCapability": a.OverageCapability,
+			"overageCap":        a.OverageCap,
+			"overageRate":       a.OverageRate,
+			"currentOverages":   a.CurrentOverages,
+			"overageCheckedAt":  a.OverageCheckedAt,
 			"proxyURL":          a.ProxyURL,
 			"subscriptionType":  a.SubscriptionType,
 			"subscriptionTitle": a.SubscriptionTitle,
@@ -2290,12 +2301,6 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 	if v, ok := updates["weight"].(float64); ok {
 		existing.Weight = int(v)
 	}
-	if v, ok := updates["allowOverage"].(bool); ok {
-		existing.AllowOverage = v
-	}
-	if v, ok := updates["overageWeight"].(float64); ok {
-		existing.OverageWeight = clampInt(int(v), 1, 10)
-	}
 	if v, ok := updates["proxyURL"].(string); ok {
 		existing.ProxyURL = v
 	}
@@ -2316,6 +2321,95 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 		}(*existing)
 	}
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
+}
+
+// apiGetAccountOverage 拉取并返回单个账号的上游 Overages 状态。
+// 同步把结果写回 config.json 缓存，确保 UI 与持久化一致。
+func (h *Handler) apiGetAccountOverage(w http.ResponseWriter, r *http.Request, id string) {
+	accounts := config.GetAccounts()
+	var account *config.Account
+	for i := range accounts {
+		if accounts[i].ID == id {
+			account = &accounts[i]
+			break
+		}
+	}
+	if account == nil {
+		w.WriteHeader(404)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Account not found"})
+		return
+	}
+
+	snap, err := FetchOverageStatus(account)
+	if err != nil {
+		w.WriteHeader(502)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	if persistErr := PersistOverageSnapshot(id, snap); persistErr != nil {
+		logger.Warnf("[Overage] persist GET overage failed for %s: %v", account.Email, persistErr)
+	}
+	h.pool.Reload()
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":           true,
+		"overageStatus":     snap.Status,
+		"overageCapability": snap.Capability,
+		"subscriptionTitle": snap.SubscriptionTitle,
+		"overageCap":        snap.OverageCap,
+		"overageRate":       snap.OverageRate,
+		"currentOverages":   snap.CurrentOverages,
+		"overageCheckedAt":  snap.CheckedAt,
+	})
+}
+
+// apiSetAccountOverage 翻转单个账号的上游 Overages 开关，并刷新缓存。
+// Body: {"enabled": true|false}
+func (h *Handler) apiSetAccountOverage(w http.ResponseWriter, r *http.Request, id string) {
+	var body struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
+		return
+	}
+
+	accounts := config.GetAccounts()
+	var account *config.Account
+	for i := range accounts {
+		if accounts[i].ID == id {
+			account = &accounts[i]
+			break
+		}
+	}
+	if account == nil {
+		w.WriteHeader(404)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Account not found"})
+		return
+	}
+
+	snap, err := SetOverageStatus(account, body.Enabled)
+	if err != nil {
+		w.WriteHeader(502)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	if persistErr := PersistOverageSnapshot(id, snap); persistErr != nil {
+		logger.Warnf("[Overage] persist SET overage failed for %s: %v", account.Email, persistErr)
+	}
+	h.pool.Reload()
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":           true,
+		"overageStatus":     snap.Status,
+		"overageCapability": snap.Capability,
+		"subscriptionTitle": snap.SubscriptionTitle,
+		"overageCap":        snap.OverageCap,
+		"overageRate":       snap.OverageRate,
+		"currentOverages":   snap.CurrentOverages,
+		"overageCheckedAt":  snap.CheckedAt,
+	})
 }
 
 // apiBatchAccounts 批量操作账号（启用/禁用/刷新）
@@ -3133,8 +3227,12 @@ func (h *Handler) apiGetAccountFull(w http.ResponseWriter, r *http.Request, id s
 		"expiresAt":         account.ExpiresAt,
 		"machineId":         account.MachineId,
 		"weight":            account.Weight,
-		"allowOverage":      account.AllowOverage,
-		"overageWeight":     account.OverageWeight,
+		"overageStatus":     account.OverageStatus,
+		"overageCapability": account.OverageCapability,
+		"overageCap":        account.OverageCap,
+		"overageRate":       account.OverageRate,
+		"currentOverages":   account.CurrentOverages,
+		"overageCheckedAt":  account.OverageCheckedAt,
 		"proxyURL":          account.ProxyURL,
 		"enabled":           account.Enabled,
 		"banStatus":         account.BanStatus,
