@@ -46,15 +46,21 @@ const minimalFallbackUserContent = "."
 const toolResultsContinuationPrefix = "Tool results:"
 const toolResultImagePlaceholder = "[Tool returned an image; the image is attached to this message.]"
 
-// maxPayloadBytes is the upper bound for the serialized Kiro request body.
+// The upper bound for the serialized Kiro request body is configured at
+// runtime via config.GetMaxPayloadBytes() (admin web setting), not a const.
 // Kiro's upstream rejects oversized requests with HTTP 400
 // "Input is too long." (CONTENT_LENGTH_EXCEEDS_THRESHOLD). When a converted
 // payload exceeds this size we drop the oldest history turns (keeping the
 // system priming, the most recent turns, the active tool turn, and the current
 // message) and insert a placeholder note so the model knows context was elided.
-// The limit is kept conservatively below the observed upstream threshold to
-// leave room for headers and minor serialization overhead.
-const maxPayloadBytes = 900 * 1024
+// The observed upstream threshold is ~2.15MB of serialized JSON body (AWS
+// returns 400 CONTENT_LENGTH_EXCEEDS_THRESHOLD just above ~2,154,000 bytes,
+// verified by binary search against q.<region>.amazonaws.com). The reject is
+// driven by raw JSON body size, not token count, so this byte cap binds before
+// the model's token window. The default (config.DefaultMaxPayloadBytes =
+// 2,000,000) sits below the upstream ceiling with headroom for headers and
+// serialization overhead. There is NO payload-shrink retry, so setting the cap
+// at/above ~2.15MB risks hard 400 failures with no fallback.
 
 // truncationPlaceholder is inserted in history where older turns were dropped to
 // fit within maxPayloadBytes.
@@ -1625,7 +1631,8 @@ func truncatePayloadToLimit(payload *KiroPayload, hasPriming bool) {
 	if payload == nil {
 		return
 	}
-	if payloadByteSize(payload) <= maxPayloadBytes {
+	limit := config.GetMaxPayloadBytes()
+	if payloadByteSize(payload) <= limit {
 		return
 	}
 
@@ -1667,7 +1674,7 @@ func truncatePayloadToLimit(payload *KiroPayload, hasPriming bool) {
 	for i := len(conversation) - 1; i >= 0; i-- {
 		running += entrySizes[i]
 		kept := len(conversation) - i
-		if running > maxPayloadBytes && kept > minRecentHistoryTurns {
+		if running > limit && kept > minRecentHistoryTurns {
 			break
 		}
 		keepFrom = i
@@ -1686,7 +1693,7 @@ func truncatePayloadToLimit(payload *KiroPayload, hasPriming bool) {
 
 	// If still too large (current message or retained tail alone exceeds the
 	// limit), shrink the current message content as a last resort.
-	if payloadByteSize(payload) > maxPayloadBytes {
+	if payloadByteSize(payload) > limit {
 		truncateCurrentMessage(payload)
 	}
 }
@@ -1727,9 +1734,10 @@ func currentMessageModelID(payload *KiroPayload) string {
 // resort when even the minimal retained history plus current message exceeds the
 // limit.
 func truncateCurrentMessage(payload *KiroPayload) {
+	limit := config.GetMaxPayloadBytes()
 	cur := &payload.ConversationState.CurrentMessage.UserInputMessage
 	overhead := payloadByteSize(payload) - len(cur.Content)
-	budget := maxPayloadBytes - overhead
+	budget := limit - overhead
 	if budget < 0 {
 		budget = 0
 	}

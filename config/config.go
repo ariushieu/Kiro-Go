@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 )
@@ -45,9 +46,12 @@ type Account struct {
 	RefreshToken string `json:"refreshToken"`           // OAuth refresh token for token renewal
 	ClientID     string `json:"clientId,omitempty"`     // OIDC client ID (for IdC auth)
 	ClientSecret string `json:"clientSecret,omitempty"` // OIDC client secret (for IdC auth)
-	AuthMethod   string `json:"authMethod"`             // Authentication method: "idc" (AWS IdC) or "social" (GitHub/Google)
+	KiroApiKey   string `json:"kiroApiKey,omitempty"`   // API key credential for headless auth (used directly as bearer token)
+	AuthMethod   string `json:"authMethod"`             // Authentication method: "idc" (AWS IdC), "social" (GitHub/Google), or "api_key"
 	Provider     string `json:"provider,omitempty"`     // Identity provider name (e.g., "BuilderId", "GitHub")
-	Region       string `json:"region"`                 // AWS region for OIDC endpoints
+	Region       string `json:"region"`                 // AWS region (fallback for both auth and API region)
+	AuthRegion   string `json:"authRegion,omitempty"`   // Region for token refresh endpoints; falls back to region
+	ApiRegion    string `json:"apiRegion,omitempty"`    // Region for API request hosts; falls back to region
 	StartUrl     string `json:"startUrl,omitempty"`     // AWS SSO start URL
 	ExpiresAt    int64  `json:"expiresAt,omitempty"`    // Token expiration timestamp (Unix seconds)
 	MachineId    string `json:"machineId,omitempty"`    // UUID machine identifier for request tracking
@@ -107,6 +111,59 @@ type Account struct {
 	LastUsed     int64   `json:"lastUsed,omitempty"`     // Last request timestamp
 	TotalTokens  int     `json:"totalTokens,omitempty"`  // Cumulative tokens processed
 	TotalCredits float64 `json:"totalCredits,omitempty"` // Cumulative credits consumed
+}
+
+// IsApiKeyCredential returns true if this account is authenticated via API key.
+// An account is an API-key credential if KiroApiKey is non-empty OR if authMethod
+// is "api_key" or "apikey" (case-insensitive).
+func (a *Account) IsApiKeyCredential() bool {
+	if a.KiroApiKey != "" {
+		return true
+	}
+	method := strings.ToLower(a.AuthMethod)
+	return method == "api_key" || method == "apikey"
+}
+
+// EffectiveAuthRegion returns the effective auth region for this account,
+// resolved using the fallback chain:
+// account.authRegion > account.region > global authRegion > global region > "us-east-1"
+func (a *Account) EffectiveAuthRegion() string {
+	if a.AuthRegion != "" {
+		return a.AuthRegion
+	}
+	if a.Region != "" {
+		return a.Region
+	}
+	authRegion := GetGlobalAuthRegion()
+	if authRegion != "us-east-1" {
+		return authRegion
+	}
+	globalRegion := GetGlobalRegion()
+	if globalRegion != "us-east-1" {
+		return globalRegion
+	}
+	return "us-east-1"
+}
+
+// EffectiveApiRegion returns the effective API region for this account,
+// resolved using the fallback chain:
+// account.apiRegion > account.region > global apiRegion > global region > "us-east-1"
+func (a *Account) EffectiveApiRegion() string {
+	if a.ApiRegion != "" {
+		return a.ApiRegion
+	}
+	if a.Region != "" {
+		return a.Region
+	}
+	apiRegion := GetGlobalApiRegion()
+	if apiRegion != "us-east-1" {
+		return apiRegion
+	}
+	globalRegion := GetGlobalRegion()
+	if globalRegion != "us-east-1" {
+		return globalRegion
+	}
+	return "us-east-1"
 }
 
 // PromptFilterRule defines a single custom prompt sanitization rule.
@@ -169,10 +226,23 @@ type Config struct {
 	// Defaults to true. Set to false to only use the preferred endpoint.
 	EndpointFallback *bool `json:"endpointFallback,omitempty"`
 
+	// Global default regions. Used as a fallback when an account does not
+	// specify its own region. All default to "us-east-1" when empty.
+	Region     string `json:"region,omitempty"`     // Default region for both auth and API
+	AuthRegion string `json:"authRegion,omitempty"` // Default region for token refresh endpoints
+	ApiRegion  string `json:"apiRegion,omitempty"`  // Default region for API request hosts
+
 	// AllowOverUsage allows accounts to continue serving requests even when their
 	// usage quota has been exhausted. When enabled, the pool will not skip accounts
 	// solely because usageCurrent >= usageLimit.
 	AllowOverUsage bool `json:"allowOverUsage,omitempty"`
+
+	// MaxPayloadBytes is the upper bound for the serialized Kiro request body.
+	// Requests above this are truncated (oldest history dropped) before dispatch.
+	// 0 means "use DefaultMaxPayloadBytes". Read per-request, so changes apply
+	// at runtime without a restart. Do not set >~2.15MB: AWS rejects oversized
+	// bodies with 400 CONTENT_LENGTH_EXCEEDS_THRESHOLD and there is no shrink-retry.
+	MaxPayloadBytes int `json:"maxPayloadBytes,omitempty"`
 
 	// Proxy configuration: optional outbound proxy for Kiro API requests
 	// Format: "socks5://host:port", "socks5://user:pass@host:port",
@@ -395,6 +465,36 @@ func GetHost() string {
 		return "127.0.0.1"
 	}
 	return cfg.Host
+}
+
+// GetGlobalRegion returns the global default region. Defaults to "us-east-1".
+func GetGlobalRegion() string {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil || cfg.Region == "" {
+		return "us-east-1"
+	}
+	return cfg.Region
+}
+
+// GetGlobalAuthRegion returns the global default auth region. Defaults to "us-east-1".
+func GetGlobalAuthRegion() string {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil || cfg.AuthRegion == "" {
+		return "us-east-1"
+	}
+	return cfg.AuthRegion
+}
+
+// GetGlobalApiRegion returns the global default API region. Defaults to "us-east-1".
+func GetGlobalApiRegion() string {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil || cfg.ApiRegion == "" {
+		return "us-east-1"
+	}
+	return cfg.ApiRegion
 }
 
 func GetAccounts() []Account {
@@ -834,6 +934,30 @@ func UpdateAllowOverUsage(allow bool) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
 	cfg.AllowOverUsage = allow
+	return Save()
+}
+
+// DefaultMaxPayloadBytes is the serialized-request byte cap used when the setting
+// is unset (0). 2,000,000 sits safely below the ~2.15MB AWS upstream ceiling while
+// leaving room for headers and serialization overhead.
+const DefaultMaxPayloadBytes = 2_000_000
+
+// GetMaxPayloadBytes returns the configured request byte cap, falling back to
+// DefaultMaxPayloadBytes when unset or non-positive.
+func GetMaxPayloadBytes() int {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil || cfg.MaxPayloadBytes <= 0 {
+		return DefaultMaxPayloadBytes
+	}
+	return cfg.MaxPayloadBytes
+}
+
+// UpdateMaxPayloadBytes sets the request byte cap and persists the change.
+func UpdateMaxPayloadBytes(n int) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	cfg.MaxPayloadBytes = n
 	return Save()
 }
 

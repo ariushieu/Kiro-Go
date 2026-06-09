@@ -1420,6 +1420,7 @@
     const d = await res.json();
     $('requireApiKey').checked = d.requireApiKey;
     $('allowOverUsage').checked = d.allowOverUsage || false;
+    $('maxPayloadBytes').value = String(d.maxPayloadBytes || 2000000);
     await Promise.all([loadThinkingConfig(), loadEndpointConfig(), loadProxyConfig(), loadPromptFilter(), loadApiKeys()]);
     refreshCustomSelects();
   }
@@ -1503,6 +1504,53 @@
     if (d.success) toast(t('settings.proxySaved'), 'success');
     else toast(t('common.saveFailed') + ': ' + (d.error || ''), 'error');
   }
+  async function importProxies() {
+    const raw = $('proxyImportList').value.trim();
+    if (!raw) { toast(t('proxyImport.listRequired'), 'warning'); return; }
+    const autoTest = $('proxyImportAutoTest').checked;
+    const dryRun = $('proxyImportDryRun').checked;
+    const btn = $('proxyImportBtn');
+    btn.disabled = true;
+    const dismiss = toast(t('proxyImport.processing'), 'info', { duration: 0 });
+    try {
+      const res = await api('/proxy/import', {
+        method: 'POST',
+        body: JSON.stringify({ proxies: raw, autoTest, dryRun })
+      });
+      const d = await res.json();
+      dismiss();
+      if (!d.success) {
+        toast(t('common.failed') + ': ' + (d.error || ''), 'error');
+        return;
+      }
+      renderProxyImportResults(d);
+      toast(t('proxyImport.summary', d.assigned || 0, d.reachable || 0, d.total || 0), d.reachable < d.total ? 'warning' : 'success');
+      loadAccounts();
+    } catch (e) {
+      dismiss();
+      toast(t('common.failed'), 'error');
+    } finally {
+      btn.disabled = false;
+    }
+  }
+  function renderProxyImportResults(d) {
+    const box = $('proxyImportResults');
+    const rows = (d.results || []).map(r => {
+      let status, cls;
+      if (r.error) { status = '✗ ' + r.error; cls = 'error-text'; }
+      else if (r.tested && !r.testPassed) { status = '⚠ ' + t('proxyImport.testFailed'); cls = 'warning-text'; }
+      else if (r.tested && r.testPassed) { status = '✓ ' + t('proxyImport.testOk'); cls = 'success-text'; }
+      else if (r.assigned) { status = '✓ ' + t('proxyImport.assigned'); cls = 'success-text'; }
+      else if (r.reachable) { status = '✓ ' + t('proxyImport.reachable'); cls = 'success-text'; }
+      else { status = '✗'; cls = 'error-text'; }
+      const target = r.assignedEmail ? ' → ' + escapeHtml(r.assignedEmail) : '';
+      const scheme = r.scheme ? '[' + escapeHtml(r.scheme) + '] ' : '';
+      const label = escapeHtml(r.maskedUrl || r.raw);
+      return '<div class="test-log-line"><span class="font-mono text-xs">' + scheme + label + target +
+        '</span> <span class="' + cls + '">' + escapeHtml(status) + '</span></div>';
+    }).join('');
+    box.innerHTML = rows || '<p class="help-block">' + escapeHtml(t('proxyImport.noResults')) + '</p>';
+  }
   async function saveRequireApiKey() {
     try {
       const requireApiKey = $('requireApiKey').checked;
@@ -1525,7 +1573,8 @@
   }
   async function saveOverUsageConfig() {
     const allowOverUsage = $('allowOverUsage').checked;
-    await api('/settings', { method: 'POST', body: JSON.stringify({ allowOverUsage }) });
+    const maxPayloadBytes = parseInt($('maxPayloadBytes').value, 10);
+    await api('/settings', { method: 'POST', body: JSON.stringify({ allowOverUsage, maxPayloadBytes }) });
     toast(t('settings.overUsageSaved'), 'success');
   }
   async function changePassword() {
@@ -1931,6 +1980,8 @@
     else if (type === 'local') modalLocal(title, body);
     else if (type === 'credentials') modalCredentials(title, body);
     else if (type === 'cookie') modalCookie(title, body);
+    else if (type === 'apikey') modalApiKey(title, body);
+    else if (type === 'apikeybatch') modalApiKeyBatch(title, body);
     if (!modal.classList.contains('active')) openDialog('addModal');
     enhanceCustomSelects(body);
   }
@@ -1950,6 +2001,8 @@
       methodCard('local', t('modal.localTitle'), t('modal.localDesc')) +
       methodCard('credentials', t('modal.credentialsTitle'), t('modal.credentialsDesc')) +
       methodCard('cookie', t('modal.cookieTitle'), t('modal.cookieDesc')) +
+      methodCard('apikey', t('modal.apikeyTitle'), t('modal.apikeyDesc')) +
+      methodCard('apikeybatch', t('modal.apikeyBatchTitle'), t('modal.apikeyBatchDesc')) +
       '</div>' +
       '<div class="modal-footer"><button class="btn btn-secondary" data-close-add="1" type="button">' + escapeHtml(t('common.cancel')) + '</button></div>';
   }
@@ -2106,6 +2159,40 @@
       '</div>';
     $('importCookieBtn').addEventListener('click', importFromCookie);
   }
+  function modalApiKey(title, body) {
+    title.textContent = t('apikey.title');
+    body.innerHTML =
+      '<p class="help-block">' + escapeHtml(t('apikey.desc')) + '</p>' +
+      '<div class="form-group"><label>' + escapeHtml(t('apikey.keyLabel')) + '</label>' +
+      '<input type="password" id="apikeyInput" placeholder="' + escapeAttr(t('apikey.keyPlaceholder')) + '" /></div>' +
+      '<div class="form-group"><label>' + escapeHtml(t('apikey.nickname')) + '</label>' +
+      '<input type="text" id="apikeyNickname" placeholder="' + escapeAttr(t('apikey.nicknamePlaceholder')) + '" /></div>' +
+      '<div class="form-group"><label>' + escapeHtml(t('apikey.authRegion')) + '</label>' +
+      '<input type="text" id="apikeyAuthRegion" value="us-east-1" /></div>' +
+      '<div class="form-group"><label>' + escapeHtml(t('apikey.apiRegion')) + '</label>' +
+      '<input type="text" id="apikeyApiRegion" value="us-east-1" /></div>' +
+      '<div class="modal-footer">' +
+      '<button class="btn btn-secondary" data-modal-goto="add" type="button">' + escapeHtml(t('common.back')) + '</button>' +
+      '<button class="btn btn-primary" id="importApikeyBtn" type="button">' + escapeHtml(t('common.add')) + '</button>' +
+      '</div>';
+    $('importApikeyBtn').addEventListener('click', importApiKey);
+  }
+  function modalApiKeyBatch(title, body) {
+    title.textContent = t('apikeyBatch.title');
+    body.innerHTML =
+      '<p class="help-block">' + escapeHtml(t('apikeyBatch.desc')) + '</p>' +
+      '<div class="form-group"><label>' + escapeHtml(t('apikeyBatch.listLabel')) + '</label>' +
+      '<textarea id="apikeyBatchList" class="font-mono" rows="8" placeholder="' + escapeAttr(t('apikeyBatch.listPlaceholder')) + '"></textarea>' +
+      '<p class="help-block">' + escapeHtml(t('apikeyBatch.listHint')) + '</p></div>' +
+      '<div class="form-group"><label>' + escapeHtml(t('apikey.apiRegion')) + '</label>' +
+      '<input type="text" id="apikeyBatchRegion" value="us-east-1" /></div>' +
+      '<div class="modal-footer">' +
+      '<button class="btn btn-secondary" data-modal-goto="add" type="button">' + escapeHtml(t('common.back')) + '</button>' +
+      '<button class="btn btn-primary" id="importApikeyBatchBtn" type="button">' + escapeHtml(t('apikeyBatch.import')) + '</button>' +
+      '</div>' +
+      '<div id="apikeyBatchResults" class="mt-3"></div>';
+    $('importApikeyBatchBtn').addEventListener('click', importApiKeysBatch);
+  }
   function updateLocalFields() {
     const p = $('localProvider').value;
     $('localClientGroup').classList.toggle('hidden', p === 'Google' || p === 'Github');
@@ -2254,6 +2341,79 @@
       toastPrimary(t('cookie.importSuccess') + ': ' + (d.account?.email || d.account?.id));
       autoRefreshNewAccount(d.account?.id);
     } else toastError(t('common.failed') + ': ' + (d.error || ''));
+  }
+  async function importApiKey() {
+    const key = $('apikeyInput').value.trim();
+    if (!key) return toastWarning(t('apikey.keyRequired'));
+    const payload = {
+      authMethod: 'api_key',
+      kiroApiKey: key,
+      nickname: $('apikeyNickname').value.trim() || '',
+      region: $('apikeyApiRegion').value.trim() || 'us-east-1',
+      authRegion: $('apikeyAuthRegion').value.trim() || 'us-east-1',
+      apiRegion: $('apikeyApiRegion').value.trim() || 'us-east-1',
+      enabled: true
+    };
+    const res = await api('/auth/credentials', { method: 'POST', body: JSON.stringify(payload) });
+    const d = await res.json();
+    if (d.success) {
+      closeModal(); loadAccounts(); loadStats();
+      toastPrimary(t('apikey.success') + ': ' + (d.account?.email || d.account?.id));
+      autoRefreshNewAccount(d.account?.id);
+    } else toastError(t('common.failed') + ': ' + (d.error || ''));
+  }
+  async function importApiKeysBatch() {
+    const raw = $('apikeyBatchList').value.trim();
+    if (!raw) { toastWarning(t('apikeyBatch.listRequired')); return; }
+    const region = $('apikeyBatchRegion').value.trim() || 'us-east-1';
+    const btn = $('importApikeyBatchBtn');
+    btn.disabled = true;
+    const dismiss = toast(t('apikeyBatch.processing'), 'info', { duration: 0 });
+    try {
+      const res = await api('/auth/apikeys-batch', {
+        method: 'POST',
+        body: JSON.stringify({ keys: raw, region, authRegion: region, apiRegion: region })
+      });
+      const d = await res.json();
+      dismiss();
+      if (!d.success) {
+        toast(t('common.failed') + ': ' + (d.error || ''), 'error');
+        return;
+      }
+      renderApiKeyBatchResults(d);
+      toast(t('apikeyBatch.summary', d.imported || 0, d.skipped || 0, d.total || 0),
+        (d.imported > 0) ? 'success' : 'warning');
+      loadAccounts(); loadStats();
+    } catch (e) {
+      dismiss();
+      toast(t('common.failed'), 'error');
+    } finally {
+      btn.disabled = false;
+    }
+  }
+  function renderApiKeyBatchResults(d) {
+    const box = $('apikeyBatchResults');
+    if (!box) return;
+    const rows = (d.results || []).map(r => {
+      let status, cls;
+      if (r.skipped) { status = '⊘ ' + t('apikeyBatch.skipped'); cls = 'warning-text'; }
+      else if (r.error && !r.imported) { status = '✗ ' + r.error; cls = 'error-text'; }
+      else if (r.imported) {
+        const credit = r.infoOk
+          ? (formatCredit(r.usageCurrent) + ' / ' + formatCredit(r.usageLimit))
+          : t('apikeyBatch.infoUnavailable');
+        const email = r.email ? ' ' + escapeHtml(r.email) : '';
+        status = '✓ ' + escapeHtml(credit) + email;
+        cls = 'success-text';
+      } else { status = '✗'; cls = 'error-text'; }
+      return '<div class="test-log-line"><span class="font-mono text-xs">' + escapeHtml(r.maskedKey || '') +
+        '</span> <span class="' + cls + '">' + status + '</span></div>';
+    }).join('');
+    box.innerHTML = rows || '<p class="help-block">' + escapeHtml(t('apikeyBatch.noResults')) + '</p>';
+  }
+  function formatCredit(n) {
+    if (typeof n !== 'number' || !isFinite(n)) return '0';
+    return Number.isInteger(n) ? String(n) : n.toFixed(1);
   }
   async function importSsoToken() {
     const res = await api('/auth/sso-token', {
@@ -2679,6 +2839,7 @@
     $('changePasswordBtn').addEventListener('click', changePassword);
     $('proxyType').addEventListener('change', onProxyTypeChange);
     $('saveProxyBtn').addEventListener('click', saveProxyConfig);
+    $('proxyImportBtn').addEventListener('click', importProxies);
     $('resetStatsBtn').addEventListener('click', resetStats);
     bindApiKeyEvents();
   }

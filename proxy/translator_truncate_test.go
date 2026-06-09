@@ -4,12 +4,14 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"kiro-go/config"
 )
 
 // TestClaudeToKiroTruncatesOversizedHistory builds a conversation whose history
 // far exceeds the upstream input limit and verifies the converted payload is
-// trimmed below maxPayloadBytes, that a truncation placeholder is inserted, and
-// that the current message is preserved.
+// trimmed below the configured maxPayloadBytes, that a truncation placeholder is
+// inserted, and that the current message is preserved.
 func TestClaudeToKiroTruncatesOversizedHistory(t *testing.T) {
 	// ~2KB chunk repeated across many turns to blow past the byte limit.
 	big := strings.Repeat("lorem ipsum dolor sit amet ", 80) // ~2.1KB
@@ -17,7 +19,10 @@ func TestClaudeToKiroTruncatesOversizedHistory(t *testing.T) {
 	msgs := []ClaudeMessage{
 		{Role: "user", Content: "start the long task"},
 	}
-	for i := 0; i < 800; i++ {
+	// ~1200 turns × 2 msgs × ~2.1KB ≈ 5MB, comfortably above any configured
+	// maxPayloadBytes preset (max 4MB) so truncation is exercised regardless of
+	// the exact cap value.
+	for i := 0; i < 1200; i++ {
 		msgs = append(msgs,
 			ClaudeMessage{Role: "assistant", Content: "step result: " + big},
 			ClaudeMessage{Role: "user", Content: "next: " + big},
@@ -37,8 +42,9 @@ func TestClaudeToKiroTruncatesOversizedHistory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal failed: %v", err)
 	}
-	if len(raw) > maxPayloadBytes {
-		t.Fatalf("payload size %d exceeds limit %d after truncation", len(raw), maxPayloadBytes)
+	limit := config.GetMaxPayloadBytes()
+	if len(raw) > limit {
+		t.Fatalf("payload size %d exceeds limit %d after truncation", len(raw), limit)
 	}
 
 	// The current message must be preserved.

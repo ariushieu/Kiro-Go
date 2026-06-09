@@ -2108,6 +2108,8 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiImportSsoToken(w, r)
 	case path == "/auth/credentials" && r.Method == "POST":
 		h.apiImportCredentials(w, r)
+	case path == "/auth/apikeys-batch" && r.Method == "POST":
+		h.apiImportApiKeys(w, r)
 	case path == "/status" && r.Method == "GET":
 		h.apiGetStatus(w, r)
 	case path == "/settings" && r.Method == "GET":
@@ -2132,6 +2134,8 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiGetProxy(w, r)
 	case path == "/proxy" && r.Method == "POST":
 		h.apiUpdateProxy(w, r)
+	case path == "/proxy/import" && r.Method == "POST":
+		h.apiImportProxies(w, r)
 	case path == "/prompt-filter" && r.Method == "GET":
 		h.apiGetPromptFilter(w, r)
 	case path == "/prompt-filter" && r.Method == "POST":
@@ -2236,6 +2240,21 @@ func (h *Handler) apiAddAccount(w http.ResponseWriter, r *http.Request) {
 		account.Region = "us-east-1"
 	}
 
+	// Handle API-key credential creation
+	if account.KiroApiKey != "" || strings.EqualFold(account.AuthMethod, "api_key") || strings.EqualFold(account.AuthMethod, "apikey") {
+		// Reject empty API key
+		if account.KiroApiKey == "" {
+			w.WriteHeader(400)
+			json.NewEncoder(w).Encode(map[string]string{"error": "kiroApiKey is required"})
+			return
+		}
+		// Normalize authMethod and set expiry
+		account.AuthMethod = "api_key"
+		account.ExpiresAt = 0
+		account.AccessToken = account.KiroApiKey // Set accessToken to kiroApiKey for pool compatibility
+		// Don't call RefreshToken for API-key accounts
+	}
+
 	if err := config.AddAccount(account); err != nil {
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
@@ -2243,8 +2262,8 @@ func (h *Handler) apiAddAccount(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.pool.Reload()
-	// 新账号若已启用且有 token，立即拉取并缓存模型列表
-	if account.Enabled && account.AccessToken != "" {
+	// 新账号若已启用且有 token（或是 API-key 账号），立即拉取并缓存模型列表
+	if account.Enabled && (account.AccessToken != "" || account.IsApiKeyCredential()) {
 		go func(acc config.Account) {
 			if err := h.fetchAndCacheAccountModels(&acc); err != nil {
 				logger.Warnf("[ModelsCache] Auto-refresh failed for new account %s: %v", acc.Email, err)
@@ -2784,6 +2803,10 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		AuthMethod   string `json:"authMethod"`
 		Provider     string `json:"provider"`
 		Region       string `json:"region"`
+		AuthRegion   string `json:"authRegion"`
+		ApiRegion    string `json:"apiRegion"`
+		KiroApiKey   string `json:"kiroApiKey"`
+		Nickname     string `json:"nickname"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
@@ -2791,15 +2814,74 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 设置默认值
+	if req.Region == "" {
+		req.Region = "us-east-1"
+	}
+
+	// Handle API-key credential import (no refresh token required)
+	if req.KiroApiKey != "" || strings.EqualFold(req.AuthMethod, "api_key") || strings.EqualFold(req.AuthMethod, "apikey") {
+		if req.KiroApiKey == "" {
+			w.WriteHeader(400)
+			json.NewEncoder(w).Encode(map[string]string{"error": "kiroApiKey is required"})
+			return
+		}
+
+		account := config.Account{
+			ID:          auth.GenerateAccountID(),
+			Nickname:    req.Nickname,
+			KiroApiKey:  req.KiroApiKey,
+			AccessToken: req.KiroApiKey, // mirror for pool compatibility
+			AuthMethod:  "api_key",
+			Region:      req.Region,
+			AuthRegion:  req.AuthRegion,
+			ApiRegion:   req.ApiRegion,
+			ExpiresAt:   0,
+			Enabled:     true,
+			MachineId:   config.GenerateMachineId(),
+		}
+
+		// Best-effort: fetch account info to populate email/usage.
+		if info, infoErr := RefreshAccountInfo(&account); infoErr == nil && info != nil {
+			account.Email = info.Email
+			account.UserId = info.UserId
+			account.SubscriptionType = info.SubscriptionType
+			account.SubscriptionTitle = info.SubscriptionTitle
+			account.DaysRemaining = info.DaysRemaining
+			account.UsageCurrent = info.UsageCurrent
+			account.UsageLimit = info.UsageLimit
+			account.UsagePercent = info.UsagePercent
+			account.NextResetDate = info.NextResetDate
+			account.LastRefresh = info.LastRefresh
+		}
+
+		if err := config.AddAccount(account); err != nil {
+			w.WriteHeader(500)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+
+		h.pool.Reload()
+		go func(acc config.Account) {
+			if err := h.fetchAndCacheAccountModels(&acc); err != nil {
+				logger.Warnf("[ModelsCache] Auto-refresh failed for new api_key account %s: %v", acc.Email, err)
+			}
+		}(account)
+
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"account": map[string]interface{}{
+				"id":    account.ID,
+				"email": account.Email,
+			},
+		})
+		return
+	}
+
 	if req.RefreshToken == "" {
 		w.WriteHeader(400)
 		json.NewEncoder(w).Encode(map[string]string{"error": "refreshToken is required"})
 		return
-	}
-
-	// 设置默认值
-	if req.Region == "" {
-		req.Region = "us-east-1"
 	}
 	if req.AuthMethod == "" {
 		if req.ClientID != "" {
@@ -2898,6 +2980,7 @@ func (h *Handler) apiGetSettings(w http.ResponseWriter, r *http.Request) {
 		"port":           config.GetPort(),
 		"host":           config.GetHost(),
 		"allowOverUsage": config.GetAllowOverUsage(),
+		"maxPayloadBytes": config.GetMaxPayloadBytes(),
 	})
 }
 
@@ -2946,10 +3029,11 @@ func (h *Handler) apiUpdatePromptFilter(w http.ResponseWriter, r *http.Request) 
 
 func (h *Handler) apiUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ApiKey         *string `json:"apiKey,omitempty"`
-		RequireApiKey  *bool   `json:"requireApiKey,omitempty"`
-		Password       string  `json:"password,omitempty"`
-		AllowOverUsage *bool   `json:"allowOverUsage,omitempty"`
+		ApiKey          *string `json:"apiKey,omitempty"`
+		RequireApiKey   *bool   `json:"requireApiKey,omitempty"`
+		Password        string  `json:"password,omitempty"`
+		AllowOverUsage  *bool   `json:"allowOverUsage,omitempty"`
+		MaxPayloadBytes *int    `json:"maxPayloadBytes,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
@@ -2972,6 +3056,16 @@ func (h *Handler) apiUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		// Rebuild the pool so over-quota accounts are re-included or dropped immediately.
 		h.pool.Reload()
+	}
+
+	// maxPayloadBytes is read per-request by truncatePayloadToLimit, so the new
+	// value takes effect on the next request — no restart or pool reload needed.
+	if req.MaxPayloadBytes != nil {
+		if err := config.UpdateMaxPayloadBytes(*req.MaxPayloadBytes); err != nil {
+			w.WriteHeader(500)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
 	}
 
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})

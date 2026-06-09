@@ -342,15 +342,31 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 		// Update the origin field for the selected endpoint.
 		payload.ConversationState.CurrentMessage.UserInputMessage.Origin = ep.Origin
 
+		// Build region-specific URL from the account's effective API region.
+		// Non-AWS hosts (e.g. test/mock servers injected via kiroEndpoints) are
+		// used verbatim so the region rewrite only applies to real AWS endpoints.
+		endpointURL := ep.URL
+		if parsed, perr := url.Parse(ep.URL); perr == nil && strings.HasSuffix(parsed.Hostname(), ".amazonaws.com") {
+			apiRegion := account.EffectiveApiRegion()
+			switch ep.Name {
+			case "CodeWhisperer":
+				endpointURL = fmt.Sprintf("https://codewhisperer.%s.amazonaws.com/generateAssistantResponse", apiRegion)
+			case "AmazonQ":
+				endpointURL = fmt.Sprintf("https://q.%s.amazonaws.com/generateAssistantResponse", apiRegion)
+			default: // Kiro IDE
+				endpointURL = fmt.Sprintf("https://q.%s.amazonaws.com/generateAssistantResponse", apiRegion)
+			}
+		}
+
 		reqBody, _ := json.Marshal(payload)
-		req, err := http.NewRequest("POST", ep.URL, bytes.NewReader(reqBody))
+		req, err := http.NewRequest("POST", endpointURL, bytes.NewReader(reqBody))
 		if err != nil {
 			lastErr = err
 			continue
 		}
 
 		host := ""
-		if parsedURL, parseErr := url.Parse(ep.URL); parseErr == nil {
+		if parsedURL, parseErr := url.Parse(endpointURL); parseErr == nil {
 			host = parsedURL.Host
 		}
 		headerValues := buildStreamingHeaderValues(account, host)
