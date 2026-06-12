@@ -2454,17 +2454,25 @@
   }
   function pollBuilderIdAuth(interval) {
     builderIdPollTimer = setTimeout(async () => {
-      const res = await api('/auth/builderid/poll', { method: 'POST', body: JSON.stringify({ sessionId: builderIdSession }) });
-      const d = await res.json();
-      if (d.completed) {
-        closeModal(); loadAccounts(); loadStats();
-        toastPrimary(t('builderid.success') + ': ' + (d.account?.email || d.account?.id));
-        autoRefreshNewAccount(d.account?.id);
-      } else if (d.success && !d.completed) {
-        $('builderIdStatus').textContent = t('builderid.waiting');
-        pollBuilderIdAuth(d.interval || interval);
-      } else {
-        toastError(t('common.failed') + ': ' + (d.error || ''));
+      try {
+        const res = await api('/auth/builderid/poll', { method: 'POST', body: JSON.stringify({ sessionId: builderIdSession }) });
+        const d = await res.json();
+        if (d.completed) {
+          closeModal(); loadAccounts(); loadStats();
+          toastPrimary(t('builderid.success') + ': ' + (d.account?.email || d.account?.id));
+          autoRefreshNewAccount(d.account?.id);
+        } else if (d.success && !d.completed) {
+          $('builderIdStatus').textContent = t('builderid.waiting');
+          pollBuilderIdAuth(d.interval || interval);
+        } else {
+          toastError(t('common.failed') + ': ' + (d.error || ''));
+          cancelBuilderIdLogin();
+        }
+      } catch (e) {
+        // Server restarted / network dropped mid-poll: surface it and reset the
+        // modal instead of leaving the poll loop dead and the UI stuck on
+        // "waiting" with no way out.
+        toastError(t('login.connectError'));
         cancelBuilderIdLogin();
       }
     }, interval * 1000);
@@ -2475,36 +2483,42 @@
     showModal('add');
   }
   async function startIamSso() {
-    if (iamSession) {
-      const res = await api('/auth/iam-sso/complete', {
-        method: 'POST', body: JSON.stringify({
-          sessionId: iamSession, callbackUrl: $('iamCallback').value
-        })
-      });
-      const d = await res.json();
-      if (d.success) {
-        closeModal(); loadAccounts(); loadStats();
-        toastPrimary(t('builderid.success') + ': ' + (d.account?.email || d.account?.id));
-        autoRefreshNewAccount(d.account?.id);
-      } else toastError(t('common.failed') + ': ' + (d.error || ''));
-    } else {
-      const res = await api('/auth/iam-sso/start', {
-        method: 'POST', body: JSON.stringify({
-          startUrl: $('iamStartUrl').value, region: $('iamRegion').value
-        })
-      });
-      const d = await res.json();
-      if (d.authorizeUrl) {
-        iamSession = d.sessionId;
-        $('iamAuthUrl').textContent = d.authorizeUrl;
-        $('iamStep2').classList.remove('hidden');
-        $('iamBtn').textContent = t('iam.complete');
-        $('iamOpenBtn').addEventListener('click', () => window.open($('iamAuthUrl').textContent, '_blank'));
-        $('iamCopyBtn').addEventListener('click', async () => {
-          await copyText($('iamAuthUrl').textContent);
-          toast(t('common.copied'), 'primary');
+    // Wrap the whole flow: a dropped connection mid-request must surface an
+    // error and re-enable the button, not throw uncaught and leave it stuck.
+    try {
+      if (iamSession) {
+        const res = await api('/auth/iam-sso/complete', {
+          method: 'POST', body: JSON.stringify({
+            sessionId: iamSession, callbackUrl: $('iamCallback').value
+          })
         });
-      } else toastError(t('common.failed') + ': ' + (d.error || ''));
+        const d = await res.json();
+        if (d.success) {
+          closeModal(); loadAccounts(); loadStats();
+          toastPrimary(t('builderid.success') + ': ' + (d.account?.email || d.account?.id));
+          autoRefreshNewAccount(d.account?.id);
+        } else toastError(t('common.failed') + ': ' + (d.error || ''));
+      } else {
+        const res = await api('/auth/iam-sso/start', {
+          method: 'POST', body: JSON.stringify({
+            startUrl: $('iamStartUrl').value, region: $('iamRegion').value
+          })
+        });
+        const d = await res.json();
+        if (d.authorizeUrl) {
+          iamSession = d.sessionId;
+          $('iamAuthUrl').textContent = d.authorizeUrl;
+          $('iamStep2').classList.remove('hidden');
+          $('iamBtn').textContent = t('iam.complete');
+          $('iamOpenBtn').addEventListener('click', () => window.open($('iamAuthUrl').textContent, '_blank'));
+          $('iamCopyBtn').addEventListener('click', async () => {
+            await copyText($('iamAuthUrl').textContent);
+            toast(t('common.copied'), 'primary');
+          });
+        } else toastError(t('common.failed') + ': ' + (d.error || ''));
+      }
+    } catch (e) {
+      toastError(t('login.connectError'));
     }
   }
   async function autoRefreshNewAccount(id) {

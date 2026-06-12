@@ -2931,6 +2931,7 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 	account := config.Account{
 		ID:           auth.GenerateAccountID(),
 		Email:        email,
+		Nickname:     req.Nickname,
 		AccessToken:  accessToken,
 		RefreshToken: req.RefreshToken,
 		ClientID:     req.ClientID,
