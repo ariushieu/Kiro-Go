@@ -2944,6 +2944,10 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		ApiRegion    string `json:"apiRegion"`
 		KiroApiKey   string `json:"kiroApiKey"`
 		Nickname     string `json:"nickname"`
+		IssuerURL    string `json:"issuerUrl"`
+		IdPClientID  string `json:"idpClientId"`
+		Scopes       string `json:"scopes"`
+		LoginHint    string `json:"loginHint"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
@@ -3033,6 +3037,8 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		req.AuthMethod = "idc"
 	case "social", "google", "github":
 		req.AuthMethod = "social"
+	case "external_idp", "externalidp":
+		req.AuthMethod = "external_idp"
 	default:
 		if req.ClientID != "" && req.ClientSecret != "" {
 			req.AuthMethod = "idc"
@@ -3050,6 +3056,9 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		ClientSecret: req.ClientSecret,
 		AuthMethod:   req.AuthMethod,
 		Region:       req.Region,
+		IssuerURL:    req.IssuerURL,
+		IdPClientID:  req.IdPClientID,
+		Scopes:       req.Scopes,
 	}
 	accessToken, newRefreshToken, expiresAt, newProfileArn, err := auth.RefreshToken(tempAccount)
 	if err != nil {
@@ -3076,10 +3085,16 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		AuthMethod:   req.AuthMethod,
 		Provider:     req.Provider,
 		Region:       req.Region,
+		AuthRegion:   req.AuthRegion,
+		ApiRegion:    req.ApiRegion,
 		ExpiresAt:    expiresAt,
 		Enabled:      true,
 		MachineId:    config.GenerateMachineId(),
 		ProfileArn:   newProfileArn,
+		IssuerURL:    req.IssuerURL,
+		IdPClientID:  req.IdPClientID,
+		Scopes:       req.Scopes,
+		LoginHint:    req.LoginHint,
 	}
 
 	if err := config.AddAccount(account); err != nil {
@@ -3725,6 +3740,10 @@ func (h *Handler) apiExportAccounts(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt    int64  `json:"expiresAt"`
 		AuthMethod   string `json:"authMethod,omitempty"`
 		Provider     string `json:"provider,omitempty"`
+		IssuerURL    string `json:"issuerUrl,omitempty"`
+		IdPClientID  string `json:"idpClientId,omitempty"`
+		Scopes       string `json:"scopes,omitempty"`
+		LoginHint    string `json:"loginHint,omitempty"`
 	}
 
 	type ExportSubscription struct {
@@ -3809,6 +3828,10 @@ func (h *Handler) apiExportAccounts(w http.ResponseWriter, r *http.Request) {
 				ExpiresAt:    a.ExpiresAt * 1000, // 转为毫秒时间戳
 				AuthMethod:   authMethod,
 				Provider:     a.Provider,
+					IssuerURL:    a.IssuerURL,
+					IdPClientID:  a.IdPClientID,
+					Scopes:       a.Scopes,
+					LoginHint:    a.LoginHint,
 			},
 			Subscription: ExportSubscription{
 				Type:  subType,
