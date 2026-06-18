@@ -2347,7 +2347,12 @@
             clientSecret: c.clientSecret || a.clientSecret,
             region: c.region || a.region,
             authMethod: c.authMethod || a.authMethod,
-            provider: c.provider || a.provider || a.idp
+            provider: c.provider || a.provider || a.idp,
+            issuerUrl: c.issuerUrl || a.issuerUrl,
+            idpClientId: c.idpClientId || a.idpClientId,
+            scopes: c.scopes || a.scopes,
+            loginHint: c.loginHint || a.loginHint,
+            accessToken: c.accessToken || a.accessToken,
           };
         });
       } else {
@@ -2371,8 +2376,8 @@
       if (!item.refreshToken) { fail++; continue; }
       let authMethod = item.authMethod || '';
       if (item.clientId && item.clientSecret) authMethod = 'idc';
-      else if (!authMethod || authMethod === 'social') authMethod = 'social';
-      else authMethod = authMethod.toLowerCase() === 'idc' ? 'idc' : 'social';
+      else if (authMethod === "external_idp" || authMethod === "externalidp") authMethod = "external_idp"; else if (!authMethod || authMethod === "social") authMethod = "social";
+      else if (authMethod.toLowerCase() === "idc") authMethod = "idc"; else authMethod = "social";
       let provider = item.provider || '';
       if (!provider && authMethod === 'social') provider = 'Google';
       if (!provider && authMethod === 'idc') provider = 'BuilderId';
@@ -2382,6 +2387,10 @@
         clientId: item.clientId || '',
         clientSecret: item.clientSecret || '',
         authMethod, provider,
+        issuerUrl: item.issuerUrl || "",
+        idpClientId: item.idpClientId || "",
+        scopes: item.scopes || "",
+        loginHint: item.loginHint || "",
         region: item.region || 'us-east-1'
       };
       try {
