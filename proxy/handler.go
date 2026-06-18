@@ -3070,7 +3070,7 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 			logger.Warnf("[ImportCredentials] Token refresh failed for %s (using provided accessToken): %v", req.AuthMethod, err)
 			accessToken = req.AccessToken
 			newRefreshToken = req.RefreshToken
-			expiresAt = time.Now().Unix() + 3600 // assume 1hr, background will refresh
+			expiresAt = 0 // imported token may be stale; let pool refresh immediately
 			newProfileArn = ""
 		} else {
 			w.WriteHeader(400)

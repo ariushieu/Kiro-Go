@@ -2352,6 +2352,8 @@
             idpClientId: c.idpClientId || a.idpClientId,
             scopes: c.scopes || a.scopes,
             loginHint: c.loginHint || a.loginHint,
+            idpTokenEndpoint: c.idpTokenEndpoint || a.idpTokenEndpoint,
+            expiresAt: c.expiresAt || a.expiresAt,
             accessToken: c.accessToken || a.accessToken,
           };
         });
@@ -2391,6 +2393,7 @@
         idpClientId: item.idpClientId || "",
         scopes: item.scopes || "",
         loginHint: item.loginHint || "",
+        idpTokenEndpoint: item.idpTokenEndpoint || "",
         region: item.region || 'us-east-1'
       };
       try {
