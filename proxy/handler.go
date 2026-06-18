@@ -3063,9 +3063,20 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 	}
 	accessToken, newRefreshToken, expiresAt, newProfileArn, err := auth.RefreshToken(tempAccount)
 	if err != nil {
-		w.WriteHeader(400)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Token refresh failed: " + err.Error()})
-		return
+		// Refresh may fail if token already consumed elsewhere (token rotation).
+		// If import payload includes an accessToken, use it directly and let
+		// background refresh handle renewal later.
+		if req.AccessToken != "" {
+			logger.Warnf("[ImportCredentials] Token refresh failed for %s (using provided accessToken): %v", req.AuthMethod, err)
+			accessToken = req.AccessToken
+			newRefreshToken = req.RefreshToken
+			expiresAt = time.Now().Unix() + 3600 // assume 1hr, background will refresh
+			newProfileArn = ""
+		} else {
+			w.WriteHeader(400)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Token refresh failed: " + err.Error()})
+			return
+		}
 	}
 	if newRefreshToken != "" {
 		req.RefreshToken = newRefreshToken
