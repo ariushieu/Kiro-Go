@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -105,14 +106,22 @@ var kiroLoopbackPortsOverride []int
 // bindKiroLoopback thử bind 127.0.0.1 lần lượt trên từng port trong kiroLoopbackPorts
 // (hoặc kiroLoopbackPortsOverride khi đang test), trả về listener và port đầu tiên bind
 // thành công. Nếu tất cả port đều bận, trả về lỗi rõ ràng.
+//
+// Khi chạy trong Docker, set env LOOPBACK_HOST=0.0.0.0 để loopback server có thể nhận
+// callback từ browser bên ngoài container. Mặc định dùng 127.0.0.1 để bảo mật.
 func bindKiroLoopback() (net.Listener, int, error) {
 	ports := kiroLoopbackPorts
 	if len(kiroLoopbackPortsOverride) > 0 {
 		ports = kiroLoopbackPortsOverride
 	}
 
+	host := "127.0.0.1"
+	if v := strings.TrimSpace(os.Getenv("LOOPBACK_HOST")); v != "" {
+		host = v
+	}
+
 	for _, p := range ports {
-		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", p))
+		ln, err := net.Listen("tcp", fmt.Sprintf("%s:%d", host, p))
 		if err == nil {
 			return ln, ln.Addr().(*net.TCPAddr).Port, nil
 		}
@@ -218,8 +227,12 @@ func StartKiroSsoLogin(loginHint string) (sessionID, authorizeURL string, loopba
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", session.handleLoopback)
 
+	loopbackHost := "127.0.0.1"
+	if v := strings.TrimSpace(os.Getenv("LOOPBACK_HOST")); v != "" {
+		loopbackHost = v
+	}
 	session.LoopbackServer = &http.Server{
-		Addr:    fmt.Sprintf("127.0.0.1:%d", loopbackPort),
+		Addr:    fmt.Sprintf("%s:%d", loopbackHost, loopbackPort),
 		Handler: mux,
 	}
 

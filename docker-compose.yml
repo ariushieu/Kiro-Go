@@ -5,8 +5,19 @@ services:
     build: .
     ports:
       - "8080:8080"
+      - "3128:3128"
+      - "4649:4649"
+      - "6588:6588"
+      - "8008:8008"
+      - "9091:9091"
+      - "49153:49153"
+      - "50153:50153"
+      - "51153:51153"
+      - "52153:52153"
+      - "53153:53153"
     volumes:
       - ./data:/app/data
     environment:
       - CONFIG_PATH=/app/data/config.json
+      - LOOPBACK_HOST=0.0.0.0
     restart: unless-stopped
