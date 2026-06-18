@@ -1,5 +1,5 @@
 {
-  "version": "1.2.1",
+  "version": "1.2.2",
   "changelog": "Kiro Hosted SSO: idempotent Leg-1 callback (copy URL + incognito now works), no auto-open tab.\nKiro Hosted SSO: Leg-1 callback idempotent (copy URL mở ẩn danh đã chạy được), bỏ auto mở tab.",
   "download": "https://github.com/Quorinex/Kiro-Go"
 }

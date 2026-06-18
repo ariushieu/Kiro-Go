@@ -417,53 +417,58 @@ func (s *KiroSsoSession) handleLoopback(w http.ResponseWriter, r *http.Request) 
 	loginOption := query.Get("login_option")
 	issuerURL := query.Get("issuer_url")
 	if strings.EqualFold(loginOption, "external_idp") || issuerURL != "" {
-		// Idempotent Leg-1: lần đầu xử lý descriptor và tính Microsoft authorize URL.
-		// Các lần hit lại với cùng state (vd: user copy URL mở trình duyệt ẩn danh sau
-		// khi tab auto-open đã chạy) re-redirect tới đúng URL đã tính — dùng chung PKCE
-		// pair nên browser nào hoàn tất login cũng đổi được token.
-		s.loopbackMu.Lock()
-		if s.leg2Processing {
-			cachedURL := s.idpAuthorizeURL
-			s.loopbackMu.Unlock()
-			// State phải khớp Leg-1 — chặn stray hit / CSRF.
-			if cachedURL != "" && query.Get("state") == s.State {
-				w.Header().Set("Location", cachedURL)
-				w.WriteHeader(http.StatusFound)
-				return
-			}
-			w.WriteHeader(http.StatusNoContent)
+		reqState := query.Get("state")
+		logger.Infof("[KiroSSO] Leg-1 hit path=%s state_match=%t", path, reqState == s.State)
+
+		// State phải khớp Leg-1 — chặn stray hit / CSRF.
+		if reqState == "" || reqState != s.State {
+			writeSSOErrorPage(w, "Trạng thái không khớp — có thể là tấn công CSRF.")
+			s.pushError(fmt.Errorf("state mismatch on external IdP descriptor"))
 			return
 		}
-		s.leg2Processing = true
-		s.loopbackMu.Unlock()
 
-		s.handleExternalIdpDescriptor(w, r)
+		// Idempotent: tính Microsoft authorize URL đúng MỘT lần (dưới mutex), cache lại.
+		// Mọi hit sau với cùng state — kể cả tab khác hoặc trình duyệt ẩn danh copy URL —
+		// đều nhận lại đúng URL đó (chung PKCE pair), nên browser nào hoàn tất login cũng
+		// đổi được token. Nếu tính fail (vd OIDC discovery lỗi) thì KHÔNG khóa session —
+		// hit sau sẽ thử lại.
+		authorizeURL, err := s.resolveIdpAuthorizeURL(query)
+		if err != nil {
+			logger.Warnf("[KiroSSO] Leg-1 resolve authorize URL failed: %v", err)
+			writeSSOErrorPage(w, fmt.Sprintf("Không thể khởi tạo đăng nhập IdP: %v", err))
+			s.pushError(err)
+			return
+		}
+		w.Header().Set("Location", authorizeURL)
+		w.WriteHeader(http.StatusFound)
 		return
 	}
 
 	// Social/Cognito fallback hoặc stray hit → 204 No Content
+	logger.Debugf("[KiroSSO] Loopback stray hit path=%s → 204", path)
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleExternalIdpDescriptor xử lý redirect từ Kiro portal khi phát hiện external IdP.
+// resolveIdpAuthorizeURL xử lý descriptor từ Kiro portal và trả về Microsoft Entra
+// authorize URL (Leg-2). Idempotent: tính đúng MỘT lần rồi cache; các lần gọi sau với
+// cùng state trả lại URL đã cache (chung PKCE pair) — cho phép user copy URL mở ở
+// trình duyệt/profile khác mà vẫn hoàn tất được login. Caller đã verify state khớp Leg-1.
+//
 // Query params từ portal: login_option=external_idp, issuer_url, client_id, scopes, login_hint.
-func (s *KiroSsoSession) handleExternalIdpDescriptor(w http.ResponseWriter, r *http.Request) {
-	query := r.URL.Query()
-
-	// Validate state (Leg-1 CSRF)
-	state := query.Get("state")
-	if state == "" || state != s.State {
-		writeSSOErrorPage(w, "Trạng thái không khớp — có thể là tấn công CSRF.")
-		s.pushError(fmt.Errorf("state mismatch on external IdP descriptor"))
-		return
+func (s *KiroSsoSession) resolveIdpAuthorizeURL(query url.Values) (string, error) {
+	// Fast path: đã tính rồi → trả lại URL cache (idempotent cho hit lặp / ẩn danh).
+	s.loopbackMu.Lock()
+	if s.idpAuthorizeURL != "" {
+		cached := s.idpAuthorizeURL
+		s.loopbackMu.Unlock()
+		return cached, nil
 	}
+	s.loopbackMu.Unlock()
 
 	// Check for error from portal
 	if errParam := query.Get("error"); errParam != "" {
 		errDesc := query.Get("error_description")
-		writeSSOErrorPage(w, fmt.Sprintf("Kiro portal báo lỗi: %s — %s", errParam, errDesc))
-		s.pushError(fmt.Errorf("kiro portal error: %s — %s", errParam, errDesc))
-		return
+		return "", fmt.Errorf("kiro portal error: %s — %s", errParam, errDesc)
 	}
 
 	issuerURL := query.Get("issuer_url")
@@ -472,61 +477,37 @@ func (s *KiroSsoSession) handleExternalIdpDescriptor(w http.ResponseWriter, r *h
 	loginHint := query.Get("login_hint")
 
 	if clientID == "" {
-		writeSSOErrorPage(w, "Thiếu client_id từ Kiro portal.")
-		s.pushError(fmt.Errorf("missing client_id from portal"))
-		return
+		return "", fmt.Errorf("missing client_id from portal")
 	}
-
 	if issuerURL == "" {
-		writeSSOErrorPage(w, "Thiếu issuer_url từ Kiro portal.")
-		s.pushError(fmt.Errorf("missing issuer_url from portal"))
-		return
+		return "", fmt.Errorf("missing issuer_url from portal")
 	}
 
 	// Validate issuer URL against Microsoft allow-list
 	if err := validateExternalIdpURL(issuerURL); err != nil {
-		writeSSOErrorPage(w, fmt.Sprintf("IdP không được hỗ trợ: %v", err))
-		s.pushError(fmt.Errorf("invalid issuer_url: %w", err))
-		return
+		return "", fmt.Errorf("invalid issuer_url: %w", err)
 	}
 
 	// OIDC discovery để lấy authorization và token endpoints
 	authEndpoint, tokenEndpoint, err := discoverOIDCEndpoints(issuerURL)
 	if err != nil {
-		writeSSOErrorPage(w, fmt.Sprintf("Không thể khám phá IdP endpoints: %v", err))
-		s.pushError(fmt.Errorf("OIDC discovery failed: %w", err))
-		return
+		return "", fmt.Errorf("OIDC discovery failed: %w", err)
 	}
 
 	// Validate discovered endpoints against allow-list
 	if err := validateExternalIdpURL(authEndpoint); err != nil {
-		writeSSOErrorPage(w, fmt.Sprintf("Authorization endpoint không hợp lệ: %v", err))
-		s.pushError(fmt.Errorf("invalid auth endpoint: %w", err))
-		return
+		return "", fmt.Errorf("invalid auth endpoint: %w", err)
 	}
 	if err := validateExternalIdpURL(tokenEndpoint); err != nil {
-		writeSSOErrorPage(w, fmt.Sprintf("Token endpoint không hợp lệ: %v", err))
-		s.pushError(fmt.Errorf("invalid token endpoint: %w", err))
-		return
+		return "", fmt.Errorf("invalid token endpoint: %w", err)
 	}
-
-	if loginHint != "" {
-		s.LoginHint = loginHint
-	}
-
-	// Lưu IdP metadata vào session
-	s.IssuerURL = issuerURL
-	s.IdPClientID = clientID
-	s.IdPScopes = scopes
-	s.IdPAuthEndpoint = authEndpoint
-	s.IdPTokenEndpoint = tokenEndpoint
 
 	// Tạo PKCE pair mới cho Leg-2 (96-byte verifier như zsec randomURLSafe(96))
 	verifierBytes := make([]byte, 96)
 	rand.Read(verifierBytes)
-	s.IdPCodeVerifier = base64.RawURLEncoding.EncodeToString(verifierBytes)
-	idpCodeChallenge := generateCodeChallenge(s.IdPCodeVerifier)
-	s.IdPState = uuid.New().String()
+	idpCodeVerifier := base64.RawURLEncoding.EncodeToString(verifierBytes)
+	idpCodeChallenge := generateCodeChallenge(idpCodeVerifier)
+	idpState := uuid.New().String()
 
 	// Xây dựng Microsoft Entra authorize URL (Leg-2)
 	// redirect_uri = http://localhost:<port>/oauth/callback (zsec OAuthCallbackPath)
@@ -540,21 +521,36 @@ func (s *KiroSsoSession) handleExternalIdpDescriptor(w http.ResponseWriter, r *h
 	idpParams.Set("code_challenge", idpCodeChallenge)
 	idpParams.Set("code_challenge_method", "S256")
 	idpParams.Set("response_mode", "query")
-	idpParams.Set("state", s.IdPState)
-	if s.LoginHint != "" {
-		idpParams.Set("login_hint", s.LoginHint)
+	idpParams.Set("state", idpState)
+	if loginHint != "" {
+		idpParams.Set("login_hint", loginHint)
 	}
 
 	idpAuthorizeURL := fmt.Sprintf("%s?%s", authEndpoint, idpParams.Encode())
 
-	// Cache URL để các lần hit lại Leg-1 (vd: copy URL mở ẩn danh) re-redirect được.
+	// Lưu IdP metadata + cache URL dưới mutex. Double-check: nếu một goroutine khác
+	// (browser prefetch / hit song song) đã cache trước thì dùng URL của nó để mọi
+	// browser chia sẻ đúng một PKCE pair.
 	s.loopbackMu.Lock()
+	if s.idpAuthorizeURL != "" {
+		cached := s.idpAuthorizeURL
+		s.loopbackMu.Unlock()
+		return cached, nil
+	}
+	if loginHint != "" {
+		s.LoginHint = loginHint
+	}
+	s.IssuerURL = issuerURL
+	s.IdPClientID = clientID
+	s.IdPScopes = scopes
+	s.IdPAuthEndpoint = authEndpoint
+	s.IdPTokenEndpoint = tokenEndpoint
+	s.IdPCodeVerifier = idpCodeVerifier
+	s.IdPState = idpState
 	s.idpAuthorizeURL = idpAuthorizeURL
 	s.loopbackMu.Unlock()
 
-	// 302 redirect browser đến IdP
-	w.Header().Set("Location", idpAuthorizeURL)
-	w.WriteHeader(http.StatusFound)
+	return idpAuthorizeURL, nil
 }
 
 // handleOAuthCallback xử lý redirect từ external IdP sau khi user xác thực.
