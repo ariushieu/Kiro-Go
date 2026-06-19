@@ -2126,6 +2126,14 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiGetStats(w, r)
 	case path == "/stats/reset" && r.Method == "POST":
 		h.apiResetStats(w, r)
+	case path == "/logs" && r.Method == "GET":
+		h.apiGetLogs(w, r)
+	case path == "/logs/stream" && r.Method == "GET":
+		h.apiStreamLogs(w, r)
+	case path == "/logs/level" && r.Method == "GET":
+		h.apiGetLogLevel(w, r)
+	case path == "/logs/level" && r.Method == "POST":
+		h.apiSetLogLevel(w, r)
 	case path == "/generate-machine-id" && r.Method == "GET":
 		h.apiGenerateMachineId(w, r)
 	case path == "/thinking" && r.Method == "GET":
@@ -3585,6 +3593,122 @@ func (h *Handler) serveAdminPage(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) serveStaticFile(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/admin/")
 	http.ServeFile(w, r, "web/"+path)
+}
+
+// logEntryJSON is the wire shape for a captured log line.
+type logEntryJSON struct {
+	Ts    int64  `json:"ts"`
+	Level string `json:"level"`
+	Text  string `json:"text"`
+}
+
+func toLogEntryJSON(e logger.Entry) logEntryJSON {
+	return logEntryJSON{
+		Ts:    e.Time.UnixMilli(),
+		Level: logger.LevelName(e.Level),
+		Text:  e.Text,
+	}
+}
+
+// apiGetLogs GET /admin/api/logs - returns retained log history (SSE fallback).
+func (h *Handler) apiGetLogs(w http.ResponseWriter, r *http.Request) {
+	hist := logger.History()
+	out := make([]logEntryJSON, 0, len(hist))
+	for _, e := range hist {
+		out = append(out, toLogEntryJSON(e))
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"level": logger.LevelName(logger.GetLevel()),
+		"logs":  out,
+	})
+}
+
+// apiStreamLogs GET /admin/api/logs/stream - Server-Sent Events stream of log lines.
+func (h *Handler) apiStreamLogs(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		w.WriteHeader(500)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Streaming not supported"})
+		return
+	}
+
+	// handleAdminAPI sets application/json; override for SSE.
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	writeEntry := func(e logger.Entry) {
+		data, _ := json.Marshal(toLogEntryJSON(e))
+		fmt.Fprintf(w, "data: %s\n\n", data)
+	}
+
+	// Backfill retained history first, then stream live entries.
+	for _, e := range logger.History() {
+		writeEntry(e)
+	}
+	flusher.Flush()
+
+	ch, cancel := logger.Subscribe()
+	defer cancel()
+
+	ctx := r.Context()
+	ticker := time.NewTicker(25 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case e := <-ch:
+			writeEntry(e)
+			// Coalesce: drain everything already queued and write it in one
+			// batch so a burst costs a single flush (one socket write) instead
+			// of one per line.
+			for drained := true; drained; {
+				select {
+				case e2 := <-ch:
+					writeEntry(e2)
+				default:
+					drained = false
+				}
+			}
+			flusher.Flush()
+		case <-ticker.C:
+			fmt.Fprint(w, ": ping\n\n")
+			flusher.Flush()
+		}
+	}
+}
+
+// apiGetLogLevel GET /admin/api/logs/level - returns the active log level.
+func (h *Handler) apiGetLogLevel(w http.ResponseWriter, r *http.Request) {
+	json.NewEncoder(w).Encode(map[string]string{"level": logger.LevelName(logger.GetLevel())})
+}
+
+// apiSetLogLevel POST /admin/api/logs/level - changes the active log level at runtime and persists it.
+func (h *Handler) apiSetLogLevel(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Level string `json:"level"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
+		return
+	}
+	lvl, ok := logger.ParseLevel(req.Level)
+	if !ok {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid level, must be: debug, info, warn, or error"})
+		return
+	}
+	logger.SetLevel(lvl)
+	if err := config.UpdateLogLevel(logger.LevelName(lvl)); err != nil {
+		w.WriteHeader(500)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]string{"level": logger.LevelName(lvl)})
 }
 
 // apiGetThinkingConfig 获取 thinking 配置

@@ -107,6 +107,8 @@
                 data-i18n="tabs.settings"></span></button>
             <button type="button" class="tab" data-tab="api"><i class="fa-solid fa-plug tab-icon"></i><span
                 data-i18n="tabs.api"></span></button>
+            <button type="button" class="tab" data-tab="console"><i class="fa-solid fa-terminal tab-icon"></i><span
+                data-i18n="tabs.console"></span></button>
           </div>
         </nav>
         <div class="topbar-actions flex-wrap justify-end">
@@ -518,6 +520,44 @@
             </section>
           </div>
           <p class="api-hint"><i class="fa-solid fa-key"></i><span data-i18n="api.statsHint"></span></p>
+        </section>
+      </div>
+
+      <!-- Console tab -->
+      <div id="tabConsole" class="tab-content hidden">
+        <section class="console-card" aria-labelledby="consoleTitle">
+          <div class="card-header console-toolbar">
+            <span class="card-title" id="consoleTitle" data-i18n="console.title"></span>
+            <div class="console-controls">
+              <span class="console-status" id="consoleStatus" data-state="connecting">
+                <span class="status-dot"></span><span id="consoleStatusText" data-i18n="console.connecting"></span>
+              </span>
+              <label class="console-field">
+                <span data-i18n="console.level"></span>
+                <select id="consoleLevel">
+                  <option value="debug" data-i18n="console.levelDebug"></option>
+                  <option value="info" data-i18n="console.levelInfo"></option>
+                  <option value="warn" data-i18n="console.levelWarn"></option>
+                  <option value="error" data-i18n="console.levelError"></option>
+                </select>
+              </label>
+              <label class="console-field">
+                <span data-i18n="console.filter"></span>
+                <select id="consoleFilter">
+                  <option value="all" data-i18n="console.filterAll"></option>
+                  <option value="debug" data-i18n="console.levelDebug"></option>
+                  <option value="info" data-i18n="console.levelInfo"></option>
+                  <option value="warn" data-i18n="console.levelWarn"></option>
+                  <option value="error" data-i18n="console.levelError"></option>
+                </select>
+              </label>
+              <button type="button" class="console-btn" id="consolePauseBtn" data-i18n="console.pause"></button>
+              <button type="button" class="console-btn" id="consoleAutoscrollBtn" data-active="true"
+                data-i18n="console.autoscroll"></button>
+              <button type="button" class="console-btn" id="consoleClearBtn" data-i18n="console.clear"></button>
+            </div>
+          </div>
+          <div class="console-output" id="consoleOutput" role="log" aria-live="polite"></div>
         </section>
       </div>
     </div>

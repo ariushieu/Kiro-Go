@@ -583,11 +583,20 @@
   }
 
   // Login
+  // The SSE log stream (EventSource) cannot send custom headers, so the admin
+  // password is mirrored into a cookie that the backend also accepts.
+  function setAdminCookie(value) {
+    document.cookie = 'admin_password=' + encodeURIComponent(value) + '; path=/; SameSite=Strict';
+  }
+  function clearAdminCookie() {
+    document.cookie = 'admin_password=; path=/; SameSite=Strict; expires=Thu, 01 Jan 1970 00:00:00 GMT';
+  }
   function clearActivePassword() {
     sessionStorage.removeItem('admin_password');
     sessionStorage.removeItem('admin_login_time');
     localStorage.removeItem('admin_password');
     localStorage.removeItem('admin_login_time');
+    clearAdminCookie();
     password = '';
   }
   function getActiveLoginTime() {
@@ -597,6 +606,7 @@
   function setActivePassword(nextPassword, remember) {
     const now = Date.now().toString();
     password = nextPassword;
+    setAdminCookie(nextPassword);
     sessionStorage.setItem('admin_password', nextPassword);
     sessionStorage.setItem('admin_login_time', now);
     if (remember) {
@@ -613,6 +623,7 @@
   }
   async function tryAutoLogin() {
     if (!password) return;
+    setAdminCookie(password);
     const loginTime = getActiveLoginTime();
     if (loginTime && Date.now() - loginTime > 72 * 3600 * 1000) {
       clearActivePassword();
@@ -2859,11 +2870,166 @@
   }
   function closeUpdateModal() { closeDialog('updateModal'); }
 
+  // Console (realtime logs)
+  let consoleSource = null;
+  let consolePaused = false;
+  let consoleAutoscroll = true;
+  let consoleFilter = 'all';
+  let consoleQueue = [];
+  let consoleRafScheduled = false;
+  const CONSOLE_MAX_LINES = 2000;
+  const consoleLevelRank = { debug: 0, info: 1, warn: 2, error: 3 };
+  // Older server builds prefixed each line with "LEVEL  YYYY/MM/DD HH:MM:SS ";
+  // strip it so the web console doesn't render the level/timestamp twice.
+  const consolePrefixRe = /^(?:DEBUG|INFO|WARN|ERROR)\s+\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}:\d{2}\s+/;
+
+  function consoleSetStatus(state) {
+    const el = $('consoleStatus');
+    const txt = $('consoleStatusText');
+    if (!el || !txt) return;
+    el.dataset.state = state;
+    txt.textContent = t('console.' + state);
+  }
+
+  function consoleBuildLine(entry) {
+    const level = entry.level || 'info';
+    const line = document.createElement('div');
+    line.className = 'console-line console-' + level;
+    line.dataset.level = level;
+    const ts = new Date(entry.ts || Date.now());
+    const hh = String(ts.getHours()).padStart(2, '0');
+    const mm = String(ts.getMinutes()).padStart(2, '0');
+    const ss = String(ts.getSeconds()).padStart(2, '0');
+
+    const tsEl = document.createElement('span');
+    tsEl.className = 'console-ts';
+    tsEl.textContent = hh + ':' + mm + ':' + ss;
+    const badgeEl = document.createElement('span');
+    badgeEl.className = 'console-badge';
+    badgeEl.textContent = level.toUpperCase();
+    const textEl = document.createElement('span');
+    textEl.className = 'console-text';
+    textEl.textContent = String(entry.text || '').replace(consolePrefixRe, '');
+
+    line.appendChild(tsEl);
+    line.appendChild(badgeEl);
+    line.appendChild(textEl);
+    if (consoleFilter !== 'all' && consoleLevelRank[level] < consoleLevelRank[consoleFilter]) {
+      line.classList.add('console-hidden');
+    }
+    return line;
+  }
+
+  // Coalesce bursts: queued entries are flushed to the DOM once per animation
+  // frame via a single DocumentFragment, so render cost stays bounded (~60fps)
+  // no matter how fast log lines arrive.
+  function consoleFlushQueue() {
+    consoleRafScheduled = false;
+    const out = $('consoleOutput');
+    if (!out) { consoleQueue.length = 0; return; }
+    if (!consoleQueue.length) return;
+
+    const batch = consoleQueue;
+    consoleQueue = [];
+    const frag = document.createDocumentFragment();
+    for (let i = 0; i < batch.length; i++) frag.appendChild(consoleBuildLine(batch[i]));
+    out.appendChild(frag);
+    while (out.childElementCount > CONSOLE_MAX_LINES) out.removeChild(out.firstChild);
+    if (consoleAutoscroll) out.scrollTop = out.scrollHeight;
+  }
+
+  function consoleAppend(entry) {
+    consoleQueue.push(entry);
+    if (consoleQueue.length > CONSOLE_MAX_LINES) {
+      consoleQueue.splice(0, consoleQueue.length - CONSOLE_MAX_LINES);
+    }
+    if (!consoleRafScheduled) {
+      consoleRafScheduled = true;
+      requestAnimationFrame(consoleFlushQueue);
+    }
+  }
+
+  function consoleApplyFilter() {
+    qsa('.console-line', $('consoleOutput')).forEach(line => {
+      const hide = consoleFilter !== 'all' && consoleLevelRank[line.dataset.level] < consoleLevelRank[consoleFilter];
+      line.classList.toggle('console-hidden', hide);
+    });
+  }
+
+  function openConsole() {
+    if (consoleSource) return;
+    const out = $('consoleOutput');
+    if (out) out.innerHTML = '';
+    consoleQueue.length = 0;
+    consoleSetStatus('connecting');
+    // Sync the active level selector.
+    api('/logs/level').then(r => r.ok ? r.json() : null).then(d => {
+      if (d && d.level) $('consoleLevel').value = d.level;
+      refreshCustomSelects($('tabConsole'));
+    }).catch(() => { });
+    // EventSource authenticates via the admin_password cookie (no headers).
+    const src = new EventSource('/admin/api/logs/stream');
+    consoleSource = src;
+    src.onopen = () => consoleSetStatus('connected');
+    src.onmessage = ev => {
+      if (consolePaused) return;
+      let entry;
+      try { entry = JSON.parse(ev.data); } catch (e) { return; }
+      consoleAppend(entry);
+    };
+    src.onerror = () => {
+      consoleSetStatus('connecting');
+      // EventSource auto-reconnects; status flips back on the next onopen.
+    };
+  }
+
+  function closeConsole() {
+    if (consoleSource) {
+      consoleSource.close();
+      consoleSource = null;
+    }
+  }
+
+  function bindConsoleEvents() {
+    const levelSel = $('consoleLevel');
+    if (levelSel) levelSel.addEventListener('change', async () => {
+      try {
+        const res = await api('/logs/level', { method: 'POST', body: JSON.stringify({ level: levelSel.value }) });
+        if (res.ok) toastPrimary(t('console.levelChanged', levelSel.value));
+        else toastError(t('common.failed'));
+      } catch (e) { toastError(t('common.failed')); }
+    });
+    const filterSel = $('consoleFilter');
+    if (filterSel) filterSel.addEventListener('change', () => {
+      consoleFilter = filterSel.value;
+      consoleApplyFilter();
+    });
+    const pauseBtn = $('consolePauseBtn');
+    if (pauseBtn) pauseBtn.addEventListener('click', () => {
+      consolePaused = !consolePaused;
+      pauseBtn.dataset.active = String(consolePaused);
+      pauseBtn.textContent = t(consolePaused ? 'console.resume' : 'console.pause');
+    });
+    const autoBtn = $('consoleAutoscrollBtn');
+    if (autoBtn) autoBtn.addEventListener('click', () => {
+      consoleAutoscroll = !consoleAutoscroll;
+      autoBtn.dataset.active = String(consoleAutoscroll);
+    });
+    const clearBtn = $('consoleClearBtn');
+    if (clearBtn) clearBtn.addEventListener('click', () => {
+      consoleQueue.length = 0;
+      const out = $('consoleOutput');
+      if (out) out.innerHTML = '';
+    });
+  }
+
   // Tabs
   function switchTab(tab) {
     qsa('.tab').forEach(el => el.classList.toggle('active', el.dataset.tab === tab));
     qsa('.tab-content').forEach(c => c.classList.add('hidden'));
     $('tab' + tab.charAt(0).toUpperCase() + tab.slice(1)).classList.remove('hidden');
+    if (tab === 'console') openConsole();
+    else closeConsole();
   }
 
   // Event wiring
@@ -3064,6 +3230,7 @@
     bindModalEvents();
     bindDetailEvents();
     bindTestEvents();
+    bindConsoleEvents();
   }
 
   // Init
