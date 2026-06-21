@@ -22,3 +22,6 @@ Thumbs.db
 # Local backups / scratch
 backup*/
 PR-*.md
+
+# Playwright MCP test artifacts
+.playwright-mcp/
