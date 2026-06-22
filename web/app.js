@@ -1992,6 +1992,7 @@
     else if (type === 'iam') modalIam(title, body);
     else if (type === 'sso') modalSso(title, body);
     else if (type === 'local') modalLocal(title, body);
+    else if (type === 'localdetect') modalLocalDetect(title, body);
     else if (type === 'credentials') modalCredentials(title, body);
     else if (type === 'cookie') modalCookie(title, body);
     else if (type === 'apikey') modalApiKey(title, body);
@@ -2016,6 +2017,7 @@
       methodCard('iam', t('modal.iamTitle'), t('modal.iamDesc')) +
       methodCard('kiro', t('modal.kiroTitle'), t('modal.kiroDesc')) +
       methodCard('sso', t('modal.ssoTitle'), t('modal.ssoDesc')) +
+      methodCard('localdetect', t('modal.localDetectTitle'), t('modal.localDetectDesc')) +
       methodCard('local', t('modal.localTitle'), t('modal.localDesc')) +
       methodCard('credentials', t('modal.credentialsTitle'), t('modal.credentialsDesc')) +
       methodCard('cookie', t('modal.cookieTitle'), t('modal.cookieDesc')) +
@@ -2136,6 +2138,80 @@
     $('localTokenFile').addEventListener('change', e => loadLocalFile(e.target, 'localTokenJson'));
     $('localClientFile').addEventListener('change', e => loadLocalFile(e.target, 'localClientJson'));
     $('importLocalBtn').addEventListener('click', importLocalKiro);
+  }
+  // Auto-detect Kiro credentials from the local SSO cache (same machine only).
+  function modalLocalDetect(title, body) {
+    title.textContent = t('modal.localDetectTitle');
+    body.innerHTML =
+      '<p class="help-block">' + escapeHtml(t('modal.localDetectDesc')) + '</p>' +
+      '<div id="localDetectStatus" class="help-block">' + escapeHtml(t('localDetect.scanning')) + '</div>' +
+      '<div id="localDetectList"></div>' +
+      '<div class="modal-footer">' +
+      '<button class="btn btn-secondary" data-modal-goto="add" type="button">' + escapeHtml(t('common.back')) + '</button>' +
+      '<button class="btn btn-primary" id="localDetectImportBtn" type="button" disabled>' + escapeHtml(t('localDetect.importSelected')) + '</button>' +
+      '</div>';
+    $('localDetectImportBtn').addEventListener('click', importLocalDetected);
+    scanLocalCache();
+  }
+  async function scanLocalCache() {
+    const statusEl = $('localDetectStatus');
+    const listEl = $('localDetectList');
+    const importBtn = $('localDetectImportBtn');
+    try {
+      const res = await api('/auth/local-cache/scan', { method: 'GET' });
+      const d = await res.json();
+      if (!res.ok || d.success === false) throw new Error(d.error || t('common.failed'));
+      if (!d.available || !d.accounts || d.accounts.length === 0) {
+        statusEl.textContent = t('localDetect.notFound');
+        listEl.innerHTML = '';
+        importBtn.disabled = true;
+        return;
+      }
+      statusEl.innerHTML = escapeHtml(t('localDetect.found', d.count)) +
+        ' <code class="code-inline">' + escapeHtml(d.cacheDir || '') + '</code>';
+      listEl.innerHTML = d.accounts.map(a => {
+        const label = (a.loginHint || a.provider || a.authMethod || a.fingerprint);
+        const meta = formatAuthMethod(a.provider || a.authMethod) + ' · ' + a.region +
+          (a.hasClient ? '' : ' · ' + t('localDetect.noClient'));
+        const disabled = a.importable ? '' : 'disabled';
+        const reason = a.importable ? '' : ' <small class="muted-text">(' + escapeHtml(a.reason || '') + ')</small>';
+        return '<label class="export-row' + (a.importable ? '' : ' opacity-50') + '">' +
+          '<input type="checkbox" ' + (a.importable ? 'checked' : '') + ' ' + disabled +
+          ' data-detect-fp="' + escapeAttr(a.fingerprint) + '" />' +
+          '<div class="export-row-text">' +
+          '<div class="export-row-email">' + escapeHtml(label) + reason + '</div>' +
+          '<div class="export-row-meta">' + escapeHtml(meta) + '</div>' +
+          '</div></label>';
+      }).join('');
+      importBtn.disabled = false;
+    } catch (e) {
+      statusEl.textContent = (e && e.message) || t('common.failed');
+      importBtn.disabled = true;
+    }
+  }
+  async function importLocalDetected() {
+    const fps = qsa('[data-detect-fp]:checked', $('localDetectList')).map(cb => cb.dataset.detectFp);
+    if (fps.length === 0) return toastWarning(t('localDetect.selectAtLeastOne'));
+    const importBtn = $('localDetectImportBtn');
+    importBtn.disabled = true;
+    try {
+      const res = await api('/auth/local-cache/import', {
+        method: 'POST', body: JSON.stringify({ fingerprints: fps })
+      });
+      const d = await res.json();
+      if (d.success) {
+        closeModal(); loadAccounts(); loadStats();
+        toastPrimary(t('localDetect.importSuccess', d.imported || 0));
+        (d.results || []).forEach(r => { if (r.success && r.accountId) autoRefreshNewAccount(r.accountId); });
+      } else {
+        const firstErr = (d.results || []).find(r => r.error);
+        toastError(t('common.failed') + (firstErr ? ': ' + firstErr.error : ''));
+        importBtn.disabled = false;
+      }
+    } catch (e) {
+      toastError((e && e.message) || t('common.failed'));
+      importBtn.disabled = false;
+    }
   }
   function modalCredentials(title, body) {
     title.textContent = t('modal.credentialsTitle');

@@ -2108,6 +2108,10 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiImportSsoToken(w, r)
 	case path == "/auth/credentials" && r.Method == "POST":
 		h.apiImportCredentials(w, r)
+	case path == "/auth/local-cache/scan" && r.Method == "GET":
+		h.apiScanLocalCache(w, r)
+	case path == "/auth/local-cache/import" && r.Method == "POST":
+		h.apiImportLocalCache(w, r)
 	case path == "/auth/apikeys-batch" && r.Method == "POST":
 		h.apiImportApiKeys(w, r)
 	case path == "/auth/kiro-sso/start" && r.Method == "POST":
@@ -2941,23 +2945,7 @@ func (h *Handler) apiImportSsoToken(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		AccessToken  string `json:"accessToken"`
-		RefreshToken string `json:"refreshToken"`
-		ClientID     string `json:"clientId"`
-		ClientSecret string `json:"clientSecret"`
-		AuthMethod   string `json:"authMethod"`
-		Provider     string `json:"provider"`
-		Region       string `json:"region"`
-		AuthRegion   string `json:"authRegion"`
-		ApiRegion    string `json:"apiRegion"`
-		KiroApiKey   string `json:"kiroApiKey"`
-		Nickname     string `json:"nickname"`
-		IssuerURL    string `json:"issuerUrl"`
-		IdPClientID  string `json:"idpClientId"`
-		Scopes       string `json:"scopes"`
-		LoginHint    string `json:"loginHint"`
-	}
+	var req credentialImportPayload
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
@@ -3028,10 +3016,52 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.RefreshToken == "" {
-		w.WriteHeader(400)
-		json.NewEncoder(w).Encode(map[string]string{"error": "refreshToken is required"})
+	account, status, err := h.importOAuthCredential(req)
+	if err != nil {
+		w.WriteHeader(status)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"account": map[string]interface{}{
+			"id":    account.ID,
+			"email": account.Email,
+		},
+	})
+}
+
+// credentialImportPayload is the request body shared by the credential import
+// endpoint and the local-cache importer.
+type credentialImportPayload struct {
+	AccessToken  string `json:"accessToken"`
+	RefreshToken string `json:"refreshToken"`
+	ClientID     string `json:"clientId"`
+	ClientSecret string `json:"clientSecret"`
+	AuthMethod   string `json:"authMethod"`
+	Provider     string `json:"provider"`
+	Region       string `json:"region"`
+	AuthRegion   string `json:"authRegion"`
+	ApiRegion    string `json:"apiRegion"`
+	KiroApiKey   string `json:"kiroApiKey"`
+	Nickname     string `json:"nickname"`
+	IssuerURL    string `json:"issuerUrl"`
+	IdPClientID  string `json:"idpClientId"`
+	Scopes       string `json:"scopes"`
+	LoginHint    string `json:"loginHint"`
+}
+
+// importOAuthCredential performs the refresh-token based credential import
+// (idc / social / external_idp). It returns the created account, or an HTTP
+// status code plus error on failure. Shared by the HTTP handler and the
+// local-cache auto-import so both paths behave identically.
+func (h *Handler) importOAuthCredential(req credentialImportPayload) (*config.Account, int, error) {
+	if req.Region == "" {
+		req.Region = "us-east-1"
+	}
+	if req.RefreshToken == "" {
+		return nil, http.StatusBadRequest, fmt.Errorf("refreshToken is required")
 	}
 	if req.AuthMethod == "" {
 		if req.ClientID != "" {
@@ -3095,9 +3125,7 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 			expiresAt = 0 // imported token may be stale; let pool refresh immediately
 			newProfileArn = ""
 		} else {
-			w.WriteHeader(400)
-			json.NewEncoder(w).Encode(map[string]string{"error": "Token refresh failed: " + err.Error()})
-			return
+			return nil, http.StatusBadRequest, fmt.Errorf("Token refresh failed: %s", err.Error())
 		}
 	}
 	if newRefreshToken != "" {
@@ -3136,9 +3164,7 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := config.AddAccount(account); err != nil {
-		w.WriteHeader(500)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-		return
+		return nil, http.StatusInternalServerError, err
 	}
 
 	// external_idp: resolve profileArn after import (ListAvailableProfiles with TokenType header)
@@ -3151,12 +3177,150 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.pool.Reload()
+	return &account, http.StatusOK, nil
+}
+
+// apiScanLocalCache handles GET /admin/api/auth/local-cache/scan.
+//
+// It scans the local AWS SSO cache (~/.aws/sso/cache) for Kiro IDE credentials
+// and returns a non-secret summary of each discovered identity so the UI can
+// present them for one-click import. Secrets are never included in the response;
+// each entry carries a fingerprint used to reference it in the import call.
+//
+// Returns available=false (not an error) when no local cache exists, so the UI
+// can hide the feature on containerized/remote deployments.
+func (h *Handler) apiScanLocalCache(w http.ResponseWriter, r *http.Request) {
+	dir, _ := auth.LocalCacheDir()
+	creds, err := auth.ScanLocalKiroCredentials()
+	if err != nil {
+		w.WriteHeader(500)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	type item struct {
+		Fingerprint string `json:"fingerprint"`
+		SourceFile  string `json:"sourceFile"`
+		AuthMethod  string `json:"authMethod"`
+		Provider    string `json:"provider"`
+		Region      string `json:"region"`
+		LoginHint   string `json:"loginHint,omitempty"`
+		HasClient   bool   `json:"hasClient"`
+		Importable  bool   `json:"importable"`
+		Reason      string `json:"reason,omitempty"`
+	}
+	items := make([]item, 0, len(creds))
+	for _, c := range creds {
+		it := item{
+			Fingerprint: c.Fingerprint,
+			SourceFile:  c.SourceFile,
+			AuthMethod:  c.AuthMethod,
+			Provider:    c.Provider,
+			Region:      c.Region,
+			LoginHint:   c.LoginHint,
+			HasClient:   c.HasClient,
+			Importable:  true,
+		}
+		// IdC tokens need a client registration to refresh; flag if missing.
+		if c.AuthMethod == "idc" && !c.HasClient {
+			it.Importable = false
+			it.Reason = "missing clientId/clientSecret (client registration file not found)"
+		}
+		items = append(items, it)
+	}
+
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": true,
-		"account": map[string]interface{}{
-			"id":    account.ID,
-			"email": account.Email,
-		},
+		"success":   true,
+		"available": len(creds) > 0,
+		"cacheDir":  dir,
+		"count":     len(items),
+		"accounts":  items,
+	})
+}
+
+// apiImportLocalCache handles POST /admin/api/auth/local-cache/import.
+//
+// Body: {"fingerprints": ["tok-abcd1234", ...]} — the fingerprints returned by
+// the scan endpoint. When omitted or empty, every importable credential found
+// in the cache is imported. Each credential is run through the same OAuth import
+// path as manual credential import, so region probing and profile resolution
+// apply automatically.
+func (h *Handler) apiImportLocalCache(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Fingerprints []string `json:"fingerprints"`
+	}
+	// Body is optional; ignore decode errors and treat as "import all".
+	_ = json.NewDecoder(r.Body).Decode(&req)
+
+	creds, err := auth.ScanLocalKiroCredentials()
+	if err != nil {
+		w.WriteHeader(500)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	if len(creds) == 0 {
+		w.WriteHeader(404)
+		json.NewEncoder(w).Encode(map[string]string{"error": "no local Kiro credentials found"})
+		return
+	}
+
+	want := make(map[string]bool, len(req.Fingerprints))
+	for _, f := range req.Fingerprints {
+		want[f] = true
+	}
+
+	type result struct {
+		Fingerprint string `json:"fingerprint"`
+		SourceFile  string `json:"sourceFile"`
+		Success     bool   `json:"success"`
+		AccountID   string `json:"accountId,omitempty"`
+		Email       string `json:"email,omitempty"`
+		Error       string `json:"error,omitempty"`
+	}
+	var results []result
+	imported := 0
+	for _, c := range creds {
+		if len(want) > 0 && !want[c.Fingerprint] {
+			continue
+		}
+		res := result{Fingerprint: c.Fingerprint, SourceFile: c.SourceFile}
+
+		if c.AuthMethod == "idc" && !c.HasClient {
+			res.Error = "missing clientId/clientSecret"
+			results = append(results, res)
+			continue
+		}
+
+		account, _, importErr := h.importOAuthCredential(credentialImportPayload{
+			AccessToken:  c.AccessToken,
+			RefreshToken: c.RefreshToken,
+			ClientID:     c.ClientID,
+			ClientSecret: c.ClientSecret,
+			AuthMethod:   c.AuthMethod,
+			Provider:     c.Provider,
+			Region:       c.Region,
+			IssuerURL:    c.IssuerURL,
+			IdPClientID:  c.IdPClientID,
+			Scopes:       c.Scopes,
+			LoginHint:    c.LoginHint,
+		})
+		if importErr != nil {
+			res.Error = importErr.Error()
+			results = append(results, res)
+			continue
+		}
+		res.Success = true
+		res.AccountID = account.ID
+		res.Email = account.Email
+		imported++
+		results = append(results, res)
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":  imported > 0,
+		"imported": imported,
+		"total":    len(results),
+		"results":  results,
 	})
 }
 
