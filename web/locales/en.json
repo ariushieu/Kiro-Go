@@ -1,7 +1,6 @@
 {
   "login.title": "Sign in",
   "login.subtitle": "Enter admin password to continue",
-
   "login.password": "Admin Password",
   "login.passwordPlaceholder": "Enter password",
   "login.submit": "Login",
@@ -549,5 +548,10 @@
   "settings.maxPayloadBalanced": "2.0 MB · Balanced · ~820k tokens · recommended",
   "settings.maxPayloadAggressive": "2.1 MB · Aggressive · ~860k tokens · near AWS ~2.15MB limit",
   "settings.maxPayloadMax": "4.0 MB · Max · try ~1M (AWS still blocks ~2.15MB, no safety net)",
-  "settings.maxPayloadHint": "AWS hard-limits ~2.15MB. Exceeding it = request fails with 400, no retry. Applies immediately, no restart needed."
+  "settings.maxPayloadHint": "AWS hard-limits ~2.15MB. Exceeding it = request fails with 400, no retry. Applies immediately, no restart needed.",
+  "apiKeys.expiresAt": "Expiry (optional)",
+  "apiKeys.expiresAtHint": "Key stops authenticating after this time. Leave empty to never expire.",
+  "apiKeys.expiry": "Expires",
+  "apiKeys.expired": "Expired",
+  "apiKeys.expiringSoon": "Expiring soon"
 }

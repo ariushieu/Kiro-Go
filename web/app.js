@@ -1696,6 +1696,8 @@
       const disabled = !item.enabled
         ? '<span class="text-xs" style="background:rgba(239,68,68,0.15);color:#ef4444;padding:1px 6px;border-radius:4px;">' + escapeHtml(t('apiKeys.disabled')) + '</span>'
         : '';
+      const expiredBadge = apiKeyExpiryBadge(item.expiresAt);
+      const expiryLine = apiKeyExpiryLine(item.expiresAt);
       const tokensLine = usageLine(t('apiKeys.tokens'), item.tokensUsed || 0, item.tokenLimit || 0);
       const creditsLine = usageLine(t('apiKeys.credits'), item.creditsUsed || 0, item.creditLimit || 0);
       const requestsLine = '<div class="text-xs muted-text">' + escapeHtml(t('apiKeys.requests')) + ': ' + escapeHtml(formatNumber(item.requestsCount || 0)) + '</div>';
@@ -1705,6 +1707,7 @@
             '<span class="font-semibold">' + name + '</span>' +
             migrated +
             disabled +
+            expiredBadge +
             '<span class="text-xs muted-text font-mono">' + masked + '</span>' +
           '</div>' +
           '<div class="flex items-center gap-2">' +
@@ -1721,6 +1724,7 @@
           tokensLine +
           creditsLine +
           requestsLine +
+          expiryLine +
         '</div>' +
       '</div>';
     }).join('');
@@ -1743,6 +1747,7 @@
     $('apiKeyForm_enabled').checked = entry ? !!entry.enabled : true;
     $('apiKeyForm_tokenLimit').value = entry ? String(entry.tokenLimit || 0) : '0';
     $('apiKeyForm_creditLimit').value = entry ? String(entry.creditLimit || 0) : '0';
+    $('apiKeyForm_expiresAt').value = (entry && entry.expiresAt) ? unixToLocalInput(entry.expiresAt) : '';
     apiKeyModalSubmitting = false;
     $('apiKeyModalSaveBtn').disabled = false;
     openDialog('apiKeyModal');
@@ -1765,11 +1770,13 @@
       const enabled = $('apiKeyForm_enabled').checked;
       const tokenLimit = parseInt($('apiKeyForm_tokenLimit').value, 10);
       const creditLimit = parseFloat($('apiKeyForm_creditLimit').value);
+      const expiresAt = localInputToUnix($('apiKeyForm_expiresAt').value);
       const payload = {
         name: name,
         enabled: enabled,
         tokenLimit: isNaN(tokenLimit) || tokenLimit < 0 ? 0 : tokenLimit,
-        creditLimit: isNaN(creditLimit) || creditLimit < 0 ? 0 : creditLimit
+        creditLimit: isNaN(creditLimit) || creditLimit < 0 ? 0 : creditLimit,
+        expiresAt: expiresAt
       };
       let res, d;
       if (apiKeyEditingId) {
@@ -3125,6 +3132,42 @@
       ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
   }
 
+  // Convert a Unix seconds timestamp to a value for <input type="datetime-local"> (local time).
+  function unixToLocalInput(unixSec) {
+    if (!unixSec) return '';
+    const d = new Date(unixSec * 1000);
+    const pad = n => String(n).padStart(2, '0');
+    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) +
+      'T' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+  }
+
+  // Convert a datetime-local input value to Unix seconds. Empty input → 0 (never expires).
+  function localInputToUnix(val) {
+    if (!val) return 0;
+    const ms = new Date(val).getTime();
+    return isNaN(ms) ? 0 : Math.floor(ms / 1000);
+  }
+
+  // Small colored badge shown next to a key name: red when expired, amber when
+  // expiring within 3 days, nothing otherwise (or when never-expires).
+  function apiKeyExpiryBadge(expiresAt) {
+    if (!expiresAt) return '';
+    const now = Math.floor(Date.now() / 1000);
+    if (expiresAt <= now) {
+      return '<span class="text-xs" style="background:rgba(239,68,68,0.15);color:#ef4444;padding:1px 6px;border-radius:4px;">' + escapeHtml(t('apiKeys.expired')) + '</span>';
+    }
+    if (expiresAt - now <= 3 * 86400) {
+      return '<span class="text-xs" style="background:rgba(245,158,11,0.15);color:#f59e0b;padding:1px 6px;border-radius:4px;">' + escapeHtml(t('apiKeys.expiringSoon')) + '</span>';
+    }
+    return '';
+  }
+
+  // Full "Expires: <date>" line for the key/usage cards. Empty when never expires.
+  function apiKeyExpiryLine(expiresAt) {
+    if (!expiresAt) return '';
+    return '<div class="text-xs muted-text">' + escapeHtml(t('apiKeys.expiry')) + ': ' + escapeHtml(formatLogTime(expiresAt)) + '</div>';
+  }
+
   async function loadApiLog() {
     const body = $('apiLogBody');
     if (!body) return;
@@ -3244,15 +3287,17 @@
       const over = (k.overToken || k.overCredit)
         ? '<span class="text-xs" style="background:rgba(239,68,68,0.15);color:#ef4444;padding:1px 6px;border-radius:4px;">' + escapeHtml(t('usage.overLimit')) + '</span>'
         : '';
+      const expiredBadge = apiKeyExpiryBadge(k.expiresAt);
+      const expiryLine = apiKeyExpiryLine(k.expiresAt);
       const tokensLine = usageLine(t('apiKeys.tokens'), k.tokensUsed || 0, k.tokenLimit || 0);
       const creditsLine = usageLine(t('apiKeys.credits'), k.creditsUsed || 0, k.creditLimit || 0);
       const requestsLine = '<div class="text-xs muted-text">' + escapeHtml(t('apiKeys.requests')) + ': ' + escapeHtml(formatNumber(k.requestsCount || 0)) + '</div>';
       return '<div class="card" style="margin-top:0.5rem;padding:0.75rem;">' +
         '<div class="flex items-center gap-2" style="flex-wrap:wrap;">' +
-          '<span class="font-semibold">' + name + '</span>' + disabled + over + masked +
+          '<span class="font-semibold">' + name + '</span>' + disabled + over + expiredBadge + masked +
         '</div>' +
         '<div style="margin-top:0.5rem;display:grid;gap:0.35rem;">' +
-          tokensLine + creditsLine + requestsLine +
+          tokensLine + creditsLine + requestsLine + expiryLine +
         '</div>' +
       '</div>';
     }).join('');

@@ -1,7 +1,6 @@
 {
   "login.title": "Đăng nhập",
   "login.subtitle": "Nhập mật khẩu quản trị để tiếp tục",
-
   "login.password": "Mật khẩu quản trị",
   "login.passwordPlaceholder": "Nhập mật khẩu",
   "login.submit": "Đăng nhập",
@@ -549,5 +548,10 @@
   "settings.maxPayloadBalanced": "2.0 MB · Cân bằng · ~820k tokens · khuyến nghị",
   "settings.maxPayloadAggressive": "2.1 MB · Mạnh · ~860k tokens · sát ngưỡng AWS ~2.15MB",
   "settings.maxPayloadMax": "4.0 MB · Tối đa · thử ~1M (AWS vẫn chặn ~2.15MB, mất lưới an toàn)",
-  "settings.maxPayloadHint": "AWS giới hạn cứng ~2.15MB. Vượt ngưỡng = yêu cầu lỗi 400, không thử lại. Áp dụng ngay, không cần khởi động lại."
+  "settings.maxPayloadHint": "AWS giới hạn cứng ~2.15MB. Vượt ngưỡng = yêu cầu lỗi 400, không thử lại. Áp dụng ngay, không cần khởi động lại.",
+  "apiKeys.expiresAt": "Hết hạn (tùy chọn)",
+  "apiKeys.expiresAtHint": "Key ngừng xác thực sau thời điểm này. Để trống nghĩa là không bao giờ hết hạn.",
+  "apiKeys.expiry": "Hết hạn",
+  "apiKeys.expired": "Đã hết hạn",
+  "apiKeys.expiringSoon": "Sắp hết hạn"
 }

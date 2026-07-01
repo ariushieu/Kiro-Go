@@ -1,7 +1,6 @@
 {
   "login.title": "登录",
   "login.subtitle": "请输入管理密码以继续",
-
   "login.password": "管理密码",
   "login.passwordPlaceholder": "输入密码",
   "login.submit": "登录",
@@ -549,5 +548,10 @@
   "settings.maxPayloadConservative": "900 KB · 保守 · 约 23.6 万 tokens（原始值）",
   "settings.maxPayloadBalanced": "2.0 MB · 均衡 · 约 82 万 tokens · 推荐",
   "settings.maxPayloadAggressive": "2.1 MB · 激进 · 约 86 万 tokens · 接近 AWS ~2.15MB 上限",
-  "settings.maxPayloadMax": "4.0 MB · 最大 · 尝试约 100 万（AWS 仍约 2.15MB 拦截，失去安全余量）"
+  "settings.maxPayloadMax": "4.0 MB · 最大 · 尝试约 100 万（AWS 仍约 2.15MB 拦截，失去安全余量）",
+  "apiKeys.expiresAt": "过期时间（可选）",
+  "apiKeys.expiresAtHint": "到达该时间后此 Key 停止鉴权。留空表示永不过期。",
+  "apiKeys.expiry": "过期",
+  "apiKeys.expired": "已过期",
+  "apiKeys.expiringSoon": "即将过期"
 }

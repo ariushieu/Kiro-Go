@@ -106,6 +106,7 @@ func UpdateApiKey(id string, patch ApiKeyEntry) error {
 	cfg.ApiKeys[idx].Enabled = patch.Enabled
 	cfg.ApiKeys[idx].TokenLimit = patch.TokenLimit
 	cfg.ApiKeys[idx].CreditLimit = patch.CreditLimit
+	cfg.ApiKeys[idx].ExpiresAt = patch.ExpiresAt
 	if patch.Migrated {
 		cfg.ApiKeys[idx].Migrated = true
 	}
@@ -217,6 +218,12 @@ func MaskApiKey(key string) string {
 		return key
 	}
 	return key[:6] + "****" + key[len(key)-4:]
+}
+
+// ApiKeyExpired reports whether the key has a set expiry (ExpiresAt > 0) that is now
+// in the past. Keys with ExpiresAt == 0 never expire.
+func ApiKeyExpired(e ApiKeyEntry) bool {
+	return e.ExpiresAt > 0 && time.Now().Unix() >= e.ExpiresAt
 }
 
 // ApiKeyOverLimit returns (overToken, overCredit) for the entry. Limits with value 0

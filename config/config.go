@@ -199,6 +199,10 @@ type ApiKeyEntry struct {
 	CreatedAt  int64  `json:"createdAt"`          // Creation timestamp (Unix seconds)
 	LastUsedAt int64  `json:"lastUsedAt,omitempty"`
 
+	// ExpiresAt is an optional expiry timestamp (Unix seconds). 0 = never expires.
+	// Once now >= ExpiresAt, the key is rejected at authentication like a disabled key.
+	ExpiresAt int64 `json:"expiresAt,omitempty"`
+
 	// Limits (0 = unlimited)
 	TokenLimit  int64   `json:"tokenLimit,omitempty"`
 	CreditLimit float64 `json:"creditLimit,omitempty"`

@@ -126,7 +126,9 @@ type apiKeyUsageView struct {
 	CreditsRemain float64 `json:"creditsRemain"` // -1 = unlimited
 	OverToken     bool    `json:"overToken"`
 	OverCredit    bool    `json:"overCredit"`
+	Expired       bool    `json:"expired"`
 	LastUsedAt    int64   `json:"lastUsedAt,omitempty"`
+	ExpiresAt     int64   `json:"expiresAt,omitempty"`
 }
 
 // apiGetUsageSummary GET /admin/api/usage-summary - per-key credit/token usage vs limits.
@@ -170,7 +172,9 @@ func (h *Handler) apiGetUsageSummary(w http.ResponseWriter, r *http.Request) {
 			CreditsRemain: creditsRemain,
 			OverToken:     overToken,
 			OverCredit:    overCredit,
+			Expired:       config.ApiKeyExpired(e),
 			LastUsedAt:    e.LastUsedAt,
+			ExpiresAt:     e.ExpiresAt,
 		})
 		totalTokens += e.TokensUsed
 		totalLimitTokens += e.TokenLimit
