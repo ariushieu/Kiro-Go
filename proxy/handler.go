@@ -425,6 +425,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleOpenAIResponses(w, ar)
 	case path == "/v1/models" || path == "/models":
 		h.handleModels(w, r)
+	// 自助查询端点：用客户自己的 key 鉴权（非 admin 密码），只返回该 key 用量
+	case path == "/v1/key/info" || path == "/key/info":
+		h.apiKeySelfInfo(w, r)
 	case path == "/api/event_logging/batch":
 		// Claude Code 遥测端点 - 直接返回 200 OK
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -433,6 +436,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 管理端点
 	case path == "/admin" || path == "/admin/":
 		h.serveAdminPage(w, r)
+	// 客户自助门户（无需 admin 密码，用自己的 API key 查询用量）
+	case path == "/portal" || path == "/portal/":
+		http.ServeFile(w, r, "web/portal.html")
 	case strings.HasPrefix(path, "/admin/api/"):
 		h.handleAdminAPI(w, r)
 	case strings.HasPrefix(path, "/admin/"):

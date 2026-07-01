@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="vi">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>API Key — Kiro-Go</title>
+  <link rel="icon" type="image/x-icon" href="/admin/favicon.ico" />
+  <link rel="stylesheet" href="/admin/vendor/fontawesome/css/all.min.css" />
+  <link rel="stylesheet" href="/admin/styles.css" id="__cssAsset" />
+  <link rel="stylesheet" href="/admin/toast.css" id="__toastCss" />
+  <script>
+    (function () {
+      var v = Date.now();
+      var css = document.getElementById('__cssAsset');
+      if (css) css.href = '/admin/styles.css?v=' + v;
+      var tcss = document.getElementById('__toastCss');
+      if (tcss) tcss.href = '/admin/toast.css?v=' + v;
+    })();
+  </script>
+  <style>
+    /* Self-contained portal layout — does not depend on app.js */
+    .portal-wrap {
+      max-width: 640px;
+      margin: 0 auto;
+      padding: 3rem 1.25rem 4rem;
+    }
+    .portal-head {
+      display: flex;
+      align-items: center;
+      gap: 0.625rem;
+      margin-bottom: 1.5rem;
+    }
+    .portal-head .brand-name {
+      font-size: 1.25rem;
+      font-weight: 600;
+      letter-spacing: -0.015em;
+    }
+    .portal-lang {
+      margin-left: auto;
+      display: inline-flex;
+      gap: 0.25rem;
+    }
+    .portal-lang button {
+      font: inherit;
+      font-size: 0.75rem;
+      font-weight: 600;
+      padding: 0.25rem 0.5rem;
+      border-radius: var(--radius-md, 8px);
+      border: 1px solid var(--border, #333);
+      background: transparent;
+      color: var(--muted-foreground, #999);
+      cursor: pointer;
+    }
+    .portal-lang button.active {
+      background: var(--foreground, #fff);
+      color: var(--background, #000);
+    }
+    .portal-usage-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.75rem;
+      margin-top: 1rem;
+    }
+    @media (max-width: 480px) {
+      .portal-usage-grid { grid-template-columns: 1fr; }
+    }
+    .portal-bar {
+      height: 8px;
+      background: rgba(127, 127, 127, 0.2);
+      border-radius: 4px;
+      overflow: hidden;
+      margin-top: 0.5rem;
+    }
+    .portal-bar > span {
+      display: block;
+      height: 100%;
+      transition: width 0.3s;
+    }
+    .portal-status {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.35rem 0.7rem;
+      border-radius: 999px;
+      font-size: 0.8125rem;
+      font-weight: 600;
+    }
+    .portal-status.ok { background: rgba(34, 197, 94, 0.15); color: #22c55e; }
+    .portal-status.bad { background: rgba(239, 68, 68, 0.15); color: #ef4444; }
+    .portal-key-row {
+      display: flex;
+      gap: 0.5rem;
+      align-items: stretch;
+    }
+    .portal-key-row input { flex: 1; }
+  </style>
+</head>
+
+<body>
+  <div class="portal-wrap">
+    <div class="portal-head">
+      <i class="fa-solid fa-ghost" style="font-size:1.5rem;"></i>
+      <span class="brand-name">Kiro-Go</span>
+      <div class="portal-lang" id="langBtns">
+        <button data-lang="vi">VI</button>
+        <button data-lang="en">EN</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><span class="card-title" data-t="title"></span></div>
+      <p class="muted-text text-sm" data-t="hint" style="margin-bottom:0.75rem;"></p>
+      <div class="portal-key-row">
+        <input type="password" id="keyInput" autocomplete="off" spellcheck="false" />
+        <button class="btn btn-secondary btn-sm" id="toggleKeyBtn" type="button" aria-label="show">
+          <i class="fa-solid fa-eye"></i>
+        </button>
+        <button class="btn btn-primary" id="checkBtn" type="button" data-t="check"></button>
+      </div>
+    </div>
+
+    <div class="card" id="resultCard" style="margin-top:1rem;display:none;">
+      <div class="card-header">
+        <span class="card-title" data-t="usageTitle"></span>
+        <span class="portal-status" id="statusPill"></span>
+      </div>
+
+      <div class="portal-usage-grid">
+        <div>
+          <div class="text-sm muted-text" id="tokensLabel"></div>
+          <div class="font-semibold" id="tokensVal" style="margin-top:0.15rem;"></div>
+          <div class="portal-bar" id="tokensBarWrap" style="display:none;"><span id="tokensBar"></span></div>
+        </div>
+        <div>
+          <div class="text-sm muted-text" id="creditsLabel"></div>
+          <div class="font-semibold" id="creditsVal" style="margin-top:0.15rem;"></div>
+          <div class="portal-bar" id="creditsBarWrap" style="display:none;"><span id="creditsBar"></span></div>
+        </div>
+      </div>
+
+      <div style="margin-top:1rem;display:grid;gap:0.4rem;">
+        <div class="text-sm"><span class="muted-text" data-t="requests"></span>: <span id="reqVal" class="font-semibold"></span></div>
+        <div class="text-sm" id="expiryRow" style="display:none;"><span class="muted-text" data-t="expiry"></span>: <span id="expiryVal" class="font-semibold"></span></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      var I18N = {
+        vi: {
+          title: 'Kiểm tra API Key',
+          hint: 'Nhập API key của bạn để xem hạn mức token/credit còn lại. Trang này không cần mật khẩu quản trị.',
+          check: 'Kiểm tra',
+          usageTitle: 'Tình trạng sử dụng',
+          tokens: 'Tokens',
+          credits: 'Credits',
+          requests: 'Tổng yêu cầu',
+          expiry: 'Hết hạn',
+          unlimited: 'Không giới hạn',
+          used: 'đã dùng',
+          remain: 'còn lại',
+          valid: 'Đang hoạt động',
+          invalid: 'Không dùng được',
+          disabled: 'Đã tắt',
+          expired: 'Đã hết hạn',
+          overLimit: 'Vượt hạn mức',
+          keyRequired: 'Vui lòng nhập API key',
+          notFound: 'API key không hợp lệ',
+          failed: 'Kiểm tra thất bại'
+        },
+        en: {
+          title: 'Check API Key',
+          hint: 'Enter your API key to see remaining token/credit quota. No admin password needed.',
+          check: 'Check',
+          usageTitle: 'Usage Status',
+          tokens: 'Tokens',
+          credits: 'Credits',
+          requests: 'Total Requests',
+          expiry: 'Expiry',
+          unlimited: 'Unlimited',
+          used: 'used',
+          remain: 'left',
+          valid: 'Active',
+          invalid: 'Not usable',
+          disabled: 'Disabled',
+          expired: 'Expired',
+          overLimit: 'Over limit',
+          keyRequired: 'Please enter an API key',
+          notFound: 'Invalid API key',
+          failed: 'Check failed'
+        }
+      };
+
+      var lang = (localStorage.getItem('kiro_lang') === 'en') ? 'en' : 'vi';
+      function t(k) { return (I18N[lang] && I18N[lang][k]) || (I18N.vi[k]) || k; }
+
+      function applyLang() {
+        document.documentElement.lang = lang;
+        document.querySelectorAll('[data-t]').forEach(function (el) {
+          el.textContent = t(el.getAttribute('data-t'));
+        });
+        document.querySelectorAll('#langBtns button').forEach(function (b) {
+          b.classList.toggle('active', b.dataset.lang === lang);
+        });
+        // Re-render result if visible so labels track the language.
+        if (lastData) renderResult(lastData);
+      }
+
+      function fmtNum(n) {
+        if (n == null || isNaN(n)) return '0';
+        if (Math.abs(n) >= 1 && Math.floor(n) === n) return Number(n).toLocaleString('en-US');
+        return Number(n).toLocaleString('en-US', { maximumFractionDigits: 4 });
+      }
+
+      function fmtDate(unixSec) {
+        if (!unixSec) return '';
+        var d = new Date(unixSec * 1000);
+        var pad = function (x) { return String(x).padStart(2, '0'); };
+        return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) +
+          ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+      }
+
+      function barColor(ratio) {
+        if (ratio >= 0.95) return '#ef4444';
+        if (ratio >= 0.8) return '#f59e0b';
+        return '#3b82f6';
+      }
+
+      var lastData = null;
+
+      function setUsage(labelEl, valEl, barWrap, barEl, unitKey, used, limit) {
+        labelEl.textContent = t(unitKey);
+        if (!limit || limit <= 0) {
+          valEl.textContent = fmtNum(used) + ' ' + t('used') + ' · ' + t('unlimited');
+          barWrap.style.display = 'none';
+          return;
+        }
+        var ratio = Math.max(0, Math.min(1, used / limit));
+        valEl.textContent = fmtNum(used) + ' / ' + fmtNum(limit) + ' · ' + fmtNum(Math.max(0, limit - used)) + ' ' + t('remain');
+        barWrap.style.display = 'block';
+        barEl.style.width = (ratio * 100).toFixed(1) + '%';
+        barEl.style.background = barColor(ratio);
+      }
+
+      function renderResult(d) {
+        lastData = d;
+        document.getElementById('resultCard').style.display = '';
+
+        var pill = document.getElementById('statusPill');
+        if (d.valid) {
+          pill.className = 'portal-status ok';
+          pill.textContent = t('valid');
+        } else {
+          pill.className = 'portal-status bad';
+          var reason = t('invalid');
+          if (!d.enabled) reason = t('disabled');
+          else if (d.expired) reason = t('expired');
+          else if (d.overToken || d.overCredit) reason = t('overLimit');
+          pill.textContent = reason;
+        }
+
+        setUsage(
+          document.getElementById('tokensLabel'), document.getElementById('tokensVal'),
+          document.getElementById('tokensBarWrap'), document.getElementById('tokensBar'),
+          'tokens', d.tokensUsed || 0, d.tokenLimit || 0
+        );
+        setUsage(
+          document.getElementById('creditsLabel'), document.getElementById('creditsVal'),
+          document.getElementById('creditsBarWrap'), document.getElementById('creditsBar'),
+          'credits', d.creditsUsed || 0, d.creditLimit || 0
+        );
+
+        document.getElementById('reqVal').textContent = fmtNum(d.requestsCount || 0);
+
+        var expRow = document.getElementById('expiryRow');
+        if (d.expiresAt) {
+          expRow.style.display = '';
+          document.getElementById('expiryVal').textContent = fmtDate(d.expiresAt);
+        } else {
+          expRow.style.display = 'none';
+        }
+      }
+
+      function toast(msg) {
+        // Minimal inline notice — reuse alert-free flash on the button area.
+        var btn = document.getElementById('checkBtn');
+        var old = btn.textContent;
+        btn.textContent = msg;
+        setTimeout(function () { btn.textContent = old; }, 1800);
+      }
+
+      async function check() {
+        var key = document.getElementById('keyInput').value.trim();
+        if (!key) { toast(t('keyRequired')); return; }
+        var btn = document.getElementById('checkBtn');
+        btn.disabled = true;
+        try {
+          var res = await fetch('/v1/key/info', {
+            method: 'GET',
+            headers: { 'Authorization': 'Bearer ' + key }
+          });
+          if (res.status === 401) { toast(t('notFound')); return; }
+          if (!res.ok) { toast(t('failed')); return; }
+          var d = await res.json();
+          renderResult(d);
+        } catch (e) {
+          toast(t('failed'));
+        } finally {
+          btn.disabled = false;
+        }
+      }
+
+      document.getElementById('checkBtn').addEventListener('click', check);
+      document.getElementById('keyInput').addEventListener('keypress', function (e) {
+        if (e.key === 'Enter') check();
+      });
+      document.getElementById('toggleKeyBtn').addEventListener('click', function () {
+        var f = document.getElementById('keyInput');
+        var show = f.type === 'password';
+        f.type = show ? 'text' : 'password';
+        this.innerHTML = show ? '<i class="fa-solid fa-eye-slash"></i>' : '<i class="fa-solid fa-eye"></i>';
+      });
+      document.getElementById('langBtns').addEventListener('click', function (e) {
+        var b = e.target.closest('button');
+        if (!b) return;
+        lang = b.dataset.lang;
+        localStorage.setItem('kiro_lang', lang);
+        applyLang();
+      });
+
+      applyLang();
+    })();
+  </script>
+</body>
+
+</html>

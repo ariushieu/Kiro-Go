@@ -195,3 +195,82 @@ func (h *Handler) apiGetUsageSummary(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 }
+
+// apiKeySelfInfo is the public self-service payload. It intentionally omits the
+// key ID, name, masked value and internal flags — a customer checking their own
+// key only needs quota/usage/expiry, not admin metadata.
+type apiKeySelfInfo struct {
+	Enabled       bool    `json:"enabled"`
+	TokenLimit    int64   `json:"tokenLimit"`
+	CreditLimit   float64 `json:"creditLimit"`
+	TokensUsed    int64   `json:"tokensUsed"`
+	CreditsUsed   float64 `json:"creditsUsed"`
+	RequestsCount int64   `json:"requestsCount"`
+	TokensRemain  int64   `json:"tokensRemain"`  // -1 = unlimited
+	CreditsRemain float64 `json:"creditsRemain"` // -1 = unlimited
+	OverToken     bool    `json:"overToken"`
+	OverCredit    bool    `json:"overCredit"`
+	Expired       bool    `json:"expired"`
+	ExpiresAt     int64   `json:"expiresAt,omitempty"`
+	Valid         bool    `json:"valid"` // false when the key is disabled/expired/over-limit
+}
+
+// apiKeySelfInfo GET/POST /v1/key/info — public self-service usage lookup.
+//
+// Unlike the /admin/* endpoints (admin-password gated), this authenticates with
+// the CUSTOMER'S OWN key (Authorization: Bearer <key> or X-Api-Key) and returns
+// only that key's usage. This backs the customer-facing "check your balance"
+// portal for an API-reselling setup, so customers never touch the admin console.
+//
+// Returns 401 for a missing/unknown key. A disabled/expired/over-limit key still
+// returns 200 with its usage but Valid=false, so customers can see WHY it stopped.
+func (h *Handler) apiKeySelfInfo(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+
+	provided := extractProvidedKey(r)
+	if provided == "" {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid or missing API key"})
+		return
+	}
+	entry := config.FindApiKeyByValue(provided)
+	if entry == nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid or missing API key"})
+		return
+	}
+
+	overToken, overCredit := config.ApiKeyOverLimit(*entry)
+	expired := config.ApiKeyExpired(*entry)
+
+	tokensRemain := int64(-1)
+	if entry.TokenLimit > 0 {
+		tokensRemain = entry.TokenLimit - entry.TokensUsed
+		if tokensRemain < 0 {
+			tokensRemain = 0
+		}
+	}
+	creditsRemain := float64(-1)
+	if entry.CreditLimit > 0 {
+		creditsRemain = entry.CreditLimit - entry.CreditsUsed
+		if creditsRemain < 0 {
+			creditsRemain = 0
+		}
+	}
+
+	json.NewEncoder(w).Encode(apiKeySelfInfo{
+		Enabled:       entry.Enabled,
+		TokenLimit:    entry.TokenLimit,
+		CreditLimit:   entry.CreditLimit,
+		TokensUsed:    entry.TokensUsed,
+		CreditsUsed:   entry.CreditsUsed,
+		RequestsCount: entry.RequestsCount,
+		TokensRemain:  tokensRemain,
+		CreditsRemain: creditsRemain,
+		OverToken:     overToken,
+		OverCredit:    overCredit,
+		Expired:       expired,
+		ExpiresAt:     entry.ExpiresAt,
+		Valid:         entry.Enabled && !expired && !overToken && !overCredit,
+	})
+}
