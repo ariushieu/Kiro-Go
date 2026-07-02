@@ -345,7 +345,7 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 		}
 	}
 
-	truncatePayloadToLimit(payload, systemPrompt != "")
+	truncatePayloadToLimit(payload, systemPrompt != "", modelID)
 
 	return payload
 }
@@ -1285,7 +1285,7 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 		}
 	}
 
-	truncatePayloadToLimit(payload, systemPrompt != "")
+	truncatePayloadToLimit(payload, systemPrompt != "", modelID)
 
 	return payload
 }
@@ -1627,12 +1627,20 @@ func sanitizeKiroHistory(history []KiroHistoryMessage, currentToolResultIDs map[
 // A single placeholder note (truncationPlaceholder) is inserted where older
 // turns were removed so the model is aware context was elided. hasPriming
 // indicates whether history begins with the 2-entry system priming pair.
-func truncatePayloadToLimit(payload *KiroPayload, hasPriming bool) {
+//
+// Two independent ceilings are enforced: the serialized byte cap
+// (config.GetMaxPayloadBytes) and the model's input-token window minus output
+// headroom (maxInputTokensForModel). Trimming continues until BOTH fit, so a
+// small-window model (e.g. 200K) is trimmed on tokens well before the 2MB byte
+// cap would ever fire — which is what prevents the upstream from being fed a
+// near-full context that leaves no room for the reply.
+func truncatePayloadToLimit(payload *KiroPayload, hasPriming bool, model string) {
 	if payload == nil {
 		return
 	}
 	limit := config.GetMaxPayloadBytes()
-	if payloadByteSize(payload) <= limit {
+	tokenLimit := maxInputTokensForModel(payload, model)
+	if payloadByteSize(payload) <= limit && payloadInputTokenSize(payload) <= tokenLimit {
 		return
 	}
 
@@ -1657,24 +1665,30 @@ func truncatePayloadToLimit(payload *KiroPayload, hasPriming bool) {
 		},
 	}
 
-	// Precompute byte size of each conversation entry once (O(n)).
+	// Precompute byte + token size of each conversation entry once (O(n)).
 	entrySizes := make([]int, len(conversation))
+	entryTokens := make([]int, len(conversation))
 	for i := range conversation {
 		entrySizes[i] = historyEntryByteSize(conversation[i])
+		entryTokens[i] = historyEntryTokenSize(conversation[i])
 	}
 
 	// Base size: payload with priming only (no conversation), plus placeholder.
 	payload.ConversationState.History = priming
 	baseSize := payloadByteSize(payload) + historyEntryByteSize(placeholderEntry)
+	baseTokens := payloadInputTokenSize(payload) + historyEntryTokenSize(placeholderEntry)
 
-	// Keep the largest suffix of the conversation that fits, but never fewer than
-	// minRecentHistoryTurns entries (so recent context is preserved).
+	// Keep the largest suffix of the conversation that fits BOTH the byte cap and
+	// the token window, but never fewer than minRecentHistoryTurns entries.
 	keepFrom := len(conversation)
 	running := baseSize
+	runningTokens := baseTokens
 	for i := len(conversation) - 1; i >= 0; i-- {
 		running += entrySizes[i]
+		runningTokens += entryTokens[i]
 		kept := len(conversation) - i
-		if running > limit && kept > minRecentHistoryTurns {
+		over := running > limit || runningTokens > tokenLimit
+		if over && kept > minRecentHistoryTurns {
 			break
 		}
 		keepFrom = i
@@ -1706,6 +1720,72 @@ func historyEntryByteSize(entry KiroHistoryMessage) int {
 		return 0
 	}
 	return len(raw) + 1
+}
+
+// userInputTokenSize estimates the input tokens contributed by a single Kiro
+// user message (its text plus any attached tool specs / tool results).
+func userInputTokenSize(m *KiroUserInputMessage) int {
+	if m == nil {
+		return 0
+	}
+	total := estimateApproxTokens(m.Content)
+	if m.UserInputMessageContext != nil {
+		for _, tw := range m.UserInputMessageContext.Tools {
+			total += estimateApproxTokens(tw.ToolSpecification.Name)
+			total += estimateApproxTokens(tw.ToolSpecification.Description)
+			total += estimateJSONTokens(tw.ToolSpecification.InputSchema.JSON)
+		}
+		for _, tr := range m.UserInputMessageContext.ToolResults {
+			for _, c := range tr.Content {
+				total += estimateApproxTokens(c.Text)
+			}
+		}
+	}
+	return total
+}
+
+// historyEntryTokenSize estimates the input tokens contributed by one history entry.
+func historyEntryTokenSize(entry KiroHistoryMessage) int {
+	if entry.UserInputMessage != nil {
+		return userInputTokenSize(entry.UserInputMessage)
+	}
+	if a := entry.AssistantResponseMessage; a != nil {
+		total := estimateApproxTokens(a.Content)
+		for _, tu := range a.ToolUses {
+			total += estimateApproxTokens(tu.Name) + estimateJSONTokens(tu.Input)
+		}
+		return total
+	}
+	return 0
+}
+
+// payloadInputTokenSize estimates the total input tokens of the serialized payload
+// (current message + full history). Used to trim against the model's token window.
+func payloadInputTokenSize(payload *KiroPayload) int {
+	total := userInputTokenSize(&payload.ConversationState.CurrentMessage.UserInputMessage)
+	for _, h := range payload.ConversationState.History {
+		total += historyEntryTokenSize(h)
+	}
+	return total
+}
+
+// maxInputTokensForModel returns the input-token ceiling for the payload: the
+// model's context window minus room reserved for output. Reserve is the client's
+// requested max_tokens, floored at 10% of the window so at least that much output
+// headroom always remains (and input never exceeds ~90% of the window).
+func maxInputTokensForModel(payload *KiroPayload, model string) int {
+	window := getContextWindowSize(model)
+	reserve := 0
+	if payload.InferenceConfig != nil {
+		reserve = payload.InferenceConfig.MaxTokens
+	}
+	if minReserve := window / 10; reserve < minReserve {
+		reserve = minReserve
+	}
+	if budget := window - reserve; budget > 0 {
+		return budget
+	}
+	return 0
 }
 
 // dropLeadingAssistant removes a leading assistant message from a history tail so

@@ -95,6 +95,49 @@ func TestClaudeToKiroSmallPayloadNotTruncated(t *testing.T) {
 	}
 }
 
+// TestClaudeToKiroTrimsOnTokenWindowUnderByteCap verifies the token-window
+// ceiling fires independently of the byte cap: a 200K-window model fed a history
+// that is well under the 2MB byte cap but far over its token window must still be
+// trimmed so input leaves output headroom.
+func TestClaudeToKiroTrimsOnTokenWindowUnderByteCap(t *testing.T) {
+	// ~4.5 chars/token → ~1.2M chars ≈ 1.2MB (< 2MB byte cap) but ≈ 270K tokens
+	// (> 200K window), so only the token ceiling should trigger truncation.
+	chunk := strings.Repeat("alpha beta gamma delta ", 260) // ~6KB per turn
+
+	msgs := []ClaudeMessage{{Role: "user", Content: "begin"}}
+	for i := 0; i < 100; i++ {
+		msgs = append(msgs,
+			ClaudeMessage{Role: "assistant", Content: chunk},
+			ClaudeMessage{Role: "user", Content: chunk},
+		)
+	}
+	msgs = append(msgs, ClaudeMessage{Role: "user", Content: "FINAL question"})
+
+	req := &ClaudeRequest{
+		Model:     "claude-sonnet-4.5", // 200K window
+		System:    "You are helpful.",
+		Messages:  msgs,
+		MaxTokens: 8000,
+	}
+
+	payload := ClaudeToKiro(req, false)
+
+	raw, _ := json.Marshal(payload)
+	if len(raw) >= config.GetMaxPayloadBytes() {
+		t.Fatalf("precondition: payload %d should be under byte cap; test no longer isolates token trim", len(raw))
+	}
+
+	budget := maxInputTokensForModel(payload, "claude-sonnet-4.5")
+	if got := payloadInputTokenSize(payload); got > budget {
+		t.Fatalf("input tokens %d exceed budget %d after truncation", got, budget)
+	}
+
+	cur := payload.ConversationState.CurrentMessage.UserInputMessage
+	if !strings.Contains(cur.Content, "FINAL question") {
+		t.Fatalf("current message lost after truncation")
+	}
+}
+
 func min(a, b int) int {
 	if a < b {
 		return a
