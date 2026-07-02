@@ -116,7 +116,7 @@
                 data-i18n="tabs.console"></span></button>
           </div>
         </nav>
-        <div class="topbar-actions flex-wrap justify-end">
+        <div class="topbar-actions justify-end">
           <div class="lang-switch" id="mainLangSwitch" role="group" aria-label="" data-i18n-aria-label="lang.label">
             <button class="lang-btn" data-lang="zh" type="button" data-i18n="lang.zh"></button>
             <button class="lang-btn" data-lang="en" type="button" data-i18n="lang.en"></button>
@@ -254,14 +254,25 @@
           <button class="btn btn-primary btn-sm" id="saveRequireApiKeyBtn" data-i18n="settings.saveApiKey"></button>
 
           <div class="form-group" style="margin-top: 1rem;">
-            <div class="flex items-center gap-2" style="justify-content: space-between;">
+            <div class="flex items-center gap-2" style="justify-content: space-between;flex-wrap:wrap;">
               <label class="font-semibold" data-i18n="apiKeys.listTitle"></label>
-              <button class="btn btn-outline btn-sm" id="addApiKeyBtn" type="button">
-                <i class="fa-solid fa-plus"></i>
-                <span data-i18n="apiKeys.add"></span>
-              </button>
+              <div class="flex items-center gap-2" style="flex-wrap:wrap;">
+                <button class="btn btn-outline btn-sm" id="bulkAddApiKeyBtn" type="button">
+                  <i class="fa-solid fa-layer-group"></i>
+                  <span data-i18n="apiKeys.bulkAdd"></span>
+                </button>
+                <button class="btn btn-outline btn-sm" id="addApiKeyBtn" type="button">
+                  <i class="fa-solid fa-plus"></i>
+                  <span data-i18n="apiKeys.add"></span>
+                </button>
+              </div>
             </div>
             <small data-i18n="apiKeys.listHint"></small>
+          </div>
+          <div class="usage-totals" id="apiKeyStats"></div>
+          <div id="apiKeyBulkBar" class="batch-bar hidden" style="margin:0.75rem 0;">
+            <span id="apiKeyBulkCount" class="batch-count"></span>
+            <button class="btn btn-danger btn-xs" id="bulkDeleteApiKeyBtn" type="button" data-i18n="apiKeys.bulkDelete"></button>
           </div>
           <div id="apiKeysList"></div>
         </div>
@@ -557,12 +568,17 @@
               <thead>
                 <tr>
                   <th data-i18n="apilog.colTime"></th>
+                  <th data-i18n="apilog.colStatus"></th>
+                  <th data-i18n="apilog.colEndpoint"></th>
                   <th data-i18n="apilog.colKey"></th>
                   <th data-i18n="apilog.colModel"></th>
+                  <th data-i18n="apilog.colAccount"></th>
                   <th class="num" data-i18n="apilog.colInput"></th>
                   <th class="num" data-i18n="apilog.colOutput"></th>
                   <th class="num" data-i18n="apilog.colTokens"></th>
                   <th class="num" data-i18n="apilog.colCredits"></th>
+                  <th class="num" data-i18n="apilog.colDuration"></th>
+                  <th data-i18n="apilog.colDetail"></th>
                 </tr>
               </thead>
               <tbody id="apiLogBody"></tbody>
@@ -592,8 +608,8 @@
 
       <!-- Console tab -->
       <div id="tabConsole" class="tab-content hidden">
-        <section class="console-card" aria-labelledby="consoleTitle">
-          <div class="card-header console-toolbar">
+        <div class="card" aria-labelledby="consoleTitle">
+          <div class="card-header">
             <span class="card-title" id="consoleTitle" data-i18n="console.title"></span>
             <div class="console-controls">
               <span class="console-status" id="consoleStatus" data-state="connecting">
@@ -625,7 +641,7 @@
             </div>
           </div>
           <div class="console-output" id="consoleOutput" role="log" aria-live="polite"></div>
-        </section>
+        </div>
       </div>
     </div>
 
@@ -752,12 +768,57 @@
         </div>
         <div class="form-group">
           <label data-i18n="apiKeys.expiresAt"></label>
-          <input type="datetime-local" id="apiKeyForm_expiresAt" />
+          <input type="date" id="apiKeyForm_expiresAt" />
           <small data-i18n="apiKeys.expiresAtHint"></small>
         </div>
         <div class="modal-footer">
           <button class="btn btn-secondary" id="apiKeyModalCancelBtn" type="button" data-i18n="apiKeys.cancelBtn"></button>
           <button class="btn btn-primary" id="apiKeyModalSaveBtn" type="button" data-i18n="apiKeys.saveBtn"></button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="apiKeyBulkModal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <span class="modal-title" data-i18n="apiKeys.bulkCreateTitle"></span>
+        <button class="modal-close" id="apiKeyBulkModalClose" type="button" aria-label=""
+          data-i18n-aria-label="common.close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label data-i18n="apiKeys.bulkCount"></label>
+          <input type="number" id="apiKeyBulk_count" min="1" max="100" step="1" value="10" />
+        </div>
+        <div class="form-group">
+          <label data-i18n="apiKeys.bulkNamePrefix"></label>
+          <input type="text" id="apiKeyBulk_namePrefix" data-i18n-placeholder="apiKeys.bulkNamePrefixPlaceholder" />
+        </div>
+        <div class="form-group">
+          <label class="flex items-center gap-2">
+            <span class="switch"><input type="checkbox" id="apiKeyBulk_enabled" checked /><span class="slider"></span></span>
+            <span data-i18n="apiKeys.formEnabled"></span>
+          </label>
+        </div>
+        <div class="form-group">
+          <label data-i18n="apiKeys.limitTokens"></label>
+          <input type="number" id="apiKeyBulk_tokenLimit" min="0" step="1" value="0" />
+          <small data-i18n="apiKeys.limitHint"></small>
+        </div>
+        <div class="form-group">
+          <label data-i18n="apiKeys.limitCredits"></label>
+          <input type="number" id="apiKeyBulk_creditLimit" min="0" step="0.01" value="0" />
+          <small data-i18n="apiKeys.limitHint"></small>
+        </div>
+        <div class="form-group">
+          <label data-i18n="apiKeys.expiresAt"></label>
+          <input type="date" id="apiKeyBulk_expiresAt" />
+          <small data-i18n="apiKeys.expiresAtHint"></small>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" id="apiKeyBulkCancelBtn" type="button" data-i18n="apiKeys.cancelBtn"></button>
+          <button class="btn btn-primary" id="apiKeyBulkSaveBtn" type="button" data-i18n="apiKeys.bulkCreate"></button>
         </div>
       </div>
     </div>
@@ -773,7 +834,7 @@
       <div class="modal-body">
         <p class="confirm-message" data-i18n="apiKeys.showWarning"></p>
         <div class="form-group">
-          <input type="text" id="apiKeyShowValue" readonly />
+          <textarea id="apiKeyShowValue" rows="6" readonly></textarea>
         </div>
         <div class="modal-footer">
           <button class="btn btn-outline" id="apiKeyShowCopyBtn" type="button" data-i18n="apiKeys.copyBtn"></button>

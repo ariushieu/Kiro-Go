@@ -14,6 +14,8 @@ import (
 // It records which API key was used, the model, token/credit cost and the serving account.
 type RequestLogEntry struct {
 	Time         int64   `json:"time"` // Unix seconds
+	Status       string  `json:"status"` // "ok" or "error"
+	Endpoint     string  `json:"endpoint,omitempty"` // "claude" or "openai"
 	APIKeyID     string  `json:"apiKeyId,omitempty"`
 	APIKeyName   string  `json:"apiKeyName,omitempty"`
 	APIKeyMasked string  `json:"apiKeyMasked,omitempty"`
@@ -24,6 +26,9 @@ type RequestLogEntry struct {
 	OutputTokens int     `json:"outputTokens"`
 	TotalTokens  int     `json:"totalTokens"`
 	Credits      float64 `json:"credits"`
+	DurationMs   int64   `json:"durationMs"`
+	StatusCode   int     `json:"statusCode,omitempty"` // upstream/HTTP status on error
+	Error        string  `json:"error,omitempty"`      // error detail on failure
 }
 
 // requestLogCapacity is the number of recent request entries retained in memory.
@@ -73,6 +78,9 @@ func (b *requestLogBuffer) snapshot() []RequestLogEntry {
 func logRequest(e RequestLogEntry) {
 	if e.Time == 0 {
 		e.Time = time.Now().Unix()
+	}
+	if e.Status == "" {
+		e.Status = "ok"
 	}
 	e.TotalTokens = e.InputTokens + e.OutputTokens
 	requestLog.add(e)
@@ -213,6 +221,66 @@ type apiKeySelfInfo struct {
 	Expired       bool    `json:"expired"`
 	ExpiresAt     int64   `json:"expiresAt,omitempty"`
 	Valid         bool    `json:"valid"` // false when the key is disabled/expired/over-limit
+}
+
+// apiKeySelfLogEntry is one row of a customer's own usage history. Deliberately
+// excludes account/key identifiers — a customer only needs to see what they spent.
+type apiKeySelfLogEntry struct {
+	Time         int64   `json:"time"`
+	Model        string  `json:"model,omitempty"`
+	InputTokens  int     `json:"inputTokens"`
+	OutputTokens int     `json:"outputTokens"`
+	TotalTokens  int     `json:"totalTokens"`
+	Credits      float64 `json:"credits"`
+}
+
+// apiKeySelfLogs GET /v1/key/logs — public self-service usage history, scoped to the
+// caller's own key (same auth as apiKeySelfInfo). Backs the portal's usage log/ledger.
+func (h *Handler) apiKeySelfLogs(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+
+	provided := extractProvidedKey(r)
+	if provided == "" {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid or missing API key"})
+		return
+	}
+	entry := config.FindApiKeyByValue(provided)
+	if entry == nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid or missing API key"})
+		return
+	}
+
+	limit := 50
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit > requestLogCapacity {
+		limit = requestLogCapacity
+	}
+
+	out := make([]apiKeySelfLogEntry, 0, limit)
+	for _, e := range requestLog.snapshot() {
+		if e.APIKeyID != entry.ID {
+			continue
+		}
+		out = append(out, apiKeySelfLogEntry{
+			Time:         e.Time,
+			Model:        e.Model,
+			InputTokens:  e.InputTokens,
+			OutputTokens: e.OutputTokens,
+			TotalTokens:  e.TotalTokens,
+			Credits:      e.Credits,
+		})
+		if len(out) >= limit {
+			break
+		}
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{"logs": out})
 }
 
 // apiKeySelfInfo GET/POST /v1/key/info — public self-service usage lookup.

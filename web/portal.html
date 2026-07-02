@@ -16,142 +16,532 @@
       if (css) css.href = '/admin/styles.css?v=' + v;
       var tcss = document.getElementById('__toastCss');
       if (tcss) tcss.href = '/admin/toast.css?v=' + v;
+      // Resolve theme before first paint to avoid a flash.
+      try {
+        var pref = localStorage.getItem('kiro_theme') || 'system';
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var dark = pref === 'dark' || (pref === 'system' && mq.matches);
+        if (dark) document.documentElement.classList.add('dark');
+      } catch (e) { }
     })();
   </script>
   <style>
-    /* Self-contained portal layout — does not depend on app.js */
-    .portal-wrap {
-      max-width: 640px;
+    /* ============================================================
+       Kiro-Go self-service portal — the "credit ledger".
+       Identity: a printed usage receipt. The remaining balance is
+       the hero; the ledger of spends is the signature. Reuses the
+       admin design tokens (Geist / Geist Mono, flat, light + dark).
+       Self-contained: no dependency on app.js.
+       ============================================================ */
+
+    .portal {
+      --p-gauge-track: rgba(127, 127, 127, 0.16);
+      --p-line: var(--border);
+      --p-good: var(--info);
+      --p-warn: var(--warning);
+      --p-crit: var(--destructive);
+      max-width: 34rem;
       margin: 0 auto;
-      padding: 3rem 1.25rem 4rem;
+      padding: clamp(1.75rem, 4vw, 3.25rem) 1.25rem 4rem;
     }
-    .portal-head {
+
+    /* Masthead — quiet, lets the ledger carry the personality. */
+    .p-top {
       display: flex;
       align-items: center;
       gap: 0.625rem;
+      padding-bottom: 1.25rem;
       margin-bottom: 1.5rem;
+      border-bottom: 1px solid var(--p-line);
     }
-    .portal-head .brand-name {
-      font-size: 1.25rem;
+    .p-mark {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 2rem;
+      height: 2rem;
+      font-size: 1.05rem;
+      color: var(--primary-foreground);
+      background: var(--primary);
+      border-radius: var(--radius-md);
+    }
+    .p-wordmark {
+      display: flex;
+      flex-direction: column;
+      line-height: 1.1;
+    }
+    .p-wordmark b {
+      font-size: 1rem;
       font-weight: 600;
       letter-spacing: -0.015em;
     }
-    .portal-lang {
+    .p-wordmark span {
+      font-size: 0.6875rem;
+      color: var(--muted-foreground);
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+    .p-top-actions {
       margin-left: auto;
       display: inline-flex;
-      gap: 0.25rem;
+      align-items: center;
+      gap: 0.5rem;
     }
-    .portal-lang button {
+    .p-seg {
+      display: inline-flex;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      overflow: hidden;
+    }
+    .p-seg button {
       font: inherit;
+      font-size: 0.6875rem;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      padding: 0.3rem 0.55rem;
+      border: 0;
+      background: transparent;
+      color: var(--muted-foreground);
+      cursor: pointer;
+      transition: background-color 0.15s, color 0.15s;
+    }
+    .p-seg button + button { border-left: 1px solid var(--border); }
+    .p-seg button:hover { color: var(--foreground); background: var(--accent); }
+    .p-seg button.active { background: var(--foreground); color: var(--background); }
+    .p-icon-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 2rem;
+      height: 2rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      background: transparent;
+      color: var(--muted-foreground);
+      cursor: pointer;
+      transition: background-color 0.15s, color 0.15s;
+    }
+    .p-icon-btn:hover { background: var(--accent); color: var(--foreground); }
+    .p-icon-btn .t-sys, .p-icon-btn .t-light, .p-icon-btn .t-dark { display: none; }
+    .portal[data-theme="system"] .t-sys,
+    .portal[data-theme="light"] .t-light,
+    .portal[data-theme="dark"] .t-dark { display: inline-flex; }
+
+    /* Check panel */
+    .p-check-title {
+      font-size: 1.375rem;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+      margin: 0 0 0.35rem;
+    }
+    .p-check-hint {
+      font-size: 0.8125rem;
+      color: var(--muted-foreground);
+      line-height: 1.55;
+      margin: 0 0 1rem;
+    }
+    .p-key-row { display: flex; gap: 0.5rem; align-items: stretch; }
+    .p-key-row .btn { flex: 0 0 auto; }
+    .p-key-field { position: relative; flex: 1; min-width: 0; }
+    .p-key-field .p-eye {
+      position: absolute;
+      right: 0.4rem;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 1.75rem;
+      height: 1.75rem;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border: 0;
+      background: transparent;
+      color: var(--muted-foreground);
+      cursor: pointer;
+      border-radius: var(--radius-sm);
+    }
+    .p-key-field .p-eye:hover { color: var(--foreground); }
+    .p-key-field input {
+      padding-right: 2.5rem !important;
+      font-family: var(--font-mono);
+      letter-spacing: 0.02em;
+    }
+
+    /* ---- Receipt (result) ---- */
+    .p-receipt {
+      margin-top: 1.5rem;
+      border: 1px solid var(--p-line);
+      border-radius: var(--radius-lg);
+      background: var(--card);
+      overflow: hidden;
+    }
+    /* Perforated top edge — the signature "torn receipt" detail. */
+    .p-perf {
+      height: 10px;
+      background:
+        radial-gradient(circle at 6px 10px, transparent 5px, var(--card) 5px) repeat-x;
+      background-size: 12px 10px;
+      border-bottom: 1px dashed var(--p-line);
+    }
+    .p-receipt-body { padding: 1.25rem 1.25rem 1.5rem; }
+
+    .p-status-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      flex-wrap: wrap;
+    }
+    .p-status-row h2 {
       font-size: 0.75rem;
       font-weight: 600;
-      padding: 0.25rem 0.5rem;
-      border-radius: var(--radius-md, 8px);
-      border: 1px solid var(--border, #333);
-      background: transparent;
-      color: var(--muted-foreground, #999);
-      cursor: pointer;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted-foreground);
+      margin: 0;
     }
-    .portal-lang button.active {
-      background: var(--foreground, #fff);
-      color: var(--background, #000);
-    }
-    .portal-usage-grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 0.75rem;
-      margin-top: 1rem;
-    }
-    @media (max-width: 480px) {
-      .portal-usage-grid { grid-template-columns: 1fr; }
-    }
-    .portal-bar {
-      height: 8px;
-      background: rgba(127, 127, 127, 0.2);
-      border-radius: 4px;
-      overflow: hidden;
-      margin-top: 0.5rem;
-    }
-    .portal-bar > span {
-      display: block;
-      height: 100%;
-      transition: width 0.3s;
-    }
-    .portal-status {
+    .p-pill {
       display: inline-flex;
       align-items: center;
       gap: 0.4rem;
-      padding: 0.35rem 0.7rem;
+      padding: 0.3rem 0.7rem;
       border-radius: 999px;
-      font-size: 0.8125rem;
+      font-size: 0.75rem;
       font-weight: 600;
+      letter-spacing: 0.01em;
     }
-    .portal-status.ok { background: rgba(34, 197, 94, 0.15); color: #22c55e; }
-    .portal-status.bad { background: rgba(239, 68, 68, 0.15); color: #ef4444; }
-    .portal-key-row {
+    .p-pill::before {
+      content: "";
+      width: 0.4rem;
+      height: 0.4rem;
+      border-radius: 999px;
+      background: currentColor;
+    }
+    .p-pill.ok { background: color-mix(in oklab, var(--success) 16%, transparent); color: var(--success); }
+    .p-pill.bad { background: color-mix(in oklab, var(--destructive) 16%, transparent); color: var(--destructive); }
+
+    /* Hero — remaining balance */
+    .p-hero {
+      margin: 1.1rem 0 0.35rem;
       display: flex;
+      align-items: flex-end;
       gap: 0.5rem;
-      align-items: stretch;
+      flex-wrap: wrap;
     }
-    .portal-key-row input { flex: 1; }
+    .p-hero .p-hero-num {
+      font-family: var(--font-mono);
+      font-size: clamp(2rem, 8vw, 2.75rem);
+      font-weight: 600;
+      letter-spacing: -0.03em;
+      line-height: 1;
+      font-variant-numeric: tabular-nums;
+    }
+    .p-hero .p-hero-unit {
+      font-size: 0.9rem;
+      font-weight: 500;
+      color: var(--muted-foreground);
+      padding-bottom: 0.2rem;
+    }
+    .p-hero-label {
+      font-size: 0.75rem;
+      color: var(--muted-foreground);
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      margin-bottom: 0.85rem;
+    }
+
+    /* Gauges */
+    .p-gauges { display: grid; gap: 1rem; margin-top: 0.5rem; }
+    .p-gauge-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 0.5rem;
+      font-size: 0.8125rem;
+      margin-bottom: 0.4rem;
+    }
+    .p-gauge-head .lbl { color: var(--muted-foreground); font-weight: 500; }
+    .p-gauge-head .val { font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-weight: 500; }
+    .p-gauge {
+      position: relative;
+      height: 0.55rem;
+      background: var(--p-gauge-track);
+      border-radius: 999px;
+      overflow: hidden;
+    }
+    .p-gauge > i {
+      display: block;
+      height: 100%;
+      width: 0;
+      border-radius: 999px;
+      transition: width 0.5s cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    /* Threshold ticks at 80% / 95% — reads the color logic back onto the track. */
+    .p-gauge::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      background:
+        linear-gradient(var(--p-line), var(--p-line)) 80% 0 / 1px 100% no-repeat,
+        linear-gradient(var(--p-line), var(--p-line)) 95% 0 / 1px 100% no-repeat;
+      opacity: 0.5;
+    }
+    .p-gauge-unlimited {
+      font-family: var(--font-mono);
+      font-size: 0.8125rem;
+      color: var(--muted-foreground);
+    }
+
+    /* Meta rows — receipt-style dotted leaders */
+    .p-meta { margin-top: 1.25rem; display: grid; gap: 0.45rem; }
+    .p-meta-row {
+      display: flex;
+      align-items: baseline;
+      gap: 0.5rem;
+      font-size: 0.8125rem;
+    }
+    .p-meta-row .k { color: var(--muted-foreground); white-space: nowrap; }
+    .p-meta-row .dots {
+      flex: 1;
+      border-bottom: 1px dotted var(--p-line);
+      transform: translateY(-0.2rem);
+      min-width: 1.5rem;
+    }
+    .p-meta-row .v {
+      font-family: var(--font-mono);
+      font-variant-numeric: tabular-nums;
+      font-weight: 500;
+      white-space: nowrap;
+    }
+
+    /* ---- Ledger (usage log) — the signature element ---- */
+    .p-ledger { margin-top: 1.5rem; }
+    .p-ledger-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem;
+      padding-top: 1rem;
+      border-top: 1px dashed var(--p-line);
+      margin-bottom: 0.5rem;
+    }
+    .p-ledger-head h3 {
+      font-size: 0.75rem;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted-foreground);
+      margin: 0;
+    }
+    .p-ledger-refresh {
+      font: inherit;
+      font-size: 0.75rem;
+      color: var(--muted-foreground);
+      background: transparent;
+      border: 0;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.3rem;
+    }
+    .p-ledger-refresh:hover { color: var(--foreground); }
+    .p-ledger-scroll {
+      max-height: 20rem;
+      overflow-y: auto;
+      margin: 0 -0.25rem;
+    }
+    .p-ledger-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      font-variant-numeric: tabular-nums;
+    }
+    .p-ledger-table th {
+      position: sticky;
+      top: 0;
+      background: var(--card);
+      text-align: left;
+      font-weight: 500;
+      color: var(--muted-foreground);
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+      font-size: 0.6875rem;
+      padding: 0.35rem 0.5rem;
+      border-bottom: 1px solid var(--p-line);
+    }
+    .p-ledger-table th.num, .p-ledger-table td.num { text-align: right; }
+    .p-ledger-table td {
+      padding: 0.4rem 0.5rem;
+      border-bottom: 1px dotted var(--p-line);
+      color: var(--foreground);
+      white-space: nowrap;
+    }
+    .p-ledger-table td.time { color: var(--muted-foreground); }
+    .p-ledger-table td.model {
+      max-width: 9rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .p-ledger-table td.credits { font-weight: 600; }
+    .p-ledger-table tbody tr:hover td { background: rgba(127, 127, 127, 0.06); }
+    .p-ledger-empty {
+      padding: 1.5rem 0.5rem;
+      text-align: center;
+      color: var(--muted-foreground);
+      font-size: 0.8125rem;
+    }
+    .p-ledger-foot {
+      display: flex;
+      align-items: baseline;
+      gap: 0.5rem;
+      padding: 0.55rem 0.5rem 0;
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      font-variant-numeric: tabular-nums;
+    }
+    .p-ledger-foot .k { color: var(--muted-foreground); text-transform: uppercase; letter-spacing: 0.04em; }
+    .p-ledger-foot .dots { flex: 1; border-bottom: 1px dotted var(--p-line); transform: translateY(-0.2rem); }
+    .p-ledger-foot .v { font-weight: 600; }
+
+    .p-foot {
+      margin-top: 1.75rem;
+      text-align: center;
+      font-size: 0.6875rem;
+      color: var(--muted-foreground);
+      letter-spacing: 0.02em;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .p-gauge > i { transition: none; }
+    }
   </style>
 </head>
 
 <body>
-  <div class="portal-wrap">
-    <div class="portal-head">
-      <i class="fa-solid fa-ghost" style="font-size:1.5rem;"></i>
-      <span class="brand-name">Kiro-Go</span>
-      <div class="portal-lang" id="langBtns">
-        <button data-lang="vi">VI</button>
-        <button data-lang="en">EN</button>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="card-header"><span class="card-title" data-t="title"></span></div>
-      <p class="muted-text text-sm" data-t="hint" style="margin-bottom:0.75rem;"></p>
-      <div class="portal-key-row">
-        <input type="password" id="keyInput" autocomplete="off" spellcheck="false" />
-        <button class="btn btn-secondary btn-sm" id="toggleKeyBtn" type="button" aria-label="show">
-          <i class="fa-solid fa-eye"></i>
+  <div class="portal" id="portal" data-theme="system">
+    <div class="p-top">
+      <span class="p-mark"><i class="fa-solid fa-ghost"></i></span>
+      <span class="p-wordmark">
+        <b>Kiro-Go</b>
+        <span data-t="brandTag"></span>
+      </span>
+      <div class="p-top-actions">
+        <div class="p-seg" id="langBtns">
+          <button data-lang="vi">VI</button>
+          <button data-lang="en">EN</button>
+        </div>
+        <button class="p-icon-btn" id="themeBtn" type="button" aria-label="theme">
+          <i class="fa-solid fa-circle-half-stroke t-sys"></i>
+          <i class="fa-solid fa-sun t-light"></i>
+          <i class="fa-solid fa-moon t-dark"></i>
         </button>
-        <button class="btn btn-primary" id="checkBtn" type="button" data-t="check"></button>
       </div>
     </div>
 
-    <div class="card" id="resultCard" style="margin-top:1rem;display:none;">
-      <div class="card-header">
-        <span class="card-title" data-t="usageTitle"></span>
-        <span class="portal-status" id="statusPill"></span>
-      </div>
-
-      <div class="portal-usage-grid">
-        <div>
-          <div class="text-sm muted-text" id="tokensLabel"></div>
-          <div class="font-semibold" id="tokensVal" style="margin-top:0.15rem;"></div>
-          <div class="portal-bar" id="tokensBarWrap" style="display:none;"><span id="tokensBar"></span></div>
+    <div>
+      <h1 class="p-check-title" data-t="title"></h1>
+      <p class="p-check-hint" data-t="hint"></p>
+      <div class="p-key-row">
+        <div class="p-key-field">
+          <input type="password" id="keyInput" autocomplete="off" spellcheck="false" data-t-ph="keyPlaceholder" />
+          <button class="p-eye" id="toggleKeyBtn" type="button" aria-label="show">
+            <i class="fa-solid fa-eye"></i>
+          </button>
         </div>
-        <div>
-          <div class="text-sm muted-text" id="creditsLabel"></div>
-          <div class="font-semibold" id="creditsVal" style="margin-top:0.15rem;"></div>
-          <div class="portal-bar" id="creditsBarWrap" style="display:none;"><span id="creditsBar"></span></div>
-        </div>
-      </div>
-
-      <div style="margin-top:1rem;display:grid;gap:0.4rem;">
-        <div class="text-sm"><span class="muted-text" data-t="requests"></span>: <span id="reqVal" class="font-semibold"></span></div>
-        <div class="text-sm" id="expiryRow" style="display:none;"><span class="muted-text" data-t="expiry"></span>: <span id="expiryVal" class="font-semibold"></span></div>
+        <button class="btn btn-primary" id="checkBtn" type="button">
+          <i class="fa-solid fa-magnifying-glass"></i>
+          <span data-t="check"></span>
+        </button>
       </div>
     </div>
+
+    <div class="p-receipt" id="resultCard" style="display:none;">
+      <div class="p-perf"></div>
+      <div class="p-receipt-body">
+        <div class="p-status-row">
+          <h2 data-t="usageTitle"></h2>
+          <span class="p-pill" id="statusPill"></span>
+        </div>
+
+        <div class="p-hero">
+          <span class="p-hero-num" id="heroNum">—</span>
+          <span class="p-hero-unit" id="heroUnit"></span>
+        </div>
+        <div class="p-hero-label" id="heroLabel"></div>
+
+        <div class="p-gauges">
+          <div>
+            <div class="p-gauge-head">
+              <span class="lbl" id="tokensLabel"></span>
+              <span class="val" id="tokensVal"></span>
+            </div>
+            <div class="p-gauge" id="tokensGaugeWrap" style="display:none;"><i id="tokensGauge"></i></div>
+          </div>
+          <div>
+            <div class="p-gauge-head">
+              <span class="lbl" id="creditsLabel"></span>
+              <span class="val" id="creditsVal"></span>
+            </div>
+            <div class="p-gauge" id="creditsGaugeWrap" style="display:none;"><i id="creditsGauge"></i></div>
+          </div>
+        </div>
+
+        <div class="p-meta">
+          <div class="p-meta-row">
+            <span class="k" data-t="requests"></span>
+            <span class="dots"></span>
+            <span class="v" id="reqVal"></span>
+          </div>
+          <div class="p-meta-row" id="expiryRow" style="display:none;">
+            <span class="k" data-t="expiry"></span>
+            <span class="dots"></span>
+            <span class="v" id="expiryVal"></span>
+          </div>
+        </div>
+
+        <div class="p-ledger">
+          <div class="p-ledger-head">
+            <h3 data-t="ledgerTitle"></h3>
+            <button class="p-ledger-refresh" id="ledgerRefresh" type="button">
+              <i class="fa-solid fa-rotate"></i><span data-t="refresh"></span>
+            </button>
+          </div>
+          <div class="p-ledger-scroll">
+            <table class="p-ledger-table">
+              <thead>
+                <tr>
+                  <th data-t="colTime"></th>
+                  <th data-t="colModel"></th>
+                  <th class="num" data-t="colTokens"></th>
+                  <th class="num" data-t="colCredits"></th>
+                </tr>
+              </thead>
+              <tbody id="ledgerBody"></tbody>
+            </table>
+            <div class="p-ledger-empty" id="ledgerEmpty" style="display:none;"></div>
+          </div>
+          <div class="p-ledger-foot" id="ledgerFoot" style="display:none;">
+            <span class="k" data-t="ledgerTotal"></span>
+            <span class="dots"></span>
+            <span class="v" id="ledgerFootVal"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="p-foot" data-t="footerNote"></div>
   </div>
 
   <script>
     (function () {
       var I18N = {
         vi: {
+          brandTag: 'Cổng khách hàng',
           title: 'Kiểm tra API Key',
-          hint: 'Nhập API key của bạn để xem hạn mức token/credit còn lại. Trang này không cần mật khẩu quản trị.',
+          hint: 'Nhập API key của bạn để xem số dư còn lại và nhật ký sử dụng. Trang này không cần mật khẩu quản trị.',
+          keyPlaceholder: 'sk-...',
           check: 'Kiểm tra',
           usageTitle: 'Tình trạng sử dụng',
           tokens: 'Tokens',
@@ -161,59 +551,112 @@
           unlimited: 'Không giới hạn',
           used: 'đã dùng',
           remain: 'còn lại',
+          remainCredits: 'Credit còn lại',
+          remainTokens: 'Token còn lại',
+          unlimitedShort: 'Không giới hạn',
           valid: 'Đang hoạt động',
           invalid: 'Không dùng được',
           disabled: 'Đã tắt',
           expired: 'Đã hết hạn',
           overLimit: 'Vượt hạn mức',
+          ledgerTitle: 'Nhật ký sử dụng',
+          refresh: 'Làm mới',
+          colTime: 'Thời gian',
+          colModel: 'Model',
+          colTokens: 'Tokens',
+          colCredits: 'Credits',
+          ledgerTotal: 'Tổng credit đã dùng',
+          ledgerEmpty: 'Chưa có yêu cầu nào được ghi lại',
+          footerNote: 'Nhật ký lưu trong bộ nhớ (1000 mục gần nhất), có thể mất khi máy chủ khởi động lại.',
           keyRequired: 'Vui lòng nhập API key',
           notFound: 'API key không hợp lệ',
           failed: 'Kiểm tra thất bại'
         },
         en: {
-          title: 'Check API Key',
-          hint: 'Enter your API key to see remaining token/credit quota. No admin password needed.',
+          brandTag: 'Customer portal',
+          title: 'Check your API key',
+          hint: 'Enter your API key to see your remaining balance and usage ledger. No admin password needed.',
+          keyPlaceholder: 'sk-...',
           check: 'Check',
-          usageTitle: 'Usage Status',
+          usageTitle: 'Usage status',
           tokens: 'Tokens',
           credits: 'Credits',
-          requests: 'Total Requests',
+          requests: 'Total requests',
           expiry: 'Expiry',
           unlimited: 'Unlimited',
           used: 'used',
           remain: 'left',
+          remainCredits: 'Credits remaining',
+          remainTokens: 'Tokens remaining',
+          unlimitedShort: 'Unlimited',
           valid: 'Active',
           invalid: 'Not usable',
           disabled: 'Disabled',
           expired: 'Expired',
           overLimit: 'Over limit',
+          ledgerTitle: 'Usage ledger',
+          refresh: 'Refresh',
+          colTime: 'Time',
+          colModel: 'Model',
+          colTokens: 'Tokens',
+          colCredits: 'Credits',
+          ledgerTotal: 'Total credits spent',
+          ledgerEmpty: 'No requests recorded yet',
+          footerNote: 'Ledger is kept in memory (last 1000 entries) and may reset when the server restarts.',
           keyRequired: 'Please enter an API key',
           notFound: 'Invalid API key',
           failed: 'Check failed'
         }
       };
 
+      var $ = function (id) { return document.getElementById(id); };
+      var portal = $('portal');
+
       var lang = (localStorage.getItem('kiro_lang') === 'en') ? 'en' : 'vi';
-      function t(k) { return (I18N[lang] && I18N[lang][k]) || (I18N.vi[k]) || k; }
+      function t(k) { return (I18N[lang] && I18N[lang][k]) || I18N.vi[k] || k; }
 
       function applyLang() {
         document.documentElement.lang = lang;
         document.querySelectorAll('[data-t]').forEach(function (el) {
           el.textContent = t(el.getAttribute('data-t'));
         });
+        document.querySelectorAll('[data-t-ph]').forEach(function (el) {
+          el.setAttribute('placeholder', t(el.getAttribute('data-t-ph')));
+        });
         document.querySelectorAll('#langBtns button').forEach(function (b) {
           b.classList.toggle('active', b.dataset.lang === lang);
         });
-        // Re-render result if visible so labels track the language.
         if (lastData) renderResult(lastData);
+        if (lastLogs) renderLedger(lastLogs);
       }
 
+      // ---- Theme (system / light / dark) ----
+      var THEMES = ['system', 'light', 'dark'];
+      var themeMQ = window.matchMedia('(prefers-color-scheme: dark)');
+      function getThemePref() {
+        var s = localStorage.getItem('kiro_theme');
+        return THEMES.indexOf(s) >= 0 ? s : 'system';
+      }
+      function applyTheme(pref) {
+        var dark = pref === 'dark' || (pref === 'system' && themeMQ.matches);
+        document.documentElement.classList.toggle('dark', dark);
+        portal.dataset.theme = pref;
+      }
+      themeMQ.addEventListener('change', function () {
+        if (getThemePref() === 'system') applyTheme('system');
+      });
+      $('themeBtn').addEventListener('click', function () {
+        var next = THEMES[(THEMES.indexOf(getThemePref()) + 1) % THEMES.length];
+        localStorage.setItem('kiro_theme', next);
+        applyTheme(next);
+      });
+
+      // ---- Formatting ----
       function fmtNum(n) {
         if (n == null || isNaN(n)) return '0';
         if (Math.abs(n) >= 1 && Math.floor(n) === n) return Number(n).toLocaleString('en-US');
         return Number(n).toLocaleString('en-US', { maximumFractionDigits: 4 });
       }
-
       function fmtDate(unixSec) {
         if (!unixSec) return '';
         var d = new Date(unixSec * 1000);
@@ -221,39 +664,44 @@
         return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) +
           ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
       }
-
-      function barColor(ratio) {
-        if (ratio >= 0.95) return '#ef4444';
-        if (ratio >= 0.8) return '#f59e0b';
-        return '#3b82f6';
+      function fmtTime(unixSec) {
+        if (!unixSec) return '';
+        var d = new Date(unixSec * 1000);
+        var pad = function (x) { return String(x).padStart(2, '0'); };
+        return pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+      }
+      function gaugeColor(ratio) {
+        if (ratio >= 0.95) return 'var(--p-crit)';
+        if (ratio >= 0.8) return 'var(--p-warn)';
+        return 'var(--p-good)';
       }
 
       var lastData = null;
+      var lastLogs = null;
 
-      function setUsage(labelEl, valEl, barWrap, barEl, unitKey, used, limit) {
-        labelEl.textContent = t(unitKey);
+      function setGauge(headVal, wrap, fill, used, limit) {
         if (!limit || limit <= 0) {
-          valEl.textContent = fmtNum(used) + ' ' + t('used') + ' · ' + t('unlimited');
-          barWrap.style.display = 'none';
+          headVal.textContent = fmtNum(used) + ' · ' + t('unlimited');
+          wrap.style.display = 'none';
           return;
         }
         var ratio = Math.max(0, Math.min(1, used / limit));
-        valEl.textContent = fmtNum(used) + ' / ' + fmtNum(limit) + ' · ' + fmtNum(Math.max(0, limit - used)) + ' ' + t('remain');
-        barWrap.style.display = 'block';
-        barEl.style.width = (ratio * 100).toFixed(1) + '%';
-        barEl.style.background = barColor(ratio);
+        headVal.textContent = fmtNum(used) + ' / ' + fmtNum(limit);
+        wrap.style.display = 'block';
+        fill.style.width = (ratio * 100).toFixed(1) + '%';
+        fill.style.background = gaugeColor(ratio);
       }
 
       function renderResult(d) {
         lastData = d;
-        document.getElementById('resultCard').style.display = '';
+        $('resultCard').style.display = '';
 
-        var pill = document.getElementById('statusPill');
+        var pill = $('statusPill');
         if (d.valid) {
-          pill.className = 'portal-status ok';
+          pill.className = 'p-pill ok';
           pill.textContent = t('valid');
         } else {
-          pill.className = 'portal-status bad';
+          pill.className = 'p-pill bad';
           var reason = t('invalid');
           if (!d.enabled) reason = t('disabled');
           else if (d.expired) reason = t('expired');
@@ -261,68 +709,129 @@
           pill.textContent = reason;
         }
 
-        setUsage(
-          document.getElementById('tokensLabel'), document.getElementById('tokensVal'),
-          document.getElementById('tokensBarWrap'), document.getElementById('tokensBar'),
-          'tokens', d.tokensUsed || 0, d.tokenLimit || 0
-        );
-        setUsage(
-          document.getElementById('creditsLabel'), document.getElementById('creditsVal'),
-          document.getElementById('creditsBarWrap'), document.getElementById('creditsBar'),
-          'credits', d.creditsUsed || 0, d.creditLimit || 0
-        );
-
-        document.getElementById('reqVal').textContent = fmtNum(d.requestsCount || 0);
-
-        var expRow = document.getElementById('expiryRow');
-        if (d.expiresAt) {
-          expRow.style.display = '';
-          document.getElementById('expiryVal').textContent = fmtDate(d.expiresAt);
+        // Hero: prefer remaining credits; fall back to tokens; else unlimited.
+        var heroNum = $('heroNum'), heroUnit = $('heroUnit'), heroLabel = $('heroLabel');
+        if (d.creditLimit && d.creditLimit > 0) {
+          heroNum.textContent = fmtNum(Math.max(0, (d.creditLimit - (d.creditsUsed || 0))));
+          heroUnit.textContent = t('credits');
+          heroLabel.textContent = t('remainCredits');
+        } else if (d.tokenLimit && d.tokenLimit > 0) {
+          heroNum.textContent = fmtNum(Math.max(0, (d.tokenLimit - (d.tokensUsed || 0))));
+          heroUnit.textContent = t('tokens');
+          heroLabel.textContent = t('remainTokens');
         } else {
-          expRow.style.display = 'none';
+          heroNum.textContent = '∞';
+          heroUnit.textContent = '';
+          heroLabel.textContent = t('unlimitedShort');
+        }
+
+        $('tokensLabel').textContent = t('tokens');
+        $('creditsLabel').textContent = t('credits');
+        setGauge($('tokensVal'), $('tokensGaugeWrap'), $('tokensGauge'), d.tokensUsed || 0, d.tokenLimit || 0);
+        setGauge($('creditsVal'), $('creditsGaugeWrap'), $('creditsGauge'), d.creditsUsed || 0, d.creditLimit || 0);
+
+        $('reqVal').textContent = fmtNum(d.requestsCount || 0);
+        if (d.expiresAt) {
+          $('expiryRow').style.display = '';
+          $('expiryVal').textContent = fmtDate(d.expiresAt);
+        } else {
+          $('expiryRow').style.display = 'none';
         }
       }
 
-      function toast(msg) {
-        // Minimal inline notice — reuse alert-free flash on the button area.
-        var btn = document.getElementById('checkBtn');
-        var old = btn.textContent;
-        btn.textContent = msg;
-        setTimeout(function () { btn.textContent = old; }, 1800);
+      function renderLedger(logs) {
+        lastLogs = logs;
+        var body = $('ledgerBody');
+        var empty = $('ledgerEmpty');
+        var foot = $('ledgerFoot');
+        if (!logs || !logs.length) {
+          body.innerHTML = '';
+          empty.textContent = t('ledgerEmpty');
+          empty.style.display = '';
+          foot.style.display = 'none';
+          return;
+        }
+        empty.style.display = 'none';
+        var totalCredits = 0;
+        var rows = logs.map(function (e) {
+          totalCredits += (e.credits || 0);
+          return '<tr>' +
+            '<td class="time">' + fmtTime(e.time) + '</td>' +
+            '<td class="model" title="' + (e.model || '') + '">' + escapeHtml(e.model || '—') + '</td>' +
+            '<td class="num">' + fmtNum(e.totalTokens || 0) + '</td>' +
+            '<td class="num credits">' + fmtNum(e.credits || 0) + '</td>' +
+            '</tr>';
+        }).join('');
+        body.innerHTML = rows;
+        foot.style.display = '';
+        $('ledgerFootVal').textContent = fmtNum(totalCredits);
+      }
+
+      function escapeHtml(s) {
+        var d = document.createElement('div');
+        d.textContent = s == null ? '' : String(s);
+        return d.innerHTML;
+      }
+
+      function flash(msg) {
+        var btn = $('checkBtn');
+        var span = btn.querySelector('span');
+        var old = span.textContent;
+        span.textContent = msg;
+        setTimeout(function () { span.textContent = old; }, 1800);
+      }
+
+      function currentKey() { return $('keyInput').value.trim(); }
+
+      async function fetchLedger() {
+        var key = currentKey();
+        if (!key) return;
+        try {
+          var res = await fetch('/v1/key/logs?limit=100', {
+            method: 'GET',
+            headers: { 'Authorization': 'Bearer ' + key }
+          });
+          if (!res.ok) { renderLedger([]); return; }
+          var d = await res.json();
+          renderLedger(Array.isArray(d.logs) ? d.logs : []);
+        } catch (e) {
+          renderLedger([]);
+        }
       }
 
       async function check() {
-        var key = document.getElementById('keyInput').value.trim();
-        if (!key) { toast(t('keyRequired')); return; }
-        var btn = document.getElementById('checkBtn');
+        var key = currentKey();
+        if (!key) { flash(t('keyRequired')); return; }
+        var btn = $('checkBtn');
         btn.disabled = true;
         try {
           var res = await fetch('/v1/key/info', {
             method: 'GET',
             headers: { 'Authorization': 'Bearer ' + key }
           });
-          if (res.status === 401) { toast(t('notFound')); return; }
-          if (!res.ok) { toast(t('failed')); return; }
+          if (res.status === 401) { flash(t('notFound')); return; }
+          if (!res.ok) { flash(t('failed')); return; }
           var d = await res.json();
           renderResult(d);
+          fetchLedger();
         } catch (e) {
-          toast(t('failed'));
+          flash(t('failed'));
         } finally {
           btn.disabled = false;
         }
       }
 
-      document.getElementById('checkBtn').addEventListener('click', check);
-      document.getElementById('keyInput').addEventListener('keypress', function (e) {
-        if (e.key === 'Enter') check();
-      });
-      document.getElementById('toggleKeyBtn').addEventListener('click', function () {
-        var f = document.getElementById('keyInput');
+      // ---- Wiring ----
+      $('checkBtn').addEventListener('click', check);
+      $('keyInput').addEventListener('keypress', function (e) { if (e.key === 'Enter') check(); });
+      $('ledgerRefresh').addEventListener('click', fetchLedger);
+      $('toggleKeyBtn').addEventListener('click', function () {
+        var f = $('keyInput');
         var show = f.type === 'password';
         f.type = show ? 'text' : 'password';
         this.innerHTML = show ? '<i class="fa-solid fa-eye-slash"></i>' : '<i class="fa-solid fa-eye"></i>';
       });
-      document.getElementById('langBtns').addEventListener('click', function (e) {
+      $('langBtns').addEventListener('click', function (e) {
         var b = e.target.closest('button');
         if (!b) return;
         lang = b.dataset.lang;
@@ -330,6 +839,7 @@
         applyLang();
       });
 
+      applyTheme(getThemePref());
       applyLang();
     })();
   </script>

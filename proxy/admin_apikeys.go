@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"kiro-go/config"
 	"net/http"
+	"strconv"
 )
 
 // apiKeyView is the response payload for listing/inspecting API keys. The Key field
@@ -78,24 +79,7 @@ func (h *Handler) apiCreateApiKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	enabled := true
-	if req.Enabled != nil {
-		enabled = *req.Enabled
-	}
-
-	keyValue := req.Key
-	if keyValue == "" {
-		keyValue = config.GenerateApiKeyValue()
-	}
-
-	entry, err := config.AddApiKey(config.ApiKeyEntry{
-		Name:        req.Name,
-		Key:         keyValue,
-		Enabled:     enabled,
-		TokenLimit:  req.TokenLimit,
-		CreditLimit: req.CreditLimit,
-		ExpiresAt:   req.ExpiresAt,
-	})
+	entry, err := createApiKeyFromRequest(req)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
@@ -109,6 +93,110 @@ func (h *Handler) apiCreateApiKey(w http.ResponseWriter, r *http.Request) {
 		"key":     entry.Key,
 		"apiKey":  toApiKeyView(entry),
 	})
+}
+
+func createApiKeyFromRequest(req apiKeyCreateRequest) (config.ApiKeyEntry, error) {
+	enabled := true
+	if req.Enabled != nil {
+		enabled = *req.Enabled
+	}
+
+	keyValue := req.Key
+	if keyValue == "" {
+		keyValue = config.GenerateApiKeyValue()
+	}
+
+	return config.AddApiKey(config.ApiKeyEntry{
+		Name:        req.Name,
+		Key:         keyValue,
+		Enabled:     enabled,
+		TokenLimit:  req.TokenLimit,
+		CreditLimit: req.CreditLimit,
+		ExpiresAt:   req.ExpiresAt,
+	})
+}
+
+type apiKeyBulkCreateRequest struct {
+	Count       int     `json:"count"`
+	NamePrefix  string  `json:"namePrefix,omitempty"`
+	Enabled     *bool   `json:"enabled,omitempty"`
+	TokenLimit  int64   `json:"tokenLimit,omitempty"`
+	CreditLimit float64 `json:"creditLimit,omitempty"`
+	ExpiresAt   int64   `json:"expiresAt,omitempty"`
+}
+
+func (h *Handler) apiBulkCreateApiKeys(w http.ResponseWriter, r *http.Request) {
+	var req apiKeyBulkCreateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
+		return
+	}
+	if req.Count <= 0 || req.Count > 100 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "count must be between 1 and 100"})
+		return
+	}
+
+	enabled := true
+	if req.Enabled != nil {
+		enabled = *req.Enabled
+	}
+	prefix := req.NamePrefix
+	if prefix == "" {
+		prefix = "API Key"
+	}
+
+	entries := make([]config.ApiKeyEntry, req.Count)
+	for i := range entries {
+		entries[i] = config.ApiKeyEntry{
+			Name:        prefix + " " + strconv.Itoa(i+1),
+			Key:         config.GenerateApiKeyValue(),
+			Enabled:     enabled,
+			TokenLimit:  req.TokenLimit,
+			CreditLimit: req.CreditLimit,
+			ExpiresAt:   req.ExpiresAt,
+		}
+	}
+	created, err := config.AddApiKeys(entries)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	keys := make([]string, len(created))
+	views := make([]apiKeyView, len(created))
+	for i, entry := range created {
+		keys[i] = entry.Key
+		views[i] = toApiKeyView(entry)
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"count":   len(created),
+		"keys":    keys,
+		"apiKeys": views,
+	})
+}
+
+type apiKeyBulkDeleteRequest struct {
+	IDs []string `json:"ids"`
+}
+
+func (h *Handler) apiBulkDeleteApiKeys(w http.ResponseWriter, r *http.Request) {
+	var req apiKeyBulkDeleteRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
+		return
+	}
+	deleted, err := config.DeleteApiKeys(req.IDs)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "deleted": deleted})
 }
 
 type apiKeyUpdateRequest struct {

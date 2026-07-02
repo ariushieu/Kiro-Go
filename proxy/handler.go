@@ -428,6 +428,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 自助查询端点：用客户自己的 key 鉴权（非 admin 密码），只返回该 key 用量
 	case path == "/v1/key/info" || path == "/key/info":
 		h.apiKeySelfInfo(w, r)
+	case path == "/v1/key/logs" || path == "/key/logs":
+		h.apiKeySelfLogs(w, r)
 	case path == "/api/event_logging/batch":
 		// Claude Code 遥测端点 - 直接返回 200 OK
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -437,7 +439,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case path == "/admin" || path == "/admin/":
 		h.serveAdminPage(w, r)
 	// 客户自助门户（无需 admin 密码，用自己的 API key 查询用量）
-	case path == "/portal" || path == "/portal/":
+	case path == "/check" || path == "/check/":
 		http.ServeFile(w, r, "web/portal.html")
 	case strings.HasPrefix(path, "/admin/api/"):
 		h.handleAdminAPI(w, r)
@@ -889,6 +891,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 	// 获取 thinking 输出格式配置
 	thinkingFormat := thinkingOpts.Format
 
+	startedAt := time.Now()
 	msgID := "msg_" + uuid.New().String()
 	startInputTokens := estimatedInputTokens
 	excluded := make(map[string]bool)
@@ -1253,7 +1256,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			if !messageStarted {
 				continue
 			}
-			h.recordFailure()
+			h.recordFailureForApiKey(apiKeyID, "claude", model, 0, err.Error(), startedAt)
 			h.sendSSE(w, flusher, "error", map[string]interface{}{
 				"type":  "error",
 				"error": map[string]string{"type": "api_error", "message": err.Error()},
@@ -1282,7 +1285,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		}
 		outputTokens = estimateClaudeOutputTokens(outputContent, thinkingOutput, toolUses)
 
-		h.recordSuccessForApiKey(apiKeyID, inputTokens, outputTokens, credits, model)
+		h.recordSuccessForApiKey(apiKeyID, inputTokens, outputTokens, credits, model, account, "claude", startedAt)
 		h.pool.RecordSuccess(account.ID)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 		h.promptCache.Update(account.ID, cacheProfile)
@@ -1308,11 +1311,12 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 	}
 
 	if lastErr == nil {
+		h.recordFailureForApiKey(apiKeyID, "claude", model, 503, "No available accounts", startedAt)
 		h.sendClaudeError(w, 503, "api_error", "No available accounts")
 		return
 	}
 
-	h.recordFailure()
+	h.recordFailureForApiKey(apiKeyID, "claude", model, 500, lastErr.Error(), startedAt)
 	h.sendClaudeError(w, 500, "api_error", lastErr.Error())
 }
 
@@ -1375,29 +1379,72 @@ func (h *Handler) recordSuccess(inputTokens, outputTokens int, credits float64) 
 // When apiKeyID is empty (legacy single-key path or unauthenticated path), only the
 // global counters are updated. Persistence errors are logged but do not propagate.
 // model is recorded in the per-request log for the admin API Log view.
-func (h *Handler) recordSuccessForApiKey(apiKeyID string, inputTokens, outputTokens int, credits float64, model string) {
+func (h *Handler) recordSuccessForApiKey(apiKeyID string, inputTokens, outputTokens int, credits float64, model string, account *config.Account, endpoint string, startedAt time.Time) {
 	h.recordSuccess(inputTokens, outputTokens, credits)
 
-	keyName := ""
-	keyMasked := ""
+	keyName, keyMasked := apiKeyLabels(apiKeyID)
 	if apiKeyID != "" {
-		if entry := config.GetApiKeyEntry(apiKeyID); entry != nil {
-			keyName = entry.Name
-			keyMasked = config.MaskApiKey(entry.Key)
-		}
 		if err := config.RecordApiKeyUsage(apiKeyID, int64(inputTokens+outputTokens), credits); err != nil {
 			logger.Warnf("[ApiKey] failed to record usage for key %s: %v", apiKeyID, err)
 		}
 	}
 
+	accountID := ""
+	accountEmail := ""
+	if account != nil {
+		accountID = account.ID
+		accountEmail = account.Email
+	}
+
 	logRequest(RequestLogEntry{
+		Status:       "ok",
+		Endpoint:     endpoint,
 		APIKeyID:     apiKeyID,
 		APIKeyName:   keyName,
 		APIKeyMasked: keyMasked,
 		Model:        model,
+		AccountID:    accountID,
+		AccountEmail: accountEmail,
 		InputTokens:  inputTokens,
 		OutputTokens: outputTokens,
 		Credits:      credits,
+		DurationMs:   durationMs(startedAt),
+	})
+}
+
+// apiKeyLabels resolves the display name + masked value for a key id (both empty when unknown).
+func apiKeyLabels(apiKeyID string) (name, masked string) {
+	if apiKeyID == "" {
+		return "", ""
+	}
+	if entry := config.GetApiKeyEntry(apiKeyID); entry != nil {
+		return entry.Name, config.MaskApiKey(entry.Key)
+	}
+	return "", ""
+}
+
+func durationMs(startedAt time.Time) int64 {
+	if startedAt.IsZero() {
+		return 0
+	}
+	return time.Since(startedAt).Milliseconds()
+}
+
+// recordFailureForApiKey is recordFailure + a failure entry in the per-request log so the
+// admin API Log view shows what went wrong (endpoint, model, status code, error detail).
+func (h *Handler) recordFailureForApiKey(apiKeyID, endpoint, model string, statusCode int, errMsg string, startedAt time.Time) {
+	h.recordFailure()
+	name, masked := apiKeyLabels(apiKeyID)
+	logRequest(RequestLogEntry{
+		Status:       "error",
+		Endpoint:     endpoint,
+		APIKeyID:     apiKeyID,
+		APIKeyName:   name,
+		APIKeyMasked: masked,
+		Model:        model,
+		StatusCode:   statusCode,
+		Error:        errMsg,
+		DurationMs:   durationMs(startedAt),
 	})
 }
 
@@ -1408,6 +1455,7 @@ func (h *Handler) recordFailure() {
 
 // handleClaudeNonStream Claude 非流式响应
 func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID string) {
+	startedAt := time.Now()
 	excluded := make(map[string]bool)
 	var lastErr error
 
@@ -1479,7 +1527,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		}
 		outputTokens = estimateClaudeOutputTokens(finalContent, rawThinkingContent, toolUses)
 
-		h.recordSuccessForApiKey(apiKeyID, inputTokens, outputTokens, credits, model)
+		h.recordSuccessForApiKey(apiKeyID, inputTokens, outputTokens, credits, model, account, "claude", startedAt)
 		h.pool.RecordSuccess(account.ID)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 		h.promptCache.Update(account.ID, cacheProfile)
@@ -1518,11 +1566,12 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 	}
 
 	if lastErr == nil {
+		h.recordFailureForApiKey(apiKeyID, "claude", model, 503, "No available accounts", startedAt)
 		h.sendClaudeError(w, 503, "api_error", "No available accounts")
 		return
 	}
 
-	h.recordFailure()
+	h.recordFailureForApiKey(apiKeyID, "claude", model, 500, lastErr.Error(), startedAt)
 	h.sendClaudeError(w, 500, "api_error", lastErr.Error())
 }
 
@@ -1593,6 +1642,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 	thinkingFormat := config.GetThinkingConfig().OpenAIFormat
 
 	chatID := "chatcmpl-" + uuid.New().String()
+	startedAt := time.Now()
 	excluded := make(map[string]bool)
 	var lastErr error
 
@@ -1897,7 +1947,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 			if !responseStarted {
 				continue
 			}
-			h.recordFailure()
+			h.recordFailureForApiKey(apiKeyID, "openai", model, 0, err.Error(), startedAt)
 			return
 		}
 
@@ -1925,7 +1975,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 			outputTokens += estimateApproxTokens(tc.Function.Arguments)
 		}
 
-		h.recordSuccessForApiKey(apiKeyID, inputTokens, outputTokens, credits, model)
+		h.recordSuccessForApiKey(apiKeyID, inputTokens, outputTokens, credits, model, account, "openai", startedAt)
 		h.pool.RecordSuccess(account.ID)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 
@@ -1968,6 +2018,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 
 // handleOpenAINonStream OpenAI 非流式响应
 func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, apiKeyID string) {
+	startedAt := time.Now()
 	excluded := make(map[string]bool)
 	var lastErr error
 
@@ -2028,7 +2079,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 		}
 		outputTokens = estimateOpenAIOutputTokens(finalContent, reasoningContent, toolUses)
 
-		h.recordSuccessForApiKey(apiKeyID, inputTokens, outputTokens, credits, model)
+		h.recordSuccessForApiKey(apiKeyID, inputTokens, outputTokens, credits, model, account, "openai", startedAt)
 		h.pool.RecordSuccess(account.ID)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 
@@ -2040,11 +2091,12 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 	}
 
 	if lastErr == nil {
+		h.recordFailureForApiKey(apiKeyID, "openai", model, 503, "No available accounts", startedAt)
 		h.sendOpenAIError(w, 503, "server_error", "No available accounts")
 		return
 	}
 
-	h.recordFailure()
+	h.recordFailureForApiKey(apiKeyID, "openai", model, 500, lastErr.Error(), startedAt)
 	h.sendOpenAIError(w, 500, "server_error", lastErr.Error())
 }
 
@@ -2237,6 +2289,10 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiListApiKeys(w, r)
 	case path == "/api-keys" && r.Method == "POST":
 		h.apiCreateApiKey(w, r)
+	case path == "/api-keys/bulk" && r.Method == "POST":
+		h.apiBulkCreateApiKeys(w, r)
+	case path == "/api-keys/bulk" && r.Method == "DELETE":
+		h.apiBulkDeleteApiKeys(w, r)
 	case strings.HasPrefix(path, "/api-keys/") && strings.HasSuffix(path, "/reset-usage") && r.Method == "POST":
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/api-keys/"), "/reset-usage")
 		h.apiResetApiKeyUsage(w, r, id)

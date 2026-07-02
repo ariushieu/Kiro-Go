@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newAuthTestRequest(t *testing.T, header, value string) *http.Request {
@@ -273,7 +274,7 @@ func TestRecordSuccessForApiKeyUpdatesEntry(t *testing.T) {
 	}
 
 	h := &Handler{}
-	h.recordSuccessForApiKey(created.ID, 25, 30, 0.75, "claude-test")
+	h.recordSuccessForApiKey(created.ID, 25, 30, 0.75, "claude-test", nil, "claude", time.Time{})
 
 	got := config.GetApiKeyEntry(created.ID)
 	if got == nil {
@@ -298,7 +299,7 @@ func TestRecordSuccessForApiKeyEmptyIDIsNoop(t *testing.T) {
 	}
 
 	h := &Handler{}
-	h.recordSuccessForApiKey("", 100, 100, 1, "claude-test")
+	h.recordSuccessForApiKey("", 100, 100, 1, "claude-test", nil, "claude", time.Time{})
 	got := config.GetApiKeyEntry(created.ID)
 	if got == nil {
 		t.Fatalf("entry missing")

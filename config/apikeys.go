@@ -39,33 +39,55 @@ func GetApiKeyEntry(id string) *ApiKeyEntry {
 // AddApiKey appends a new API key entry. Generates ID and CreatedAt if missing,
 // rejects empty Key values, and refuses duplicates of an existing Key.
 func AddApiKey(entry ApiKeyEntry) (ApiKeyEntry, error) {
+	entries, err := AddApiKeys([]ApiKeyEntry{entry})
+	if err != nil {
+		return ApiKeyEntry{}, err
+	}
+	return entries[0], nil
+}
+
+func AddApiKeys(entries []ApiKeyEntry) ([]ApiKeyEntry, error) {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
 	if cfg == nil {
-		return ApiKeyEntry{}, errors.New("config not initialized")
+		return nil, errors.New("config not initialized")
 	}
-	entry.Key = strings.TrimSpace(entry.Key)
-	if entry.Key == "" {
-		return ApiKeyEntry{}, errors.New("api key value must not be empty")
+	if len(entries) == 0 {
+		return nil, errors.New("no api keys provided")
 	}
+
+	seen := make(map[string]bool, len(cfg.ApiKeys)+len(entries))
 	for _, existing := range cfg.ApiKeys {
-		if existing.Key == entry.Key {
-			return ApiKeyEntry{}, errors.New("api key already exists")
+		seen[existing.Key] = true
+	}
+
+	now := time.Now().Unix()
+	out := make([]ApiKeyEntry, len(entries))
+	for i, entry := range entries {
+		entry.Key = strings.TrimSpace(entry.Key)
+		if entry.Key == "" {
+			return nil, errors.New("api key value must not be empty")
 		}
+		if seen[entry.Key] {
+			return nil, errors.New("api key already exists")
+		}
+		seen[entry.Key] = true
+		if entry.ID == "" {
+			entry.ID = newUUID()
+		}
+		if entry.CreatedAt == 0 {
+			entry.CreatedAt = now
+		}
+		out[i] = entry
 	}
-	if entry.ID == "" {
-		entry.ID = newUUID()
-	}
-	if entry.CreatedAt == 0 {
-		entry.CreatedAt = time.Now().Unix()
-	}
-	cfg.ApiKeys = append(cfg.ApiKeys, entry)
+
+	oldLen := len(cfg.ApiKeys)
+	cfg.ApiKeys = append(cfg.ApiKeys, out...)
 	if err := saveLocked(); err != nil {
-		// Roll back the in-memory append so we don't leave inconsistent state.
-		cfg.ApiKeys = cfg.ApiKeys[:len(cfg.ApiKeys)-1]
-		return ApiKeyEntry{}, err
+		cfg.ApiKeys = cfg.ApiKeys[:oldLen]
+		return nil, err
 	}
-	return entry, nil
+	return out, nil
 }
 
 // UpdateApiKey applies a patch to an existing API key. Patch semantics:
@@ -116,18 +138,44 @@ func UpdateApiKey(id string, patch ApiKeyEntry) error {
 // DeleteApiKey removes the API key entry with the given ID. Returns nil even if
 // the ID is unknown (idempotent), matching the existing DeleteAccount style.
 func DeleteApiKey(id string) error {
+	_, err := DeleteApiKeys([]string{id})
+	return err
+}
+
+func DeleteApiKeys(ids []string) (int, error) {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
 	if cfg == nil {
-		return errors.New("config not initialized")
+		return 0, errors.New("config not initialized")
 	}
-	for i, e := range cfg.ApiKeys {
-		if e.ID == id {
-			cfg.ApiKeys = append(cfg.ApiKeys[:i], cfg.ApiKeys[i+1:]...)
-			return saveLocked()
+	want := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if strings.TrimSpace(id) != "" {
+			want[id] = true
 		}
 	}
-	return nil
+	if len(want) == 0 {
+		return 0, errors.New("no api key ids provided")
+	}
+	original := append([]ApiKeyEntry(nil), cfg.ApiKeys...)
+	kept := cfg.ApiKeys[:0]
+	deleted := 0
+	for _, e := range cfg.ApiKeys {
+		if want[e.ID] {
+			deleted++
+			continue
+		}
+		kept = append(kept, e)
+	}
+	cfg.ApiKeys = kept
+	if deleted == 0 {
+		return 0, nil
+	}
+	if err := saveLocked(); err != nil {
+		cfg.ApiKeys = original
+		return deleted, err
+	}
+	return deleted, nil
 }
 
 // FindApiKeyByValue returns a copy of the entry whose Key matches the given value,
@@ -207,17 +255,15 @@ func GenerateApiKeyValue() string {
 	return "sk-" + hex.EncodeToString(buf)
 }
 
-// MaskApiKey produces a display-friendly masked version: keeps first 6 and last 4
-// characters, replaces the middle with "****". Returns "" for empty input and
-// the original string if it's too short to mask meaningfully.
+// MaskApiKey produces a privacy-mode value like sk-***xxx.
 func MaskApiKey(key string) string {
 	if key == "" {
 		return ""
 	}
-	if len(key) <= 10 {
+	if len(key) <= 6 {
 		return key
 	}
-	return key[:6] + "****" + key[len(key)-4:]
+	return key[:3] + "***" + key[len(key)-3:]
 }
 
 // ApiKeyExpired reports whether the key has a set expiry (ExpiresAt > 0) that is now

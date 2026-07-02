@@ -128,6 +128,7 @@ func (h *Handler) handleResponsesNonStream(
 	estimatedInputTokens int, apiKeyID, respID string,
 	req *ResponsesRequest, storedInput json.RawMessage, storeResponse bool,
 ) {
+	startedAt := time.Now()
 	excluded := make(map[string]bool)
 	var lastErr error
 
@@ -185,7 +186,7 @@ func (h *Handler) handleResponsesNonStream(
 		}
 		outputTokens = estimateOpenAIOutputTokens(finalContent, reasoningContent, toolUses)
 
-		h.recordSuccessForApiKey(apiKeyID, inputTokens, outputTokens, credits, model)
+		h.recordSuccessForApiKey(apiKeyID, inputTokens, outputTokens, credits, model, account, "openai", startedAt)
 		h.pool.RecordSuccess(account.ID)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 
@@ -205,10 +206,11 @@ func (h *Handler) handleResponsesNonStream(
 	}
 
 	if lastErr == nil {
+		h.recordFailureForApiKey(apiKeyID, "openai", model, 503, "No available accounts", startedAt)
 		h.sendOpenAIError(w, 503, "server_error", "No available accounts")
 		return
 	}
-	h.recordFailure()
+	h.recordFailureForApiKey(apiKeyID, "openai", model, 500, lastErr.Error(), startedAt)
 	h.sendOpenAIError(w, 500, "server_error", lastErr.Error())
 }
 
@@ -293,7 +295,8 @@ func (h *Handler) handleResponsesStream(
 		flusher.Flush()
 	}
 
-	createdAt := time.Now().Unix()
+	startedAt := time.Now()
+	createdAt := startedAt.Unix()
 	initial := &ResponsesObject{
 		ID:                 respID,
 		Object:             "response",
@@ -486,7 +489,7 @@ func (h *Handler) handleResponsesStream(
 					},
 				},
 			})
-			h.recordFailure()
+			h.recordFailureForApiKey(apiKeyID, "openai", model, 0, err.Error(), startedAt)
 			return
 		}
 
@@ -530,7 +533,7 @@ func (h *Handler) handleResponsesStream(
 		}
 		outputTokens = estimateOpenAIOutputTokens(finalContent, reasoning, toolUses)
 
-		h.recordSuccessForApiKey(apiKeyID, inputTokens, outputTokens, credits, model)
+		h.recordSuccessForApiKey(apiKeyID, inputTokens, outputTokens, credits, model, account, "openai", startedAt)
 		h.pool.RecordSuccess(account.ID)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 
@@ -555,6 +558,7 @@ func (h *Handler) handleResponsesStream(
 	}
 
 	if lastErr == nil {
+		h.recordFailureForApiKey(apiKeyID, "openai", model, 503, "No available accounts", startedAt)
 		send("response.failed", map[string]interface{}{
 			"type": "response.failed",
 			"response": map[string]interface{}{
@@ -568,7 +572,7 @@ func (h *Handler) handleResponsesStream(
 		})
 		return
 	}
-	h.recordFailure()
+	h.recordFailureForApiKey(apiKeyID, "openai", model, 500, lastErr.Error(), startedAt)
 	send("response.failed", map[string]interface{}{
 		"type": "response.failed",
 		"response": map[string]interface{}{

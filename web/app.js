@@ -1636,6 +1636,7 @@
   let apiKeysCache = [];
   let apiKeyEditingId = '';
   let apiKeyModalSubmitting = false;
+  const selectedApiKeyIds = new Set();
 
   async function loadApiKeys() {
     const list = $('apiKeysList');
@@ -1679,15 +1680,45 @@
     return '<div class="text-xs muted-text">' + escapeHtml(label) + ': ' + escapeHtml(fmt(used)) + ' / ' + escapeHtml(fmt(limit)) + '</div>' + usageBar(used, limit);
   }
 
+  function renderApiKeyStats() {
+    const el = $('apiKeyStats');
+    if (!el) return;
+    const now = Date.now() / 1000;
+    const total = apiKeysCache.length;
+    const disabled = apiKeysCache.filter(k => !k.enabled).length;
+    const expired = apiKeysCache.filter(k => normalizeUnixSeconds(k.expiresAt) && normalizeUnixSeconds(k.expiresAt) <= now).length;
+    const active = apiKeysCache.filter(k => k.enabled && (!normalizeUnixSeconds(k.expiresAt) || normalizeUnixSeconds(k.expiresAt) > now)).length;
+    el.innerHTML =
+      '<div class="stat-card"><div class="stat-card-title">' + escapeHtml(t('apiKeys.statTotal')) + '</div><div class="stat-value">' + escapeHtml(formatNumber(total)) + '</div></div>' +
+      '<div class="stat-card"><div class="stat-card-title">' + escapeHtml(t('apiKeys.statActive')) + '</div><div class="stat-value">' + escapeHtml(formatNumber(active)) + '</div></div>' +
+      '<div class="stat-card"><div class="stat-card-title">' + escapeHtml(t('apiKeys.statExpired')) + '</div><div class="stat-value stat-value--danger">' + escapeHtml(formatNumber(expired)) + '</div></div>' +
+      '<div class="stat-card"><div class="stat-card-title">' + escapeHtml(t('apiKeys.statDisabled')) + '</div><div class="stat-value">' + escapeHtml(formatNumber(disabled)) + '</div></div>';
+  }
+
+  function renderApiKeyBulkBar() {
+    const bar = $('apiKeyBulkBar');
+    const count = $('apiKeyBulkCount');
+    if (!bar || !count) return;
+    const n = selectedApiKeyIds.size;
+    bar.classList.toggle('hidden', n === 0);
+    count.textContent = t('apiKeys.selected', n);
+  }
+
   function renderApiKeys() {
     const list = $('apiKeysList');
     if (!list) return;
+    const ids = new Set(apiKeysCache.map(k => k.id));
+    selectedApiKeyIds.forEach(id => { if (!ids.has(id)) selectedApiKeyIds.delete(id); });
+    renderApiKeyStats();
+    renderApiKeyBulkBar();
     if (!apiKeysCache.length) {
       list.innerHTML = '<div class="muted-text" style="padding:0.5rem 0;">' + escapeHtml(t('apiKeys.empty')) + '</div>';
       return;
     }
     const html = apiKeysCache.map(item => {
-      const id = escapeAttr(item.id || '');
+      const rawId = item.id || '';
+      const id = escapeAttr(rawId);
+      const checked = selectedApiKeyIds.has(rawId) ? ' checked' : '';
       const name = item.name ? escapeHtml(item.name) : '<span class="muted-text">' + escapeHtml(t('apiKeys.unnamed')) + '</span>';
       const masked = escapeHtml(item.keyMasked || '');
       const migrated = item.migrated
@@ -1704,6 +1735,7 @@
       return '<div class="card" data-apikey-id="' + id + '" style="margin-top:0.5rem;padding:0.75rem;">' +
         '<div class="flex items-center gap-2" style="flex-wrap:wrap;justify-content:space-between;">' +
           '<div class="flex items-center gap-2" style="flex-wrap:wrap;">' +
+            '<input type="checkbox" data-apikey-action="select" data-id="' + id + '"' + checked + ' />' +
             '<span class="font-semibold">' + name + '</span>' +
             migrated +
             disabled +
@@ -1747,7 +1779,7 @@
     $('apiKeyForm_enabled').checked = entry ? !!entry.enabled : true;
     $('apiKeyForm_tokenLimit').value = entry ? String(entry.tokenLimit || 0) : '0';
     $('apiKeyForm_creditLimit').value = entry ? String(entry.creditLimit || 0) : '0';
-    $('apiKeyForm_expiresAt').value = (entry && entry.expiresAt) ? unixToLocalInput(entry.expiresAt) : '';
+    $('apiKeyForm_expiresAt').value = (entry && entry.expiresAt) ? unixToLocalInput(normalizeUnixSeconds(entry.expiresAt)) : '';
     apiKeyModalSubmitting = false;
     $('apiKeyModalSaveBtn').disabled = false;
     openDialog('apiKeyModal');
@@ -1758,6 +1790,72 @@
     apiKeyEditingId = '';
     apiKeyModalSubmitting = false;
     $('apiKeyModalSaveBtn').disabled = false;
+  }
+
+  function openApiKeyBulkModal() {
+    $('apiKeyBulk_count').value = '10';
+    $('apiKeyBulk_namePrefix').value = '';
+    $('apiKeyBulk_enabled').checked = true;
+    $('apiKeyBulk_tokenLimit').value = '0';
+    $('apiKeyBulk_creditLimit').value = '0';
+    $('apiKeyBulk_expiresAt').value = '';
+    $('apiKeyBulkSaveBtn').disabled = false;
+    openDialog('apiKeyBulkModal');
+  }
+
+  function closeApiKeyBulkModal() {
+    closeDialog('apiKeyBulkModal');
+    $('apiKeyBulkSaveBtn').disabled = false;
+  }
+
+  async function createBulkApiKeys() {
+    const btn = $('apiKeyBulkSaveBtn');
+    btn.disabled = true;
+    try {
+      const count = parseInt($('apiKeyBulk_count').value, 10);
+      if (isNaN(count) || count < 1 || count > 100) throw new Error(t('apiKeys.bulkCountError'));
+      const tokenLimit = parseInt($('apiKeyBulk_tokenLimit').value, 10);
+      const creditLimit = parseFloat($('apiKeyBulk_creditLimit').value);
+      const payload = {
+        count,
+        namePrefix: $('apiKeyBulk_namePrefix').value.trim(),
+        enabled: $('apiKeyBulk_enabled').checked,
+        tokenLimit: isNaN(tokenLimit) || tokenLimit < 0 ? 0 : tokenLimit,
+        creditLimit: isNaN(creditLimit) || creditLimit < 0 ? 0 : creditLimit,
+        expiresAt: localInputToUnix($('apiKeyBulk_expiresAt').value)
+      };
+      const res = await api('/api-keys/bulk', { method: 'POST', body: JSON.stringify(payload) });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok || d.success === false) throw new Error(d.error || t('common.saveFailed'));
+      closeApiKeyBulkModal();
+      await loadApiKeys();
+      if (Array.isArray(d.keys) && d.keys.length) showNewApiKey(d.keys.join('\n'));
+      toast(t('apiKeys.bulkCreated', d.count || count), 'success');
+    } catch (e) {
+      toast((e && e.message) || t('common.saveFailed'), 'error');
+      btn.disabled = false;
+    }
+  }
+
+  async function bulkDeleteApiKeys() {
+    const ids = Array.from(selectedApiKeyIds);
+    if (!ids.length) return;
+    const ok = await confirmAction(t('apiKeys.confirmBulkDelete', ids.length), {
+      title: t('apiKeys.bulkDelete'),
+      confirmText: t('apiKeys.bulkDelete'),
+      variant: 'danger'
+    });
+    if (!ok) return;
+    try {
+      const res = await api('/api-keys/bulk', { method: 'DELETE', body: JSON.stringify({ ids }) });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok || d.success === false) throw new Error(d.error || t('common.failed'));
+      selectedApiKeyIds.clear();
+      toast(t('apiKeys.bulkDeleted', d.deleted || ids.length), 'success');
+      await loadApiKeys();
+    } catch (e) {
+      toast((e && e.message) || t('common.failed'), 'error');
+    }
   }
 
   async function submitApiKeyModal() {
@@ -1894,6 +1992,16 @@
         else if (action === 'reset') resetApiKeyUsageEntry(id, name);
       });
       list.addEventListener('change', e => {
+        const select = e.target.closest('input[data-apikey-action="select"]');
+        if (select) {
+          const id = select.dataset.id;
+          if (id) {
+            if (select.checked) selectedApiKeyIds.add(id);
+            else selectedApiKeyIds.delete(id);
+            renderApiKeyBulkBar();
+          }
+          return;
+        }
         const cb = e.target.closest('input[data-apikey-action="toggle"]');
         if (!cb) return;
         const id = cb.dataset.id;
@@ -1903,6 +2011,10 @@
     }
     const addBtn = $('addApiKeyBtn');
     if (addBtn) addBtn.addEventListener('click', () => openApiKeyModal(null));
+    const bulkAddBtn = $('bulkAddApiKeyBtn');
+    if (bulkAddBtn) bulkAddBtn.addEventListener('click', openApiKeyBulkModal);
+    const bulkDeleteBtn = $('bulkDeleteApiKeyBtn');
+    if (bulkDeleteBtn) bulkDeleteBtn.addEventListener('click', bulkDeleteApiKeys);
     const saveBtn = $('apiKeyModalSaveBtn');
     if (saveBtn) saveBtn.addEventListener('click', submitApiKeyModal);
     const cancelBtn = $('apiKeyModalCancelBtn');
@@ -1915,7 +2027,14 @@
     if (showCloseX) showCloseX.addEventListener('click', closeShowApiKeyModal);
     const copyBtn = $('apiKeyShowCopyBtn');
     if (copyBtn) copyBtn.addEventListener('click', copyNewApiKey);
+    const bulkSaveBtn = $('apiKeyBulkSaveBtn');
+    if (bulkSaveBtn) bulkSaveBtn.addEventListener('click', createBulkApiKeys);
+    const bulkCancelBtn = $('apiKeyBulkCancelBtn');
+    if (bulkCancelBtn) bulkCancelBtn.addEventListener('click', closeApiKeyBulkModal);
+    const bulkCloseBtn = $('apiKeyBulkModalClose');
+    if (bulkCloseBtn) bulkCloseBtn.addEventListener('click', closeApiKeyBulkModal);
     bindDialogBackdropClose('apiKeyModal', closeApiKeyModal);
+    bindDialogBackdropClose('apiKeyBulkModal', closeApiKeyBulkModal);
     bindDialogBackdropClose('apiKeyShowModal', closeShowApiKeyModal);
   }
 
@@ -3132,25 +3251,36 @@
       ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
   }
 
-  // Convert a Unix seconds timestamp to a value for <input type="datetime-local"> (local time).
+  function normalizeUnixSeconds(v) {
+    const n = Number(v);
+    if (!isFinite(n) || n <= 0) return 0;
+    return n > 1e12 ? Math.floor(n / 1000) : Math.floor(n);
+  }
+
+  // Convert a Unix seconds timestamp to a value for <input type="date"> (local yyyy-mm-dd).
   function unixToLocalInput(unixSec) {
+    unixSec = normalizeUnixSeconds(unixSec);
     if (!unixSec) return '';
     const d = new Date(unixSec * 1000);
     const pad = n => String(n).padStart(2, '0');
-    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) +
-      'T' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
   }
 
-  // Convert a datetime-local input value to Unix seconds. Empty input → 0 (never expires).
+  // Convert a <input type="date"> value (yyyy-mm-dd) to Unix seconds at end of that
+  // day in local time. Empty input → 0 (never expires).
   function localInputToUnix(val) {
     if (!val) return 0;
-    const ms = new Date(val).getTime();
+    const parts = val.split('-');
+    if (parts.length !== 3) return 0;
+    const d = new Date(+parts[0], +parts[1] - 1, +parts[2], 23, 59, 59);
+    const ms = d.getTime();
     return isNaN(ms) ? 0 : Math.floor(ms / 1000);
   }
 
   // Small colored badge shown next to a key name: red when expired, amber when
   // expiring within 3 days, nothing otherwise (or when never-expires).
   function apiKeyExpiryBadge(expiresAt) {
+    expiresAt = normalizeUnixSeconds(expiresAt);
     if (!expiresAt) return '';
     const now = Math.floor(Date.now() / 1000);
     if (expiresAt <= now) {
@@ -3164,8 +3294,9 @@
 
   // Full "Expires: <date>" line for the key/usage cards. Empty when never expires.
   function apiKeyExpiryLine(expiresAt) {
-    if (!expiresAt) return '';
-    return '<div class="text-xs muted-text">' + escapeHtml(t('apiKeys.expiry')) + ': ' + escapeHtml(formatLogTime(expiresAt)) + '</div>';
+    expiresAt = normalizeUnixSeconds(expiresAt);
+    const val = expiresAt ? formatLogTime(expiresAt) : t('apiKeys.neverExpires');
+    return '<div class="text-xs muted-text">' + escapeHtml(t('apiKeys.expiry')) + ': ' + escapeHtml(val) + '</div>';
   }
 
   async function loadApiLog() {
@@ -3197,30 +3328,53 @@
     }
     if (empty) empty.classList.add('hidden');
 
-    let sumInput = 0, sumOutput = 0, sumCredits = 0;
+    let sumInput = 0, sumOutput = 0, sumCredits = 0, errorCount = 0;
     const rows = entries.map(e => {
       sumInput += e.inputTokens || 0;
       sumOutput += e.outputTokens || 0;
       sumCredits += e.credits || 0;
-      const keyLabel = e.apiKeyName
-        ? escapeHtml(e.apiKeyName)
-        : (e.apiKeyMasked ? '<span class="font-mono text-xs">' + escapeHtml(e.apiKeyMasked) + '</span>'
-          : '<span class="muted-text">' + escapeHtml(t('apilog.noKey')) + '</span>');
+      const isError = e.status === 'error';
+      if (isError) errorCount++;
+      const keyLabel = e.apiKeyMasked
+        ? (e.apiKeyName ? escapeHtml(e.apiKeyName) + ' ' : '') + '<span class="font-mono text-xs">' + escapeHtml(e.apiKeyMasked) + '</span>'
+        : '<span class="muted-text">' + escapeHtml(t('apilog.noKey')) + '</span>';
+      const accountLabel = e.accountEmail
+        ? '<span class="text-xs">' + escapeHtml(e.accountEmail) + '</span>'
+        : (e.accountId ? '<span class="text-xs font-mono">' + escapeHtml(e.accountId) + '</span>'
+          : '<span class="muted-text">-</span>');
+      const statusBadge = isError
+        ? '<span class="text-xs" style="background:rgba(239,68,68,0.15);color:#ef4444;padding:1px 6px;border-radius:4px;">' + escapeHtml(t('apilog.statusError')) + '</span>'
+        : '<span class="text-xs" style="background:rgba(34,197,94,0.15);color:#22c55e;padding:1px 6px;border-radius:4px;">' + escapeHtml(t('apilog.statusOk')) + '</span>';
+      const dash = '<span class="muted-text">-</span>';
+      const detailCell = isError
+        ? '<span class="text-xs" style="color:#ef4444;">' + (e.statusCode ? escapeHtml('HTTP ' + e.statusCode + ' ') : '') + escapeHtml(e.error || '') + '</span>'
+        : dash;
+      const durationCell = e.durationMs ? escapeHtml(formatNumber(e.durationMs)) + 'ms' : dash;
+      const numOrDash = v => (isError && !v) ? dash : escapeHtml(formatNumber(v || 0));
       return '<tr>' +
         '<td class="text-xs font-mono">' + escapeHtml(formatLogTime(e.time)) + '</td>' +
+        '<td>' + statusBadge + '</td>' +
+        '<td class="text-xs">' + escapeHtml(e.endpoint || '') + '</td>' +
         '<td>' + keyLabel + '</td>' +
         '<td class="text-xs">' + escapeHtml(e.model || '') + '</td>' +
-        '<td class="num">' + escapeHtml(formatNumber(e.inputTokens || 0)) + '</td>' +
-        '<td class="num">' + escapeHtml(formatNumber(e.outputTokens || 0)) + '</td>' +
-        '<td class="num">' + escapeHtml(formatNumber(e.totalTokens || 0)) + '</td>' +
-        '<td class="num">' + escapeHtml(formatNumber(e.credits || 0)) + '</td>' +
+        '<td>' + (isError ? dash : accountLabel) + '</td>' +
+        '<td class="num">' + numOrDash(e.inputTokens) + '</td>' +
+        '<td class="num">' + numOrDash(e.outputTokens) + '</td>' +
+        '<td class="num">' + numOrDash(e.totalTokens) + '</td>' +
+        '<td class="num">' + numOrDash(e.credits) + '</td>' +
+        '<td class="num text-xs">' + durationCell + '</td>' +
+        '<td>' + detailCell + '</td>' +
         '</tr>';
     }).join('');
     body.innerHTML = rows;
 
     if (summary) {
+      const errChip = errorCount
+        ? '<span class="apilog-chip" style="color:#ef4444;">' + escapeHtml(t('apilog.totalErrors', errorCount)) + '</span>'
+        : '';
       summary.innerHTML =
         '<span class="apilog-chip">' + escapeHtml(t('apilog.totalRequests', entries.length)) + '</span>' +
+        errChip +
         '<span class="apilog-chip">' + escapeHtml(t('apilog.totalTokens', formatNumber(sumInput + sumOutput))) + '</span>' +
         '<span class="apilog-chip">' + escapeHtml(t('apilog.totalCredits', formatNumber(sumCredits))) + '</span>';
     }
@@ -3304,14 +3458,24 @@
   }
 
   // Tabs
+  let tabPollTimer = null;
+  const TAB_POLL_MS = 5000;
+  function stopTabPolling() {
+    if (tabPollTimer) { clearInterval(tabPollTimer); tabPollTimer = null; }
+  }
+  function startTabPolling(fn) {
+    stopTabPolling();
+    tabPollTimer = setInterval(fn, TAB_POLL_MS);
+  }
   function switchTab(tab) {
     qsa('.tab').forEach(el => el.classList.toggle('active', el.dataset.tab === tab));
     qsa('.tab-content').forEach(c => c.classList.add('hidden'));
     $('tab' + tab.charAt(0).toUpperCase() + tab.slice(1)).classList.remove('hidden');
     if (tab === 'console') openConsole();
     else closeConsole();
-    if (tab === 'apilog') { populateApiLogKeyFilter(); loadApiLog(); }
-    else if (tab === 'usage') loadUsageCheck();
+    stopTabPolling();
+    if (tab === 'apilog') { populateApiLogKeyFilter(); loadApiLog(); startTabPolling(loadApiLog); }
+    else if (tab === 'usage') { loadUsageCheck(); startTabPolling(loadUsageCheck); }
   }
 
   // Event wiring

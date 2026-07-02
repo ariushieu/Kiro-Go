@@ -244,10 +244,10 @@ func TestResetApiKeyUsage(t *testing.T) {
 
 func TestApiKeyOverLimit(t *testing.T) {
 	tests := []struct {
-		name        string
-		entry       ApiKeyEntry
-		wantToken   bool
-		wantCredit  bool
+		name       string
+		entry      ApiKeyEntry
+		wantToken  bool
+		wantCredit bool
 	}{
 		{"unlimited", ApiKeyEntry{TokensUsed: 100, CreditsUsed: 5}, false, false},
 		{"under token limit", ApiKeyEntry{TokenLimit: 200, TokensUsed: 100}, false, false},
@@ -274,7 +274,7 @@ func TestMaskApiKey(t *testing.T) {
 	}{
 		{"", ""},
 		{"short", "short"},
-		{"sk-1234567890", "sk-123****7890"},
+		{"sk-1234567890", "sk-***890"},
 	}
 	for _, tc := range tests {
 		if got := MaskApiKey(tc.in); got != tc.want {
@@ -291,5 +291,31 @@ func TestGenerateApiKeyValueIsUnique(t *testing.T) {
 	}
 	if len(a) < 10 {
 		t.Fatalf("expected non-trivial key length, got %q", a)
+	}
+}
+
+func TestBulkApiKeyCreateDelete(t *testing.T) {
+	cfgFile := filepath.Join(t.TempDir(), "config.json")
+	if err := Init(cfgFile); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	created, err := AddApiKeys([]ApiKeyEntry{
+		{Name: "a", Key: "sk-a", Enabled: true},
+		{Name: "b", Key: "sk-b", Enabled: true},
+	})
+	if err != nil {
+		t.Fatalf("bulk add: %v", err)
+	}
+	if len(created) != 2 || len(ListApiKeys()) != 2 {
+		t.Fatalf("expected two created keys, got created=%d list=%d", len(created), len(ListApiKeys()))
+	}
+
+	deleted, err := DeleteApiKeys([]string{created[0].ID, created[1].ID})
+	if err != nil {
+		t.Fatalf("bulk delete: %v", err)
+	}
+	if deleted != 2 || len(ListApiKeys()) != 0 {
+		t.Fatalf("expected two deleted keys, got deleted=%d list=%d", deleted, len(ListApiKeys()))
 	}
 }
