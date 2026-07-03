@@ -1148,6 +1148,9 @@ img.brand-icon {
   margin: 0 auto;
   padding: 1.5rem;
 }
+body:has(#tabApilog:not(.hidden)) #mainPage > .container {
+  max-width: 1600px;
+}
 
 /* Stats grid */
 .stats-grid {
