@@ -37,7 +37,15 @@ type Handler struct {
 	modelsCacheMu   sync.RWMutex
 	modelsCacheTime int64
 	promptCache     *promptCacheTracker
-	tokenRefreshMu  sync.Mutex
+	// tokenRefreshLocks holds one mutex per account ID so a slow token refresh
+	// on one account never blocks refreshes (or requests) for other accounts.
+	tokenRefreshLocks sync.Map // accountID -> *sync.Mutex
+}
+
+// tokenRefreshLock returns the per-account refresh mutex, creating it on first use.
+func (h *Handler) tokenRefreshLock(accountID string) *sync.Mutex {
+	m, _ := h.tokenRefreshLocks.LoadOrStore(accountID, &sync.Mutex{})
+	return m.(*sync.Mutex)
 }
 
 type thinkingStreamSource int
@@ -334,48 +342,18 @@ func (h *Handler) authenticateForOpenAI(w http.ResponseWriter, r *http.Request) 
 	return withApiKeyContext(r, entry)
 }
 
-// resolvePublicBaseURL determines the externally reachable base URL (scheme://host[:port])
-// used to build OAuth redirect_uri values, so they survive a reverse proxy / custom domain
-// instead of being hard-coded to localhost.
+// resolvePublicBaseURL returns the externally reachable base URL (scheme://host[:port])
+// used to build OAuth redirect_uri values for the SSO loopback callback.
 //
-// Priority:
-//  1. config.PublicBaseURL (explicit operator override) — always wins when set.
-//  2. Auto-detect from the request: X-Forwarded-Proto / X-Forwarded-Host (set by reverse
-//     proxies), falling back to the request's own scheme + Host header.
-//
-// Returns "" only when nothing can be determined (e.g. empty Host), in which case the SSO
-// flow falls back to http://localhost:<loopbackPort>.
-func resolvePublicBaseURL(r *http.Request) string {
-	if override := config.GetPublicBaseURL(); override != "" {
-		return override
-	}
-
-	host := r.Header.Get("X-Forwarded-Host")
-	if host == "" {
-		host = r.Host
-	}
-	host = strings.TrimSpace(host)
-	if host == "" {
-		return ""
-	}
-	// X-Forwarded-Host may carry a comma-separated list; the first is the original client-facing host.
-	if i := strings.IndexByte(host, ','); i >= 0 {
-		host = strings.TrimSpace(host[:i])
-	}
-
-	scheme := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto"))
-	if i := strings.IndexByte(scheme, ','); i >= 0 {
-		scheme = strings.TrimSpace(scheme[:i])
-	}
-	if scheme == "" {
-		if r.TLS != nil {
-			scheme = "https"
-		} else {
-			scheme = "http"
-		}
-	}
-
-	return scheme + "://" + host
+// Only config.PublicBaseURL (explicit operator override) is honored. Auto-detecting from
+// the admin request Host is intentionally NOT done: the loopback SSO server listens on its
+// own port (e.g. 3128), while the admin request arrives on the UI port/domain (e.g. 8080).
+// The request host therefore names the wrong endpoint and would produce a redirect_uri the
+// callback server never receives. When unset, "" is returned and the SSO flow falls back to
+// http://localhost:<loopbackPort> (correct for the pure-local case). For a reverse proxy /
+// custom domain, set PublicBaseURL to the domain that routes to the loopback port.
+func resolvePublicBaseURL() string {
+	return config.GetPublicBaseURL()
 }
 
 // ServeHTTP 路由分发
@@ -1343,6 +1321,9 @@ func (h *Handler) backgroundStatsSaver() {
 }
 
 // saveStats 保存统计到配置文件
+// Hot-path counter updates (global stats, per-key usage, per-account stats) only
+// mark config dirty; this coalesces them into one disk write per tick instead of
+// writing the whole config under cfgLock on every request completion.
 func (h *Handler) saveStats() {
 	config.UpdateStats(
 		int(atomic.LoadInt64(&h.totalRequests)),
@@ -1351,6 +1332,9 @@ func (h *Handler) saveStats() {
 		int(atomic.LoadInt64(&h.totalTokens)),
 		h.getCredits(),
 	)
+	if err := config.FlushDirty(); err != nil {
+		logger.Warnf("[StatsSaver] Failed to persist config: %v", err)
+	}
 }
 
 // getCredits 线程安全获取 credits
@@ -2117,8 +2101,9 @@ func (h *Handler) ensureValidToken(account *config.Account) error {
 		return nil
 	}
 
-	h.tokenRefreshMu.Lock()
-	defer h.tokenRefreshMu.Unlock()
+	mu := h.tokenRefreshLock(account.ID)
+	mu.Lock()
+	defer mu.Unlock()
 
 	// Another concurrent request may have refreshed this account while we waited.
 	if latest := h.pool.GetByID(account.ID); latest != nil {
@@ -2868,7 +2853,7 @@ func (h *Handler) apiStartKiroSso(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	redirectBase := resolvePublicBaseURL(r)
+	redirectBase := resolvePublicBaseURL()
 	sessionID, authorizeURL, loopbackPort, err := auth.StartKiroSsoLogin(req.LoginHint, redirectBase)
 	if err != nil {
 		w.WriteHeader(500)

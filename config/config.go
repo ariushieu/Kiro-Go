@@ -18,6 +18,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -263,12 +264,13 @@ type Config struct {
 	// Leave empty to connect directly.
 	ProxyURL string `json:"proxyURL,omitempty"`
 
-	// PublicBaseURL is the externally reachable base URL of this proxy
-	// (e.g. "https://azr.hian.software"). When set, OAuth redirect_uri values
-	// for the Kiro/IAM SSO flows are built from it instead of being hardcoded to
-	// http://localhost:<port>, so logins work through a reverse proxy / custom
-	// domain without hand-editing the browser URL. Empty = auto-detect from the
-	// admin request Host header, falling back to localhost.
+	// PublicBaseURL is the externally reachable base URL that routes to the SSO
+	// loopback port (e.g. "https://azr.hian.software" → reverse proxy → container:3128).
+	// When set, OAuth redirect_uri values for the Kiro SSO flow are built from it
+	// instead of being hardcoded to http://localhost:<loopbackPort>, so logins work
+	// through a reverse proxy / custom domain without hand-editing the browser URL.
+	// It must point at the loopback port, NOT the admin UI port. Empty = fall back to
+	// http://localhost:<loopbackPort> (correct for the pure-local case).
 	PublicBaseURL string `json:"publicBaseURL,omitempty"`
 
 	// SanitizeClaudeCodePrompt is kept for backward-compatible JSON loading only.
@@ -329,6 +331,12 @@ var (
 	cfg     *Config
 	cfgLock sync.RWMutex
 	cfgPath string
+	// cfgDirty marks that in-memory cfg has unpersisted changes from a hot-path
+	// counter update (RecordApiKeyUsage / UpdateAccountStats). A background flush
+	// coalesces these into one disk write instead of writing the full config on
+	// every request, which previously serialized all request completions on the
+	// exclusive cfgLock + os.WriteFile.
+	cfgDirty atomic.Bool
 )
 
 // Init initializes the configuration system with the specified file path.
@@ -415,6 +423,32 @@ func Load() error {
 // distinctly so call sites that already hold cfgLock are explicit about it.
 func saveLocked() error {
 	return Save()
+}
+
+// markDirtyLocked defers persistence to the background flusher instead of writing
+// to disk inline. Hot-path counter updates (per-request usage/stats) use this so
+// they don't hold cfgLock across an os.WriteFile of the whole config, which would
+// serialize every request completion and block all readers. Caller MUST hold cfgLock.
+func markDirtyLocked() {
+	cfgDirty.Store(true)
+}
+
+// FlushDirty persists cfg to disk only if a markDirtyLocked update is pending.
+// Called periodically by the proxy's background stats saver and once on shutdown.
+func FlushDirty() error {
+	if !cfgDirty.Swap(false) {
+		return nil
+	}
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	if cfg == nil {
+		return nil
+	}
+	if err := Save(); err != nil {
+		cfgDirty.Store(true) // retry on next tick
+		return err
+	}
+	return nil
 }
 
 // newUUID returns a UUID v4 string. Defined here to avoid pulling extra deps in this file.
@@ -728,7 +762,8 @@ func UpdateStats(totalReq, successReq, failedReq, totalTokens int, totalCredits 
 	cfg.FailedRequests = failedReq
 	cfg.TotalTokens = totalTokens
 	cfg.TotalCredits = totalCredits
-	return Save()
+	markDirtyLocked()
+	return nil
 }
 
 func GetStats() (int, int, int, int, float64) {
@@ -747,7 +782,8 @@ func UpdateAccountStats(id string, requestCount, errorCount, totalTokens int, to
 			cfg.Accounts[i].TotalTokens = totalTokens
 			cfg.Accounts[i].TotalCredits = totalCredits
 			cfg.Accounts[i].LastUsed = lastUsed
-			return Save()
+			markDirtyLocked()
+			return nil
 		}
 	}
 	return nil

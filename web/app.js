@@ -3355,10 +3355,9 @@
       const keyLabel = e.apiKeyMasked
         ? (e.apiKeyName ? escapeHtml(e.apiKeyName) + ' ' : '') + '<span class="font-mono text-xs">' + escapeHtml(e.apiKeyMasked) + '</span>'
         : '<span class="muted-text">' + escapeHtml(t('apilog.noKey')) + '</span>';
-      const accountLabel = e.accountEmail
-        ? '<span class="text-xs">' + escapeHtml(e.accountEmail) + '</span>'
-        : (e.accountId ? '<span class="text-xs font-mono">' + escapeHtml(e.accountId) + '</span>'
-          : '<span class="muted-text">-</span>');
+      const accountLabel = (e.accountEmail || e.accountId)
+        ? '<span class="text-xs">' + escapeHtml(getDisplayEmail(e.accountEmail, e.accountId)) + '</span>'
+        : '<span class="muted-text">-</span>';
       const statusBadge = isError
         ? '<span class="text-xs" style="background:rgba(239,68,68,0.15);color:#ef4444;padding:1px 6px;border-radius:4px;">' + escapeHtml(t('apilog.statusError')) + '</span>'
         : '<span class="text-xs" style="background:rgba(34,197,94,0.15);color:#22c55e;padding:1px 6px;border-radius:4px;">' + escapeHtml(t('apilog.statusOk')) + '</span>';
