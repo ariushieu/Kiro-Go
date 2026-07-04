@@ -246,19 +246,26 @@ func assertProxyURL(t *testing.T, got *url.URL, want string) {
 
 func awsEventStreamFrame(t *testing.T, eventType string, payload map[string]interface{}) []byte {
 	t.Helper()
+	return awsEventStreamFrameWithHeaders(t, map[string]string{":event-type": eventType}, payload)
+}
+
+func awsEventStreamFrameWithHeaders(t *testing.T, strHeaders map[string]string, payload map[string]interface{}) []byte {
+	t.Helper()
 
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
 		t.Fatalf("marshal payload: %v", err)
 	}
 
-	headerValue := []byte(eventType)
-	headers := make([]byte, 0, 1+len(":event-type")+1+2+len(headerValue))
-	headers = append(headers, byte(len(":event-type")))
-	headers = append(headers, []byte(":event-type")...)
-	headers = append(headers, byte(7))
-	headers = append(headers, byte(len(headerValue)>>8), byte(len(headerValue)))
-	headers = append(headers, headerValue...)
+	var headers []byte
+	for name, value := range strHeaders {
+		v := []byte(value)
+		headers = append(headers, byte(len(name)))
+		headers = append(headers, []byte(name)...)
+		headers = append(headers, byte(7))
+		headers = append(headers, byte(len(v)>>8), byte(len(v)))
+		headers = append(headers, v...)
+	}
 
 	totalLength := 12 + len(headers) + len(payloadBytes) + 4
 	frame := make([]byte, 12, totalLength)
@@ -268,4 +275,34 @@ func awsEventStreamFrame(t *testing.T, eventType string, payload map[string]inte
 	frame = append(frame, payloadBytes...)
 	frame = append(frame, 0, 0, 0, 0)
 	return frame
+}
+
+func TestParseEventStreamSurfacesMidStreamException(t *testing.T) {
+	stream := bytes.NewReader(bytes.Join([][]byte{
+		awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "partial"}),
+		awsEventStreamFrameWithHeaders(t, map[string]string{
+			":message-type":   "exception",
+			":exception-type":  "ThrottlingException",
+			":content-type":    "application/json",
+		}, map[string]interface{}{"message": "Too many requests"}),
+	}, nil))
+
+	var text string
+	var completed bool
+	err := parseEventStream(stream, &KiroStreamCallback{
+		OnText:     func(t string, _ bool) { text += t },
+		OnComplete: func(_, _ int) { completed = true },
+	})
+	if err == nil {
+		t.Fatal("expected mid-stream exception frame to surface an error, got nil")
+	}
+	if !isQuotaErrorMessage(err.Error()) {
+		t.Fatalf("expected ThrottlingException to classify as quota error, got %q", err.Error())
+	}
+	if text != "partial" {
+		t.Fatalf("expected partial content before exception, got %q", text)
+	}
+	if completed {
+		t.Fatal("OnComplete must not fire when the stream ends in an exception")
+	}
 }

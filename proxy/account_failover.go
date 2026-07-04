@@ -11,7 +11,7 @@ const maxAccountRetryAttempts = 3
 
 func isQuotaErrorMessage(msg string) bool {
 	msg = strings.ToLower(msg)
-	return strings.Contains(msg, "429") || strings.Contains(msg, "quota")
+	return strings.Contains(msg, "429") || strings.Contains(msg, "quota") || strings.Contains(msg, "throttl")
 }
 
 func isOverageErrorMessage(msg string) bool {

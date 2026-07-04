@@ -502,8 +502,22 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 			continue
 		}
 
-		eventType := extractEventType(msgBuf[0:headersLength])
+		headerBytes := msgBuf[0:headersLength]
+		eventType := extractStringHeader(headerBytes, ":event-type")
 		payloadBytes := msgBuf[headersLength : len(msgBuf)-4]
+
+		// AWS Event Stream signals mid-stream failures with :message-type=exception
+		// (e.g. ThrottlingException on a 429 after headers are sent). These frames
+		// carry no :event-type, so without this check they'd be silently dropped and
+		// the stream would end as a false success — leaving the throttled account hot.
+		if msgType := extractStringHeader(headerBytes, ":message-type"); msgType == "exception" || msgType == "error" {
+			excType := extractStringHeader(headerBytes, ":exception-type")
+			if excType == "" {
+				excType = extractStringHeader(headerBytes, ":error-code")
+			}
+			return fmt.Errorf("upstream stream exception %s: %s", excType, strings.TrimSpace(string(payloadBytes)))
+		}
+
 		if len(payloadBytes) == 0 {
 			continue
 		}
@@ -841,8 +855,9 @@ func firstBoolField(m map[string]interface{}, keys ...string) bool {
 	return false
 }
 
-// extractEventType extracts the event type string from AWS Event Stream message headers.
-func extractEventType(headers []byte) string {
+// extractStringHeader returns the value of the named string header (value type 7)
+// from AWS Event Stream message headers, or "" if absent.
+func extractStringHeader(headers []byte, target string) string {
 	offset := 0
 	for offset < len(headers) {
 		if offset >= len(headers) {
@@ -872,7 +887,7 @@ func extractEventType(headers []byte) string {
 			}
 			value := string(headers[offset : offset+valueLen])
 			offset += valueLen
-			if name == ":event-type" {
+			if name == target {
 				return value
 			}
 			continue
