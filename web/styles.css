@@ -40,15 +40,30 @@
   --sidebar: #fcfcfc;
   --sidebar-foreground: #000000;
   --sidebar-border: #ebebeb;
-  /* Shadows stay disabled for the flat UI. */
-  --shadow-2xs: none;
-  --shadow-xs: none;
-  --shadow-sm: none;
-  --shadow: none;
-  --shadow-md: none;
-  --shadow-lg: none;
-  --shadow-xl: none;
-  --shadow-2xl: none;
+  /* Glassmorphism surfaces */
+  --glass-bg: rgba(255, 255, 255, 0.55);
+  --glass-bg-strong: rgba(255, 255, 255, 0.72);
+  --glass-border: rgba(255, 255, 255, 0.7);
+  --glass-border-inner: rgba(255, 255, 255, 0.9);
+  --glass-blur: blur(20px) saturate(160%);
+  --glass-shadow: 0 8px 32px -8px rgba(45, 98, 239, 0.18),
+    0 2px 8px -4px rgba(15, 23, 42, 0.12);
+  --glass-shadow-lg: 0 24px 64px -16px rgba(45, 98, 239, 0.24),
+    0 8px 24px -8px rgba(15, 23, 42, 0.16);
+  --glass-inset: inset 0 1px 0 0 var(--glass-border-inner);
+  /* Ambient background tints */
+  --ambient-1: rgba(45, 98, 239, 0.1);
+  --ambient-2: rgba(145, 72, 255, 0.08);
+  --ambient-3: rgba(15, 118, 110, 0.06);
+  /* Tinted shadow scale (re-enabled for glass depth) */
+  --shadow-2xs: 0 1px 2px -1px rgba(15, 23, 42, 0.06);
+  --shadow-xs: 0 1px 3px -1px rgba(15, 23, 42, 0.08);
+  --shadow-sm: 0 2px 8px -3px rgba(15, 23, 42, 0.1);
+  --shadow: 0 4px 16px -6px rgba(15, 23, 42, 0.12);
+  --shadow-md: 0 8px 24px -8px rgba(15, 23, 42, 0.14);
+  --shadow-lg: 0 16px 40px -12px rgba(15, 23, 42, 0.16);
+  --shadow-xl: 0 24px 56px -16px rgba(15, 23, 42, 0.18);
+  --shadow-2xl: 0 32px 72px -20px rgba(15, 23, 42, 0.22);
   /* Radius scale */
   --radius: 0.5rem;
   --radius-sm: 0.25rem;
@@ -63,9 +78,9 @@
 }
 
 .dark {
-  --background: #000000;
+  --background: #0a0b0f;
   --foreground: #ffffff;
-  --card: #090909;
+  --card: #12141a;
   --card-foreground: #ffffff;
   --popover: #121212;
   --popover-foreground: #ffffff;
@@ -100,6 +115,30 @@
   --sidebar-foreground: #ffffff;
   --sidebar-border: #333333;
   --kiro-icon-filter: invert(1);
+  /* Glassmorphism surfaces */
+  --glass-bg: rgba(24, 27, 36, 0.55);
+  --glass-bg-strong: rgba(24, 27, 36, 0.74);
+  --glass-border: rgba(255, 255, 255, 0.1);
+  --glass-border-inner: rgba(255, 255, 255, 0.14);
+  --glass-blur: blur(22px) saturate(150%);
+  --glass-shadow: 0 8px 32px -8px rgba(0, 0, 0, 0.6),
+    0 2px 8px -4px rgba(0, 0, 0, 0.5);
+  --glass-shadow-lg: 0 24px 64px -16px rgba(0, 0, 0, 0.7),
+    0 8px 24px -8px rgba(0, 0, 0, 0.55);
+  --glass-inset: inset 0 1px 0 0 var(--glass-border-inner);
+  /* Ambient background tints */
+  --ambient-1: rgba(75, 130, 255, 0.16);
+  --ambient-2: rgba(145, 72, 255, 0.12);
+  --ambient-3: rgba(45, 212, 191, 0.08);
+  /* Tinted shadow scale (re-enabled for glass depth) */
+  --shadow-2xs: 0 1px 2px -1px rgba(0, 0, 0, 0.4);
+  --shadow-xs: 0 1px 3px -1px rgba(0, 0, 0, 0.45);
+  --shadow-sm: 0 2px 8px -3px rgba(0, 0, 0, 0.5);
+  --shadow: 0 4px 16px -6px rgba(0, 0, 0, 0.55);
+  --shadow-md: 0 8px 24px -8px rgba(0, 0, 0, 0.6);
+  --shadow-lg: 0 16px 40px -12px rgba(0, 0, 0, 0.65);
+  --shadow-xl: 0 24px 56px -16px rgba(0, 0, 0, 0.7);
+  --shadow-2xl: 0 32px 72px -20px rgba(0, 0, 0, 0.75);
   color-scheme: dark;
 }
 
@@ -138,24 +177,40 @@
   --font-mono: var(--font-mono);
 }
 
-/* Flat reset */
+/* Reset — text-shadow off, box-shadow allowed for glass depth */
 *,
 *::before,
 *::after {
-  box-shadow: none !important;
-  -webkit-box-shadow: none !important;
   text-shadow: none !important;
 }
 
 /* Base */
+html {
+  background: var(--background);
+}
 html,
 body {
-  background: var(--background);
   color: var(--foreground);
   font-family: var(--font-sans);
   font-feature-settings: "cv02", "cv03", "cv04", "cv11";
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+body {
+  background: transparent;
+}
+
+/* Ambient mesh — gives backdrop-filter something to refract */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(60rem 60rem at 12% -8%, var(--ambient-1), transparent 55%),
+    radial-gradient(52rem 52rem at 92% 6%, var(--ambient-2), transparent 55%),
+    radial-gradient(44rem 44rem at 78% 96%, var(--ambient-3), transparent 55%);
 }
 
 html {
@@ -356,11 +411,14 @@ pre,
 
 /* Cards */
 .card {
-  background: var(--card);
+  background: var(--glass-bg);
   color: var(--card-foreground);
-  border: 1px solid var(--border);
+  border: 1px solid var(--glass-border);
   border-radius: var(--radius-lg);
   padding: 1.25rem 1.5rem;
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  box-shadow: var(--glass-shadow), var(--glass-inset);
 }
 .card-header {
   display: flex;
@@ -860,7 +918,7 @@ label:has(> .switch) > span {
   position: relative;
   margin-top: auto;
   width: 100%;
-  background: var(--background);
+  background: transparent;
 }
 .app-footer-inner {
   max-width: 1200px;
@@ -1060,11 +1118,13 @@ label:has(> .switch) > span {
 
 /* App shell */
 .app-header {
-  position: static;
-  background: var(--background);
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
-  border-bottom: 0;
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border-bottom: 1px solid var(--glass-border);
 }
 .app-header-inner {
   max-width: 1200px;
@@ -1189,8 +1249,8 @@ body:has(#tabApilog:not(.hidden)) #mainPage > .container {
   }
 }
 .stat-card {
-  background: var(--card);
-  border: 1px solid var(--border);
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
   border-radius: var(--radius-lg);
   padding: 0.875rem 1rem;
   display: flex;
@@ -1198,6 +1258,14 @@ body:has(#tabApilog:not(.hidden)) #mainPage > .container {
   justify-content: space-between;
   gap: 0.625rem;
   min-width: 0;
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  box-shadow: var(--glass-shadow), var(--glass-inset);
+  transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.2s;
+}
+.stat-card:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--glass-shadow-lg), var(--glass-inset);
 }
 .stat-card-title {
   color: var(--muted-foreground);
@@ -1303,7 +1371,7 @@ body:has(#tabApilog:not(.hidden)) #mainPage > .container {
   min-height: 100dvh;
   display: flex;
   flex-direction: column;
-  background: var(--background);
+  background: transparent;
   position: relative;
   overflow: hidden;
 }
@@ -1314,10 +1382,10 @@ body:has(#tabApilog:not(.hidden)) #mainPage > .container {
   right: 0;
   z-index: 3;
   width: 100%;
-  background: var(--background);
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
-  border-bottom: 0;
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border-bottom: 1px solid var(--glass-border);
   animation: navIn 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 .login-topbar-inner {
@@ -1353,9 +1421,13 @@ body:has(#tabApilog:not(.hidden)) #mainPage > .container {
 .login-box {
   width: 100%;
   max-width: 420px;
-  background: transparent;
-  border: 0;
-  padding: 2.25rem 1rem;
+  background: var(--glass-bg-strong);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-xl);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  box-shadow: var(--glass-shadow-lg), var(--glass-inset);
+  padding: 2.5rem 2rem;
   animation: cardIn 0.7s cubic-bezier(0.16, 1, 0.3, 1) 0.15s both;
 }
 @keyframes cardIn {
@@ -1863,14 +1935,17 @@ body:has(#tabApilog:not(.hidden)) #mainPage > .container {
 .modal-content {
   width: min(640px, 90vw);
   max-width: 90vw;
-  background: var(--card);
+  background: var(--glass-bg-strong);
   color: var(--card-foreground);
-  border: 1px solid var(--border);
+  border: 1px solid var(--glass-border);
   border-radius: var(--radius-lg);
   margin: auto;
   display: flex;
   flex-direction: column;
   max-height: 90vh;
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  box-shadow: var(--glass-shadow-lg), var(--glass-inset);
 }
 .confirm-modal-content {
   width: min(26rem, 90vw);
@@ -1945,13 +2020,16 @@ body:has(#tabApilog:not(.hidden)) #mainPage > .container {
   align-items: center;
   gap: 0.75rem;
   padding: 0.75rem 0.875rem;
-  border: 1px solid var(--border);
+  border: 1px solid var(--glass-border);
   border-radius: var(--radius-md);
-  background: var(--card);
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
   cursor: pointer;
   transition:
     background 0.15s ease,
-    border-color 0.15s ease;
+    border-color 0.15s ease,
+    transform 0.15s ease;
   user-select: none;
   min-width: 0;
 }

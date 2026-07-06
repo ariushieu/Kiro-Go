@@ -1294,8 +1294,10 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		return
 	}
 
-	h.recordFailureForApiKey(apiKeyID, "claude", model, 500, lastErr.Error(), startedAt)
-	h.sendClaudeError(w, 500, "api_error", lastErr.Error())
+	status := statusForUpstreamError(lastErr)
+	applyRetryAfterHeader(w, lastErr)
+	h.recordFailureForApiKey(apiKeyID, "claude", model, status, lastErr.Error(), startedAt)
+	h.sendClaudeError(w, status, "api_error", lastErr.Error())
 }
 
 func (h *Handler) sendSSE(w http.ResponseWriter, flusher http.Flusher, event string, data interface{}) {
@@ -1555,8 +1557,10 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		return
 	}
 
-	h.recordFailureForApiKey(apiKeyID, "claude", model, 500, lastErr.Error(), startedAt)
-	h.sendClaudeError(w, 500, "api_error", lastErr.Error())
+	status := statusForUpstreamError(lastErr)
+	applyRetryAfterHeader(w, lastErr)
+	h.recordFailureForApiKey(apiKeyID, "claude", model, status, lastErr.Error(), startedAt)
+	h.sendClaudeError(w, status, "api_error", lastErr.Error())
 }
 
 func (h *Handler) sendClaudeError(w http.ResponseWriter, status int, errType, message string) {
@@ -1997,7 +2001,9 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 	}
 
 	h.recordFailure()
-	h.sendOpenAIError(w, 500, "server_error", lastErr.Error())
+	status := statusForUpstreamError(lastErr)
+	applyRetryAfterHeader(w, lastErr)
+	h.sendOpenAIError(w, status, errorTypeForOpenAIStatus(status), lastErr.Error())
 }
 
 // handleOpenAINonStream OpenAI 非流式响应
@@ -2080,8 +2086,10 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 		return
 	}
 
-	h.recordFailureForApiKey(apiKeyID, "openai", model, 500, lastErr.Error(), startedAt)
-	h.sendOpenAIError(w, 500, "server_error", lastErr.Error())
+	status := statusForUpstreamError(lastErr)
+	applyRetryAfterHeader(w, lastErr)
+	h.recordFailureForApiKey(apiKeyID, "openai", model, status, lastErr.Error(), startedAt)
+	h.sendOpenAIError(w, status, errorTypeForOpenAIStatus(status), lastErr.Error())
 }
 
 func (h *Handler) sendOpenAIError(w http.ResponseWriter, status int, errType, message string) {
@@ -2236,6 +2244,8 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiResetStats(w, r)
 	case path == "/request-logs" && r.Method == "GET":
 		h.apiGetRequestLogs(w, r)
+	case path == "/request-logs" && r.Method == "DELETE":
+		h.apiClearRequestLogs(w, r)
 	case path == "/usage-summary" && r.Method == "GET":
 		h.apiGetUsageSummary(w, r)
 	case path == "/logs" && r.Method == "GET":

@@ -2030,8 +2030,6 @@
     if (addBtn) addBtn.addEventListener('click', () => openApiKeyModal(null));
     const bulkAddBtn = $('bulkAddApiKeyBtn');
     if (bulkAddBtn) bulkAddBtn.addEventListener('click', openApiKeyBulkModal);
-    const exportBtn = $('exportApiKeysBtn');
-    if (exportBtn) exportBtn.addEventListener('click', showApiKeyExportModal);
     const bulkDeleteBtn = $('bulkDeleteApiKeyBtn');
     if (bulkDeleteBtn) bulkDeleteBtn.addEventListener('click', bulkDeleteApiKeys);
     const saveBtn = $('apiKeyModalSaveBtn');
@@ -3574,6 +3572,53 @@
         errChip +
         '<span class="apilog-chip">' + escapeHtml(t('apilog.totalTokens', formatNumber(sumInput + sumOutput))) + '</span>' +
         '<span class="apilog-chip">' + escapeHtml(t('apilog.totalCredits', formatNumber(sumCredits))) + '</span>';
+    }
+  }
+
+  async function clearApiLog() {
+    if (!confirm(t('logs.clearConfirm'))) return;
+    try {
+      await api('/request-logs', { method: 'DELETE' });
+    } catch (e) { /* ignore */ }
+    apiLogCache = [];
+    renderApiLog([]);
+    toast(t('logs.cleared'), 'success');
+  }
+
+  function exportApiLog(format) {
+    const entries = filterApiLog(apiLogCache);
+    if (!entries.length) { toast(t('logs.exportFailed'), 'error'); return; }
+    let blob;
+    if (format === 'csv') {
+      const cols = ['time', 'status', 'endpoint', 'apiKeyName', 'apiKeyMasked', 'model', 'accountEmail', 'inputTokens', 'outputTokens', 'totalTokens', 'credits', 'durationMs', 'statusCode', 'error'];
+      const esc = v => {
+        const s = String(v == null ? '' : v);
+        return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+      };
+      const lines = [cols.join(',')];
+      for (const e of entries) lines.push(cols.map(c => esc(e[c])).join(','));
+      blob = new Blob([lines.join('\n')], { type: 'text/csv' });
+    } else {
+      blob = new Blob([JSON.stringify(entries, null, 2)], { type: 'application/json' });
+    }
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'kiro-go-request-logs.' + (format === 'csv' ? 'csv' : 'json');
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    toast(t('logs.exported'), 'success');
+  }
+
+  function toggleApiLogAutoRefresh() {
+    const on = $('logsAutoRefresh').checked;
+    if (apiLogAutoTimer) { clearInterval(apiLogAutoTimer); apiLogAutoTimer = null; }
+    if (on) {
+      apiLogAutoTimer = setInterval(() => {
+        if (!$('tabApilog').classList.contains('hidden')) loadApiLog();
+      }, 5000);
     }
   }
 

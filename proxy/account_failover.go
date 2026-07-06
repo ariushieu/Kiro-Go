@@ -3,6 +3,7 @@ package proxy
 import (
 	"kiro-go/config"
 	"kiro-go/logger"
+	"net/http"
 	"strings"
 	"time"
 )
@@ -43,6 +44,61 @@ func isAuthErrorMessage(msg string) bool {
 		strings.Contains(msg, "invalid_grant") ||
 		strings.Contains(msg, "access token expired") ||
 		strings.Contains(msg, "refresh token expired")
+}
+
+// statusForUpstreamError maps an upstream error to the HTTP status the client should see.
+// Quota/throttle → 429, overage → 402, auth → 401, everything else → 500.
+func statusForUpstreamError(err error) int {
+	if err == nil {
+		return http.StatusInternalServerError
+	}
+	msg := err.Error()
+	switch {
+	case isQuotaErrorMessage(msg):
+		return http.StatusTooManyRequests
+	case isOverageErrorMessage(msg):
+		return http.StatusPaymentRequired
+	case isAuthErrorMessage(msg):
+		return http.StatusUnauthorized
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
+func errorTypeForOpenAIStatus(status int) string {
+	switch status {
+	case http.StatusTooManyRequests:
+		return "rate_limit_error"
+	case http.StatusUnauthorized:
+		return "authentication_error"
+	default:
+		return "server_error"
+	}
+}
+
+// applyRetryAfterHeader sets Retry-After on quota errors, using the upstream-supplied
+// value when the message carries one ("retry after 30"), else a 60s default.
+func applyRetryAfterHeader(w http.ResponseWriter, err error) {
+	if w == nil || err == nil || !isQuotaErrorMessage(err.Error()) {
+		return
+	}
+	if retryAfter := retryAfterFromError(err.Error()); retryAfter != "" {
+		w.Header().Set("Retry-After", retryAfter)
+		return
+	}
+	w.Header().Set("Retry-After", "60")
+}
+
+func retryAfterFromError(msg string) string {
+	idx := strings.LastIndex(strings.ToLower(msg), "retry after ")
+	if idx < 0 {
+		return ""
+	}
+	value := strings.TrimSpace(msg[idx+len("retry after "):])
+	if semi := strings.Index(value, ";"); semi >= 0 {
+		value = strings.TrimSpace(value[:semi])
+	}
+	return value
 }
 
 func (h *Handler) disableAccount(account *config.Account, banStatus, banReason string) {

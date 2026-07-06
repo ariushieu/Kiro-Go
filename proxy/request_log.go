@@ -56,6 +56,14 @@ func (b *requestLogBuffer) add(e RequestLogEntry) {
 	b.mu.Unlock()
 }
 
+func (b *requestLogBuffer) reset() {
+	b.mu.Lock()
+	b.ring = make([]RequestLogEntry, requestLogCapacity)
+	b.next = 0
+	b.full = false
+	b.mu.Unlock()
+}
+
 // snapshot returns retained entries newest-first.
 func (b *requestLogBuffer) snapshot() []RequestLogEntry {
 	b.mu.Lock()
@@ -117,6 +125,12 @@ func (h *Handler) apiGetRequestLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(map[string]interface{}{"logs": entries})
+}
+
+// apiClearRequestLogs DELETE /admin/api/request-logs - drops the in-memory request feed.
+func (h *Handler) apiClearRequestLogs(w http.ResponseWriter, r *http.Request) {
+	requestLog.reset()
+	json.NewEncoder(w).Encode(map[string]interface{}{"ok": true})
 }
 
 // apiKeyUsageView is the per-key usage summary returned by apiGetUsageSummary.

@@ -210,8 +210,10 @@ func (h *Handler) handleResponsesNonStream(
 		h.sendOpenAIError(w, 503, "server_error", "No available accounts")
 		return
 	}
-	h.recordFailureForApiKey(apiKeyID, "openai", model, 500, lastErr.Error(), startedAt)
-	h.sendOpenAIError(w, 500, "server_error", lastErr.Error())
+	status := statusForUpstreamError(lastErr)
+	applyRetryAfterHeader(w, lastErr)
+	h.recordFailureForApiKey(apiKeyID, "openai", model, status, lastErr.Error(), startedAt)
+	h.sendOpenAIError(w, status, errorTypeForOpenAIStatus(status), lastErr.Error())
 }
 
 func buildResponsesObject(
@@ -572,14 +574,15 @@ func (h *Handler) handleResponsesStream(
 		})
 		return
 	}
-	h.recordFailureForApiKey(apiKeyID, "openai", model, 500, lastErr.Error(), startedAt)
+	status := statusForUpstreamError(lastErr)
+	h.recordFailureForApiKey(apiKeyID, "openai", model, status, lastErr.Error(), startedAt)
 	send("response.failed", map[string]interface{}{
 		"type": "response.failed",
 		"response": map[string]interface{}{
 			"id":     respID,
 			"status": "failed",
 			"error": map[string]string{
-				"type":    "server_error",
+				"type":    errorTypeForOpenAIStatus(status),
 				"message": lastErr.Error(),
 			},
 		},
