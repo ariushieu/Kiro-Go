@@ -2278,6 +2278,8 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiBulkCreateApiKeys(w, r)
 	case path == "/api-keys/bulk" && r.Method == "DELETE":
 		h.apiBulkDeleteApiKeys(w, r)
+	case path == "/api-keys/export" && r.Method == "POST":
+		h.apiExportApiKeys(w, r)
 	case strings.HasPrefix(path, "/api-keys/") && strings.HasSuffix(path, "/reset-usage") && r.Method == "POST":
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/api-keys/"), "/reset-usage")
 		h.apiResetApiKeyUsage(w, r, id)

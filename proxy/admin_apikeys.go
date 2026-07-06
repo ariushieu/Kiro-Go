@@ -5,6 +5,7 @@ import (
 	"kiro-go/config"
 	"net/http"
 	"strconv"
+	"time"
 )
 
 // apiKeyView is the response payload for listing/inspecting API keys. The Key field
@@ -258,6 +259,96 @@ func (h *Handler) apiUpdateApiKey(w http.ResponseWriter, r *http.Request, id str
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
 		"apiKey":  toApiKeyView(*updated),
+	})
+}
+
+// apiKeyExportView is the masked usage-report row. It extends the masked fields
+// with server-computed derived columns so the frontend renders both JSON and CSV
+// from one source. Never contains the raw key value.
+type apiKeyExportView struct {
+	ID                string  `json:"id"`
+	Name              string  `json:"name,omitempty"`
+	KeyMasked         string  `json:"keyMasked"`
+	Enabled           bool    `json:"enabled"`
+	RequestsCount     int64   `json:"requestsCount"`
+	TokensUsed        int64   `json:"tokensUsed"`
+	CreditsUsed       float64 `json:"creditsUsed"`
+	TokenLimit        int64   `json:"tokenLimit"`
+	CreditLimit       float64 `json:"creditLimit"`
+	ExpiresAt         int64   `json:"expiresAt"`
+	CreatedAt         int64   `json:"createdAt"`
+	LastUsedAt        int64   `json:"lastUsedAt"`
+	TokenPercentUsed  float64 `json:"tokenPercentUsed"`
+	CreditPercentUsed float64 `json:"creditPercentUsed"`
+	OverToken         bool    `json:"overToken"`
+	OverCredit        bool    `json:"overCredit"`
+	Expired           bool    `json:"expired"`
+}
+
+func toApiKeyExportView(e config.ApiKeyEntry) apiKeyExportView {
+	overToken, overCredit := config.ApiKeyOverLimit(e)
+	tokenPct := 0.0
+	if e.TokenLimit > 0 {
+		tokenPct = float64(e.TokensUsed) / float64(e.TokenLimit) * 100
+	}
+	creditPct := 0.0
+	if e.CreditLimit > 0 {
+		creditPct = e.CreditsUsed / e.CreditLimit * 100
+	}
+	return apiKeyExportView{
+		ID:                e.ID,
+		Name:              e.Name,
+		KeyMasked:         config.MaskApiKey(e.Key),
+		Enabled:           e.Enabled,
+		RequestsCount:     e.RequestsCount,
+		TokensUsed:        e.TokensUsed,
+		CreditsUsed:       e.CreditsUsed,
+		TokenLimit:        e.TokenLimit,
+		CreditLimit:       e.CreditLimit,
+		ExpiresAt:         e.ExpiresAt,
+		CreatedAt:         e.CreatedAt,
+		LastUsedAt:        e.LastUsedAt,
+		TokenPercentUsed:  tokenPct,
+		CreditPercentUsed: creditPct,
+		OverToken:         overToken,
+		OverCredit:        overCredit,
+		Expired:           config.ApiKeyExpired(e),
+	}
+}
+
+// apiExportApiKeys handles POST /admin/api/api-keys/export. It returns a masked
+// usage report (never re-importable). Body: {"ids": [...]}; empty/missing = all.
+func (h *Handler) apiExportApiKeys(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		IDs []string `json:"ids"`
+	}
+	// Empty/invalid body = export all.
+	_ = json.NewDecoder(r.Body).Decode(&req)
+
+	entries := config.ListApiKeys()
+	if len(req.IDs) > 0 {
+		idSet := make(map[string]bool, len(req.IDs))
+		for _, id := range req.IDs {
+			idSet[id] = true
+		}
+		filtered := entries[:0]
+		for _, e := range entries {
+			if idSet[e.ID] {
+				filtered = append(filtered, e)
+			}
+		}
+		entries = filtered
+	}
+
+	views := make([]apiKeyExportView, len(entries))
+	for i, e := range entries {
+		views[i] = toApiKeyExportView(e)
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"version":    config.Version,
+		"exportedAt": time.Now().Unix(),
+		"apiKeys":    views,
 	})
 }
 
