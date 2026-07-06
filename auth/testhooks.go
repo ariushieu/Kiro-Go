@@ -38,7 +38,7 @@ func SetKiroPortalBaseURL(url string) {
 
 // SetExternalIdpTokenURLFnForTest sets a custom external IdP token URL resolver for testing.
 // The function receives an issuer URL and returns the token endpoint URL.
-func SetExternalIdpTokenURLFnForTest(fn func(issuerURL string) (string, error)) {
+func SetExternalIdpTokenURLFnForTest(fn func(issuerURL string, client *http.Client) (string, error)) {
 	if fn != nil {
 		externalIdpTokenURLFn = fn
 	}

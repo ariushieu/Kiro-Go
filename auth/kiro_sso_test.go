@@ -185,7 +185,7 @@ func TestRefreshExternalIdpToken_Success(t *testing.T) {
 	defer server.Close()
 
 	// Dùng SetExternalIdpTokenURLFnForTest để mock resolver
-	SetExternalIdpTokenURLFnForTest(func(issuerURL string) (string, error) {
+	SetExternalIdpTokenURLFnForTest(func(issuerURL string, client *http.Client) (string, error) {
 		return server.URL + "/token", nil
 	})
 
@@ -213,7 +213,7 @@ func TestRefreshExternalIdpToken_ErrorResponse(t *testing.T) {
 	}))
 	defer server.Close()
 
-	SetExternalIdpTokenURLFnForTest(func(issuerURL string) (string, error) {
+	SetExternalIdpTokenURLFnForTest(func(issuerURL string, client *http.Client) (string, error) {
 		return server.URL + "/token", nil
 	})
 
@@ -340,6 +340,64 @@ func (m *markerRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) 
 	return m.next.RoundTrip(r)
 }
 
+// TestRefreshExternalIdpTokenDiscoveryUsesPassedClient drives the REAL refresh
+// path: empty tokenEndpoint → resolveExternalIdpTokenEndpoint → production seam
+// (externalIdpTokenURLFn) → discoverOIDCEndpoints. It asserts the proxy-aware
+// client threaded from oidc.go actually reaches the discovery server. This is the
+// path the leak lived on — the direct-call test above bypasses the seam.
+func TestRefreshExternalIdpTokenDiscoveryUsesPassedClient(t *testing.T) {
+	// Restore the production seam after the test (sibling tests mutate it).
+	old := externalIdpTokenURLFn
+	defer func() { externalIdpTokenURLFn = old }()
+	// Reinstate the production closure so we exercise the real forwarding path,
+	// not a prior test's fixed-URL stub.
+	externalIdpTokenURLFn = func(issuerURL string, client *http.Client) (string, error) {
+		_, tokenEndpoint, err := discoverOIDCEndpoints(issuerURL, client)
+		return tokenEndpoint, err
+	}
+
+	var discoveryHeader string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/.well-known/openid-configuration":
+			discoveryHeader = r.Header.Get("X-Proxy-Marker")
+			w.Header().Set("Content-Type", "application/json")
+			// token_endpoint points back at this same server's /token.
+			w.Write([]byte(`{"authorization_endpoint":"` + "https://login.microsoftonline.com/a" +
+				`","token_endpoint":"` + serverTokenURL + `","issuer":"x"}`))
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer server.Close()
+
+	// token_endpoint must resolve to a live handler; run a second server for it so
+	// the discovery doc can reference a stable URL captured before ListenAndServe.
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"access_token":"a","refresh_token":"r","expires_in":3600}`))
+	}))
+	defer tokenSrv.Close()
+	serverTokenURL = tokenSrv.URL
+
+	marker := &markerRoundTripper{next: http.DefaultTransport, marker: "yes"}
+	client := &http.Client{Transport: marker}
+
+	_, _, _, _, err := RefreshExternalIdpToken(
+		"old-refresh", server.URL, "", "test-client", "openid", client,
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if discoveryHeader != "yes" {
+		t.Fatalf("refresh-path discovery did not use the passed client (marker header missing) — leak survives")
+	}
+}
+
+// serverTokenURL is set by TestRefreshExternalIdpTokenDiscoveryUsesPassedClient
+// before the discovery server serves its document (closure capture ordering).
+var serverTokenURL string
+
 // ---------------------------------------------------------------------------
 // Test hooks
 // ---------------------------------------------------------------------------
@@ -365,12 +423,12 @@ func TestSetExternalIdpTokenURLFnForTest(t *testing.T) {
 	defer func() { externalIdpTokenURLFn = old }()
 
 	called := false
-	SetExternalIdpTokenURLFnForTest(func(issuerURL string) (string, error) {
+	SetExternalIdpTokenURLFnForTest(func(issuerURL string, client *http.Client) (string, error) {
 		called = true
 		return "https://custom.example.com/token", nil
 	})
 
-	url, err := externalIdpTokenURLFn("https://login.microsoftonline.com/test")
+	url, err := externalIdpTokenURLFn("https://login.microsoftonline.com/test", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

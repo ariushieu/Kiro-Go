@@ -103,8 +103,9 @@ var kiroPortalSignInURL = "https://app.kiro.dev/signin"
 var kiroRedirectFrom = "KiroIDE"
 
 // externalIdpTokenURLFn resolves the IdP token endpoint from issuer URL.
-// Mặc định: OIDC discovery. Test có thể thay thế qua SetExternalIdpTokenURLFnForTest.
-var externalIdpTokenURLFn func(issuerURL string) (string, error)
+// Mặc định: OIDC discovery qua client được truyền vào (proxy-aware ở refresh path).
+// Test có thể thay thế qua SetExternalIdpTokenURLFnForTest.
+var externalIdpTokenURLFn func(issuerURL string, client *http.Client) (string, error)
 
 // kiroLoopbackPorts là tập port loopback chính thức mà Kiro portal chấp nhận cho
 // Leg-1 redirect (verified: Kiro Okta IdP docs). bindKiroLoopback thử lần lượt theo
@@ -768,7 +769,7 @@ func discoverOIDCEndpoints(issuerURL string, client *http.Client) (authEndpoint,
 // resolveExternalIdpTokenEndpoint lấy token endpoint từ issuer URL qua OIDC discovery.
 func resolveExternalIdpTokenEndpoint(issuerURL string, client *http.Client) (string, error) {
 	if externalIdpTokenURLFn != nil {
-		return externalIdpTokenURLFn(issuerURL)
+		return externalIdpTokenURLFn(issuerURL, client)
 	}
 	_, tokenEndpoint, err := discoverOIDCEndpoints(issuerURL, client)
 	return tokenEndpoint, err
@@ -928,8 +929,8 @@ func cleanupExpiredKiroSsoSessions() {
 
 // init registers the default external IdP token URL resolver.
 func init() {
-	externalIdpTokenURLFn = func(issuerURL string) (string, error) {
-		_, tokenEndpoint, err := discoverOIDCEndpoints(issuerURL, nil)
+	externalIdpTokenURLFn = func(issuerURL string, client *http.Client) (string, error) {
+		_, tokenEndpoint, err := discoverOIDCEndpoints(issuerURL, client)
 		return tokenEndpoint, err
 	}
 }
