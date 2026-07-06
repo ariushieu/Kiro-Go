@@ -299,6 +299,48 @@ func TestStartKiroSsoLogin_NoLoginHint(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// OIDC discovery client-injection test (proxy-leak fix)
+// ---------------------------------------------------------------------------
+
+func TestDiscoverOIDCEndpointsUsesPassedClient(t *testing.T) {
+	var gotHeader string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/.well-known/openid-configuration" {
+			w.WriteHeader(404)
+			return
+		}
+		gotHeader = r.Header.Get("X-Proxy-Marker")
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"authorization_endpoint":"https://login.microsoftonline.com/a","token_endpoint":"https://login.microsoftonline.com/t","issuer":"x"}`))
+	}))
+	defer server.Close()
+
+	marker := &markerRoundTripper{next: http.DefaultTransport, marker: "yes"}
+	client := &http.Client{Transport: marker}
+
+	_, tokenEndpoint, err := discoverOIDCEndpoints(server.URL, client)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tokenEndpoint != "https://login.microsoftonline.com/t" {
+		t.Fatalf("unexpected token endpoint: %q", tokenEndpoint)
+	}
+	if gotHeader != "yes" {
+		t.Fatalf("discovery did not use the passed client (marker header missing)")
+	}
+}
+
+type markerRoundTripper struct {
+	next   http.RoundTripper
+	marker string
+}
+
+func (m *markerRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
+	r.Header.Set("X-Proxy-Marker", m.marker)
+	return m.next.RoundTrip(r)
+}
+
+// ---------------------------------------------------------------------------
 // Test hooks
 // ---------------------------------------------------------------------------
 

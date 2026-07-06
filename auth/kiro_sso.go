@@ -368,7 +368,7 @@ func RefreshExternalIdpToken(refreshToken, issuerURL, tokenEndpoint, clientID, s
 	// Dùng cached token endpoint nếu có, nếu không thì OIDC discovery
 	if tokenEndpoint == "" {
 		var err error
-		tokenEndpoint, err = resolveExternalIdpTokenEndpoint(issuerURL)
+		tokenEndpoint, err = resolveExternalIdpTokenEndpoint(issuerURL, httpClient)
 		if err != nil {
 			return "", "", 0, "", err
 		}
@@ -387,10 +387,7 @@ func RefreshExternalIdpToken(refreshToken, issuerURL, tokenEndpoint, clientID, s
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
-	client := externalIdpHTTPClient()
-	if httpClient != nil {
-		client = httpClient
-	}
+	client := noRedirectClient(httpClient)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -524,7 +521,7 @@ func (s *KiroSsoSession) resolveIdpAuthorizeURL(query url.Values) (string, error
 	}
 
 	// OIDC discovery để lấy authorization và token endpoints
-	authEndpoint, tokenEndpoint, err := discoverOIDCEndpoints(issuerURL)
+	authEndpoint, tokenEndpoint, err := discoverOIDCEndpoints(issuerURL, nil)
 	if err != nil {
 		return "", fmt.Errorf("OIDC discovery failed: %w", err)
 	}
@@ -740,11 +737,10 @@ type oidcDiscoveryResponse struct {
 
 // discoverOIDCEndpoints fetch OIDC discovery document từ issuer URL.
 // Không follow redirect (CheckRedirect → ErrUseLastResponse) — zsec pattern.
-func discoverOIDCEndpoints(issuerURL string) (authEndpoint, tokenEndpoint string, err error) {
+func discoverOIDCEndpoints(issuerURL string, client *http.Client) (authEndpoint, tokenEndpoint string, err error) {
 	discoveryURL := strings.TrimRight(issuerURL, "/") + "/.well-known/openid-configuration"
 
-	client := externalIdpHTTPClient()
-	resp, err := client.Get(discoveryURL)
+	resp, err := noRedirectClient(client).Get(discoveryURL)
 	if err != nil {
 		return "", "", fmt.Errorf("fetch discovery failed: %w", err)
 	}
@@ -770,11 +766,11 @@ func discoverOIDCEndpoints(issuerURL string) (authEndpoint, tokenEndpoint string
 }
 
 // resolveExternalIdpTokenEndpoint lấy token endpoint từ issuer URL qua OIDC discovery.
-func resolveExternalIdpTokenEndpoint(issuerURL string) (string, error) {
+func resolveExternalIdpTokenEndpoint(issuerURL string, client *http.Client) (string, error) {
 	if externalIdpTokenURLFn != nil {
 		return externalIdpTokenURLFn(issuerURL)
 	}
-	_, tokenEndpoint, err := discoverOIDCEndpoints(issuerURL)
+	_, tokenEndpoint, err := discoverOIDCEndpoints(issuerURL, client)
 	return tokenEndpoint, err
 }
 
@@ -828,6 +824,21 @@ func externalIdpHTTPClient() *http.Client {
 			return http.ErrUseLastResponse
 		},
 	}
+}
+
+// noRedirectClient returns a client that does not follow redirects (SSRF guard,
+// zsec pattern). When base is nil it builds a fresh non-proxied client; when a
+// proxy-aware base is supplied it reuses base's Transport but enforces the
+// no-redirect policy.
+func noRedirectClient(base *http.Client) *http.Client {
+	if base == nil {
+		return externalIdpHTTPClient()
+	}
+	c := *base
+	c.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return &c
 }
 
 // ---------------------------------------------------------------------------
@@ -918,7 +929,7 @@ func cleanupExpiredKiroSsoSessions() {
 // init registers the default external IdP token URL resolver.
 func init() {
 	externalIdpTokenURLFn = func(issuerURL string) (string, error) {
-		_, tokenEndpoint, err := discoverOIDCEndpoints(issuerURL)
+		_, tokenEndpoint, err := discoverOIDCEndpoints(issuerURL, nil)
 		return tokenEndpoint, err
 	}
 }
