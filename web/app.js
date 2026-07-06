@@ -23,6 +23,7 @@
   let builderIdPollTimer = null;
   let iamSession = '';
   let exportSelectedIds = new Set();
+  let apiKeyExportSelectedIds = new Set();
   let currentVersion = '';
   let testLogs = [];
   let testModalAccountId = '';
@@ -2023,10 +2024,14 @@
         toggleApiKeyEntry(id, cb.checked);
       });
     }
+    const exportBtn = $('exportApiKeysBtn');
+    if (exportBtn) exportBtn.addEventListener('click', showApiKeyExportModal);
     const addBtn = $('addApiKeyBtn');
     if (addBtn) addBtn.addEventListener('click', () => openApiKeyModal(null));
     const bulkAddBtn = $('bulkAddApiKeyBtn');
     if (bulkAddBtn) bulkAddBtn.addEventListener('click', openApiKeyBulkModal);
+    const exportBtn = $('exportApiKeysBtn');
+    if (exportBtn) exportBtn.addEventListener('click', showApiKeyExportModal);
     const bulkDeleteBtn = $('bulkDeleteApiKeyBtn');
     if (bulkDeleteBtn) bulkDeleteBtn.addEventListener('click', bulkDeleteApiKeys);
     const saveBtn = $('apiKeyModalSaveBtn');
@@ -3001,6 +3006,127 @@
     URL.revokeObjectURL(url);
   }
 
+  // API key usage export modal (masked report, not re-importable)
+  function showApiKeyExportModal() {
+    if (!apiKeysCache.length) return toastWarning(t('apiKeys.export.empty'));
+    apiKeyExportSelectedIds = new Set(apiKeysCache.map(k => k.id));
+    renderApiKeyExportModal();
+    openDialog('exportModal');
+  }
+  function renderApiKeyExportModal() {
+    const body = $('exportBody');
+    const all = apiKeyExportSelectedIds.size === apiKeysCache.length;
+    body.innerHTML =
+      '<div class="flex items-center justify-between mb-3">' +
+      '<span class="text-sm muted-text">' + escapeHtml(t('export.selected', apiKeyExportSelectedIds.size)) + '</span>' +
+      '<button class="btn btn-sm btn-outline" id="apiKeyExportToggleAllBtn" type="button">' + escapeHtml(all ? t('export.deselectAll') : t('export.selectAll')) + '</button>' +
+      '</div>' +
+      '<div class="export-list">' +
+      apiKeysCache.map(k => {
+        const checked = apiKeyExportSelectedIds.has(k.id);
+        const label = k.name || k.keyMasked || k.id;
+        const meta = (k.keyMasked || '') + ' · ' + t('apiKeys.export.reqMeta', k.requestsCount || 0) + (k.enabled ? '' : ' · ' + t('apiKeys.export.disabled'));
+        return '<label class="export-row' + (checked ? ' selected' : '') + '">' +
+          '<input type="checkbox" ' + (checked ? 'checked' : '') + ' data-apikey-export-toggle="' + escapeAttr(k.id) + '" />' +
+          '<div class="export-row-text">' +
+          '<div class="export-row-email">' + escapeHtml(label) + '</div>' +
+          '<div class="export-row-meta">' + escapeHtml(meta) + '</div>' +
+          '</div>' +
+          '</label>';
+      }).join('') +
+      '</div>' +
+      '<div id="apiKeyExportJsonPreview" class="hidden mb-3"><textarea id="apiKeyExportJsonText" readonly class="font-mono"></textarea></div>' +
+      '<div class="modal-footer">' +
+      '<button class="btn btn-secondary" id="apiKeyExportCloseBtn" type="button">' + escapeHtml(t('common.cancel')) + '</button>' +
+      '<button class="btn btn-outline" id="apiKeyExportShowJsonBtn" type="button">' + escapeHtml(t('export.showJson')) + '</button>' +
+      '<button class="btn btn-outline" id="apiKeyExportCopyJsonBtn" type="button">' + escapeHtml(t('export.copyJson')) + '</button>' +
+      '<button class="btn btn-outline" id="apiKeyExportCsvBtn" type="button">' + escapeHtml(t('apiKeys.export.downloadCsv')) + '</button>' +
+      '<button class="btn btn-primary" id="apiKeyExportJsonBtn" type="button">' + escapeHtml(t('export.downloadJson')) + '</button>' +
+      '</div>';
+    $('apiKeyExportToggleAllBtn').addEventListener('click', () => {
+      if (apiKeyExportSelectedIds.size === apiKeysCache.length) apiKeyExportSelectedIds.clear();
+      else apiKeyExportSelectedIds = new Set(apiKeysCache.map(k => k.id));
+      renderApiKeyExportModal();
+    });
+    $('apiKeyExportCloseBtn').addEventListener('click', () => closeDialog('exportModal'));
+    $('apiKeyExportShowJsonBtn').addEventListener('click', apiKeyExportShowJson);
+    $('apiKeyExportCopyJsonBtn').addEventListener('click', apiKeyExportCopyJson);
+    $('apiKeyExportCsvBtn').addEventListener('click', apiKeyExportDownloadCsv);
+    $('apiKeyExportJsonBtn').addEventListener('click', apiKeyExportDownloadJson);
+    qsa('[data-apikey-export-toggle]', body).forEach(cb => cb.addEventListener('change', e => {
+      const id = e.target.dataset.apikeyExportToggle;
+      if (apiKeyExportSelectedIds.has(id)) apiKeyExportSelectedIds.delete(id);
+      else apiKeyExportSelectedIds.add(id);
+      renderApiKeyExportModal();
+    }));
+  }
+  async function getApiKeyExportData() {
+    if (apiKeyExportSelectedIds.size === 0) { toastWarning(t('export.noSelection')); return null; }
+    const res = await api('/api-keys/export', { method: 'POST', body: JSON.stringify({ ids: Array.from(apiKeyExportSelectedIds) }) });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      toastError(t('common.failed') + ': ' + (err.error || t('common.unknownError')));
+      return null;
+    }
+    return res.json();
+  }
+  async function apiKeyExportShowJson() {
+    const data = await getApiKeyExportData();
+    if (!data) return;
+    $('apiKeyExportJsonPreview').classList.remove('hidden');
+    $('apiKeyExportJsonText').value = JSON.stringify(data, null, 2);
+  }
+  async function apiKeyExportCopyJson() {
+    if (apiKeyExportSelectedIds.size === 0) { toastWarning(t('export.noSelection')); return; }
+    const jsonPromise = getApiKeyExportData().then(data => {
+      if (!data) throw new Error('no-data');
+      return JSON.stringify(data, null, 2);
+    });
+    try {
+      await copyText(jsonPromise);
+      toast(t('export.copied'), 'primary');
+    } catch (e) {
+      if (e && e.message !== 'no-data') toastError(t('common.failed'));
+    }
+  }
+  async function apiKeyExportDownloadJson() {
+    const data = await getApiKeyExportData();
+    if (!data) return;
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'kiro-apikeys-' + new Date().toISOString().slice(0, 10) + '.json';
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+  function csvCell(v) {
+    const s = String(v == null ? '' : v);
+    if (/[",\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+    return s;
+  }
+  function buildApiKeyCsv(data) {
+    const cols = ['id', 'name', 'keyMasked', 'enabled', 'requestsCount', 'tokensUsed',
+      'creditsUsed', 'tokenLimit', 'creditLimit', 'tokenPercentUsed', 'creditPercentUsed',
+      'overToken', 'overCredit', 'expired', 'expiresAt', 'createdAt', 'lastUsedAt'];
+    const rows = [cols.join(',')];
+    (data.apiKeys || []).forEach(k => {
+      rows.push(cols.map(c => csvCell(k[c])).join(','));
+    });
+    return rows.join('\r\n');
+  }
+  async function apiKeyExportDownloadCsv() {
+    const data = await getApiKeyExportData();
+    if (!data) return;
+    const blob = new Blob([buildApiKeyCsv(data)], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'kiro-apikeys-' + new Date().toISOString().slice(0, 10) + '.csv';
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
   // Version and update
   function renderVersionBadge() {
     const badge = $('versionBadge');
@@ -3330,6 +3456,11 @@
     return '<div class="text-xs muted-text">' + escapeHtml(t('apiKeys.expiry')) + ': ' + escapeHtml(val) + '</div>';
   }
 
+  let apiLogCache = [];
+  let apiLogFilter = 'all';
+  let apiLogSearch = '';
+  let apiLogAutoTimer = null;
+
   async function loadApiLog() {
     const body = $('apiLogBody');
     if (!body) return;
@@ -3343,14 +3474,51 @@
     } catch (e) {
       entries = [];
     }
+    apiLogCache = entries;
     renderApiLog(entries);
   }
 
-  function renderApiLog(entries) {
+  // Applies status filter + free-text search client-side (the /request-logs feed is unfiltered).
+  function filterApiLog(entries) {
+    let out = entries;
+    if (apiLogFilter === 'success') out = out.filter(e => e.status !== 'error');
+    else if (apiLogFilter === 'error') out = out.filter(e => e.status === 'error');
+    if (apiLogSearch) {
+      const kw = apiLogSearch.toLowerCase();
+      out = out.filter(e =>
+        (e.model || '').toLowerCase().includes(kw) ||
+        (e.endpoint || '').toLowerCase().includes(kw) ||
+        (e.apiKeyName || '').toLowerCase().includes(kw) ||
+        (e.apiKeyMasked || '').toLowerCase().includes(kw) ||
+        (e.accountEmail || '').toLowerCase().includes(kw) ||
+        (e.error || '').toLowerCase().includes(kw));
+    }
+    return out;
+  }
+
+  function renderApiLogMetrics(entries) {
+    const box = $('metricsSummary');
+    if (!box) return;
+    const total = entries.length;
+    let errorCount = 0, durSum = 0, durCount = 0;
+    for (const e of entries) {
+      if (e.status === 'error') errorCount++;
+      if (e.durationMs) { durSum += e.durationMs; durCount++; }
+    }
+    const avg = durCount ? Math.round(durSum / durCount) : 0;
+    box.innerHTML =
+      '<span>' + escapeHtml(t('metrics.logCount')) + ': <strong>' + escapeHtml(String(total)) + '</strong></span>' +
+      '<span>' + escapeHtml(t('metrics.avgLatency')) + ': <strong>' + escapeHtml(String(avg)) + 'ms</strong></span>' +
+      '<span>' + escapeHtml(t('metrics.quotaErrors')) + ': <strong>' + escapeHtml(String(errorCount)) + '</strong></span>';
+  }
+
+  function renderApiLog(allEntries) {
     const body = $('apiLogBody');
     const empty = $('apiLogEmpty');
     const summary = $('apiLogSummary');
     if (!body) return;
+    const entries = filterApiLog(allEntries);
+    renderApiLogMetrics(entries);
     if (!entries.length) {
       body.innerHTML = '';
       if (empty) empty.classList.remove('hidden');
