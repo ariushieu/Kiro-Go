@@ -762,8 +762,7 @@ func UpdateStats(totalReq, successReq, failedReq, totalTokens int, totalCredits 
 	cfg.FailedRequests = failedReq
 	cfg.TotalTokens = totalTokens
 	cfg.TotalCredits = totalCredits
-	markDirtyLocked()
-	return nil
+	return saveLocked()
 }
 
 func GetStats() (int, int, int, int, float64) {
@@ -782,8 +781,7 @@ func UpdateAccountStats(id string, requestCount, errorCount, totalTokens int, to
 			cfg.Accounts[i].TotalTokens = totalTokens
 			cfg.Accounts[i].TotalCredits = totalCredits
 			cfg.Accounts[i].LastUsed = lastUsed
-			markDirtyLocked()
-			return nil
+			return saveLocked()
 		}
 	}
 	return nil

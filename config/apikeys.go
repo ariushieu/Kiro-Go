@@ -206,8 +206,7 @@ func HasApiKeys() bool {
 }
 
 // RecordApiKeyUsage atomically adds tokens and credits to the entry's counters,
-// updates LastUsedAt, increments RequestsCount. Persistence is deferred to the
-// background flusher (markDirtyLocked) since this runs on every request.
+// updates LastUsedAt, increments RequestsCount, and persists.
 func RecordApiKeyUsage(id string, tokens int64, credits float64) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
@@ -224,8 +223,7 @@ func RecordApiKeyUsage(id string, tokens int64, credits float64) error {
 			}
 			cfg.ApiKeys[i].RequestsCount++
 			cfg.ApiKeys[i].LastUsedAt = time.Now().Unix()
-			markDirtyLocked()
-			return nil
+			return saveLocked()
 		}
 	}
 	return errors.New("api key not found")
