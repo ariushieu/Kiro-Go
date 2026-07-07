@@ -1128,6 +1128,23 @@
   function detailItem(label, value) {
     return '<div class="detail-item"><div class="detail-label">' + escapeHtml(label) + '</div><div class="detail-value">' + escapeHtml(value) + '</div></div>';
   }
+  function renderAccountProxySelect(current) {
+    const pool = window.__proxyPoolData || [];
+    const seen = new Set();
+    let options = '<option value="">' + escapeHtml(t('detail.proxyUseGlobal')) + '</option>';
+    pool.forEach(p => {
+      if (!p.url || seen.has(p.url)) return;
+      seen.add(p.url);
+      const masked = maskProxyForDisplay(p.url) || p.url;
+      const disabled = p.disabledPermanent ? ' (' + t('settings.proxyPoolDisabled') + ')' : '';
+      options += '<option value="' + escapeAttr(p.url) + '"' + (p.url === current ? ' selected' : '') + '>' + escapeHtml(masked + disabled) + '</option>';
+    });
+    if (current && !seen.has(current)) {
+      const masked = maskProxyForDisplay(current) || current;
+      options += '<option value="' + escapeAttr(current) + '" selected>' + escapeHtml(masked + ' (' + t('detail.proxyCustom') + ')') + '</option>';
+    }
+    return '<select id="proxyURLInput">' + options + '</select>';
+  }
   function showDetail(id) {
     const a = accountsData.find(x => x.id === id);
     if (!a) return;
@@ -1163,7 +1180,7 @@
       '</div>' +
 
       '<div class="detail-section"><h4>' + escapeHtml(t('detail.proxyURL')) + '</h4><div class="machine-id-row">' +
-      '<input type="text" id="proxyURLInput" value="' + escapeAttr(a.proxyURL || '') + '" placeholder="socks5://host:port" />' +
+      renderAccountProxySelect(a.proxyURL || '') +
       '<button class="btn btn-sm btn-primary" data-detail-action="saveProxyURL" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.save')) + '</button>' +
       '</div><p class="help-block">' + escapeHtml(t('detail.proxyHint')) + '</p></div>' +
 
@@ -1654,6 +1671,7 @@
     try {
       const res = await api('/proxy/pool');
       const d = await res.json();
+      window.__proxyPoolData = d.pool || [];
       renderProxyPool(d.pool || []);
     } catch (e) {
       box.innerHTML = '<p class="help-block error-text">' + escapeHtml(t('common.failed')) + '</p>';

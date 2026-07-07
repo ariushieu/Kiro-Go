@@ -247,6 +247,8 @@
   "detail.overageSwitching": "正在调用 AWS...",
   "detail.proxyURL": "独立代理",
   "detail.proxyHint": "留空则使用全局代理，格式: socks5://host:port 或 http://host:port",
+  "detail.proxyUseGlobal": "使用全局代理",
+  "detail.proxyCustom": "自定义",
   "detail.proxySaved": "代理已保存",
   "detail.save": "保存",
   "modal.addAccount": "添加账号",

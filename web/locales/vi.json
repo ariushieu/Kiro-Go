@@ -247,6 +247,8 @@
   "detail.overageSwitching": "Đang gọi AWS...",
   "detail.proxyURL": "Proxy tài khoản",
   "detail.proxyHint": "Để trống để dùng proxy toàn cục. Định dạng: socks5://host:port hoặc http://host:port",
+  "detail.proxyUseGlobal": "Dùng proxy toàn cục",
+  "detail.proxyCustom": "tùy chỉnh",
   "detail.proxySaved": "Đã lưu proxy",
   "detail.save": "Lưu",
   "modal.addAccount": "Thêm tài khoản",
