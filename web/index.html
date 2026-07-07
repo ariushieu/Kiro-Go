@@ -259,6 +259,10 @@
                   <i class="fa-solid fa-file-export"></i>
                   <span data-i18n="apiKeys.export.button"></span>
                 </button>
+                <button class="btn btn-outline btn-sm" id="importApiKeysBtn" type="button">
+                  <i class="fa-solid fa-file-import"></i>
+                  <span data-i18n="apiKeys.import.button"></span>
+                </button>
                 <button class="btn btn-outline btn-sm" id="bulkAddApiKeyBtn" type="button">
                   <i class="fa-solid fa-layer-group"></i>
                   <span data-i18n="apiKeys.bulkAdd"></span>
@@ -715,6 +719,31 @@
       <div class="modal-header"><span class="modal-title" data-i18n="export.title"></span><button class="modal-close"
           id="exportModalClose" type="button" aria-label="" data-i18n-aria-label="common.close">&times;</button></div>
       <div class="modal-body" id="exportBody"></div>
+    </div>
+  </div>
+  <div id="apiKeyImportModal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <span class="modal-title" data-i18n="apiKeys.import.title"></span>
+        <button class="modal-close" id="apiKeyImportModalClose" type="button" aria-label=""
+          data-i18n-aria-label="common.close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="help-block" data-i18n="apiKeys.import.desc"></p>
+        <div class="form-group">
+          <input type="file" id="apiKeyImportFile" accept="application/json,.json" />
+          <small data-i18n="apiKeys.import.fileHint"></small>
+        </div>
+        <div class="form-group">
+          <label data-i18n="apiKeys.import.textLabel"></label>
+          <textarea id="apiKeyImportText" class="font-mono" rows="8"
+            data-i18n-placeholder="apiKeys.import.placeholder"></textarea>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" id="apiKeyImportCancelBtn" type="button" data-i18n="apiKeys.cancelBtn"></button>
+          <button class="btn btn-primary" id="apiKeyImportSubmitBtn" type="button" data-i18n="apiKeys.import.submit"></button>
+        </div>
+      </div>
     </div>
   </div>
   <div id="testModal" class="modal">

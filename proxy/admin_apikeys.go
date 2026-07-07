@@ -2,9 +2,11 @@ package proxy
 
 import (
 	"encoding/json"
+	"io"
 	"kiro-go/config"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -269,6 +271,7 @@ type apiKeyExportView struct {
 	ID                string  `json:"id"`
 	Name              string  `json:"name,omitempty"`
 	KeyMasked         string  `json:"keyMasked"`
+	Key               string  `json:"key,omitempty"` // Raw value, only populated when export is called with includeSecret=true.
 	Enabled           bool    `json:"enabled"`
 	RequestsCount     int64   `json:"requestsCount"`
 	TokensUsed        int64   `json:"tokensUsed"`
@@ -285,7 +288,7 @@ type apiKeyExportView struct {
 	Expired           bool    `json:"expired"`
 }
 
-func toApiKeyExportView(e config.ApiKeyEntry) apiKeyExportView {
+func toApiKeyExportView(e config.ApiKeyEntry, includeSecret bool) apiKeyExportView {
 	overToken, overCredit := config.ApiKeyOverLimit(e)
 	tokenPct := 0.0
 	if e.TokenLimit > 0 {
@@ -295,10 +298,15 @@ func toApiKeyExportView(e config.ApiKeyEntry) apiKeyExportView {
 	if e.CreditLimit > 0 {
 		creditPct = e.CreditsUsed / e.CreditLimit * 100
 	}
+	rawKey := ""
+	if includeSecret {
+		rawKey = e.Key
+	}
 	return apiKeyExportView{
 		ID:                e.ID,
 		Name:              e.Name,
 		KeyMasked:         config.MaskApiKey(e.Key),
+		Key:               rawKey,
 		Enabled:           e.Enabled,
 		RequestsCount:     e.RequestsCount,
 		TokensUsed:        e.TokensUsed,
@@ -316,13 +324,18 @@ func toApiKeyExportView(e config.ApiKeyEntry) apiKeyExportView {
 	}
 }
 
-// apiExportApiKeys handles POST /admin/api/api-keys/export. It returns a masked
-// usage report (never re-importable). Body: {"ids": [...]}; empty/missing = all.
+// apiExportApiKeys handles POST /admin/api/api-keys/export.
+//
+// By default it returns a masked usage report (keys are obscured). When the body
+// sets "includeSecret": true, the raw key value is included in the "key" field so
+// the export can be re-imported as a backup. Body: {"ids": [...], "includeSecret": bool};
+// empty/missing ids = all.
 func (h *Handler) apiExportApiKeys(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		IDs []string `json:"ids"`
+		IDs           []string `json:"ids"`
+		IncludeSecret bool     `json:"includeSecret"`
 	}
-	// Empty/invalid body = export all.
+	// Empty/invalid body = export all, masked.
 	_ = json.NewDecoder(r.Body).Decode(&req)
 
 	entries := config.ListApiKeys()
@@ -342,13 +355,101 @@ func (h *Handler) apiExportApiKeys(w http.ResponseWriter, r *http.Request) {
 
 	views := make([]apiKeyExportView, len(entries))
 	for i, e := range entries {
-		views[i] = toApiKeyExportView(e)
+		views[i] = toApiKeyExportView(e, req.IncludeSecret)
 	}
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"version":    config.Version,
 		"exportedAt": time.Now().Unix(),
 		"apiKeys":    views,
+	})
+}
+
+// apiKeyImportEntry is one key in an import payload. It mirrors the export
+// shape; only Key is required (masked-only exports cannot be re-imported).
+type apiKeyImportEntry struct {
+	Name          string  `json:"name,omitempty"`
+	Key           string  `json:"key"`
+	Enabled       *bool   `json:"enabled,omitempty"`
+	TokenLimit    int64   `json:"tokenLimit,omitempty"`
+	CreditLimit   float64 `json:"creditLimit,omitempty"`
+	ExpiresAt     int64   `json:"expiresAt,omitempty"`
+	TokensUsed    int64   `json:"tokensUsed,omitempty"`
+	CreditsUsed   float64 `json:"creditsUsed,omitempty"`
+	RequestsCount int64   `json:"requestsCount,omitempty"`
+}
+
+// apiImportApiKeysAdmin handles POST /admin/api/api-keys/import. It restores keys
+// from an export produced with includeSecret=true. Entries whose key is empty or
+// masked (contains "***") are skipped, as are keys already present. Name, limits,
+// expiry, and usage counters are preserved so the import is a faithful backup.
+//
+// Body accepts either the full export wrapper {"apiKeys": [...]} or a bare array.
+func (h *Handler) apiImportApiKeysAdmin(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 8<<20))
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "failed to read body"})
+		return
+	}
+
+	var wrapper struct {
+		ApiKeys []apiKeyImportEntry `json:"apiKeys"`
+	}
+	var items []apiKeyImportEntry
+	if err := json.Unmarshal(body, &wrapper); err == nil && wrapper.ApiKeys != nil {
+		items = wrapper.ApiKeys
+	} else if err := json.Unmarshal(body, &items); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON: expected {\"apiKeys\": [...]} or an array"})
+		return
+	}
+
+	existing := make(map[string]bool)
+	for _, e := range config.ListApiKeys() {
+		existing[e.Key] = true
+	}
+
+	imported, skipped := 0, 0
+	seen := make(map[string]bool)
+	for _, it := range items {
+		key := strings.TrimSpace(it.Key)
+		if key == "" || strings.Contains(key, "***") || strings.Contains(key, "…") {
+			skipped++
+			continue
+		}
+		if existing[key] || seen[key] {
+			skipped++
+			continue
+		}
+		seen[key] = true
+
+		enabled := true
+		if it.Enabled != nil {
+			enabled = *it.Enabled
+		}
+		if _, err := config.AddApiKey(config.ApiKeyEntry{
+			Name:          it.Name,
+			Key:           key,
+			Enabled:       enabled,
+			TokenLimit:    it.TokenLimit,
+			CreditLimit:   it.CreditLimit,
+			ExpiresAt:     it.ExpiresAt,
+			TokensUsed:    it.TokensUsed,
+			CreditsUsed:   it.CreditsUsed,
+			RequestsCount: it.RequestsCount,
+		}); err != nil {
+			skipped++
+			continue
+		}
+		imported++
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":  true,
+		"total":    len(items),
+		"imported": imported,
+		"skipped":  skipped,
 	})
 }
 

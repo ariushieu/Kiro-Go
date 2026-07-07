@@ -841,6 +841,7 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 	thinkingResponseOpts := resolveClaudeThinkingResponseOptions(req.Thinking, thinkingCfg.ClaudeFormat)
 	estimatedInputTokens := estimateClaudeRequestInputTokens(effectiveReq)
 	cacheProfile := h.promptCache.BuildClaudeProfile(effectiveReq, estimatedInputTokens)
+	stickyKey := claudeStickyKey(effectiveReq)
 
 	// 转换请求
 	kiroPayload := ClaudeToKiro(&req, thinking)
@@ -848,9 +849,9 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 	// Stream or non-stream
 	apiKeyID := apiKeyIDFromContext(r.Context())
 	if req.Stream {
-		h.handleClaudeStream(w, kiroPayload, req.Model, thinking, thinkingResponseOpts, estimatedInputTokens, cacheProfile, apiKeyID)
+		h.handleClaudeStream(w, kiroPayload, req.Model, thinking, thinkingResponseOpts, estimatedInputTokens, cacheProfile, apiKeyID, stickyKey)
 	} else {
-		h.handleClaudeNonStream(w, kiroPayload, req.Model, thinking, thinkingResponseOpts, estimatedInputTokens, cacheProfile, apiKeyID)
+		h.handleClaudeNonStream(w, kiroPayload, req.Model, thinking, thinkingResponseOpts, estimatedInputTokens, cacheProfile, apiKeyID, stickyKey)
 	}
 }
 
@@ -865,7 +866,7 @@ func logSuspiciousReq(api, model string, inputTokens, outputTokens int, hasTool 
 }
 
 // handleClaudeStream Claude 流式响应
-func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID string) {
+func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID string, stickyKey [32]byte) {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -908,7 +909,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 	}
 
 	for attempt := 0; attempt < maxAccountRetryAttempts; attempt++ {
-		account := h.pool.GetNextForModelExcluding(model, excluded)
+		account := h.pool.GetForAttempt(stickyKey, model, excluded, attempt)
 		if account == nil {
 			break
 		}
@@ -1275,6 +1276,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 
 		h.recordSuccessForApiKey(apiKeyID, inputTokens, outputTokens, credits, model, account, "claude", startedAt)
 		h.pool.RecordSuccess(account.ID)
+		h.pool.SetPin(stickyKey, account.ID)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 		h.promptCache.Update(account.ID, cacheProfile)
 		logSuspiciousReq("claude", model, inputTokens, outputTokens, len(toolUses) > 0)
@@ -1451,13 +1453,13 @@ func (h *Handler) recordFailure() {
 }
 
 // handleClaudeNonStream Claude 非流式响应
-func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID string) {
+func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID string, stickyKey [32]byte) {
 	startedAt := time.Now()
 	excluded := make(map[string]bool)
 	var lastErr error
 
 	for attempt := 0; attempt < maxAccountRetryAttempts; attempt++ {
-		account := h.pool.GetNextForModelExcluding(model, excluded)
+		account := h.pool.GetForAttempt(stickyKey, model, excluded, attempt)
 		if account == nil {
 			break
 		}
@@ -1526,6 +1528,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 
 		h.recordSuccessForApiKey(apiKeyID, inputTokens, outputTokens, credits, model, account, "claude", startedAt)
 		h.pool.RecordSuccess(account.ID)
+		h.pool.SetPin(stickyKey, account.ID)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 		h.promptCache.Update(account.ID, cacheProfile)
 		logSuspiciousReq("claude", model, inputTokens, outputTokens, len(toolUses) > 0)
@@ -1617,17 +1620,18 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	estimatedInputTokens := estimateOpenAIRequestInputTokens(&req)
 
 	kiroPayload := OpenAIToKiro(&req, thinking)
+	stickyKey := openAIStickyKey(&req)
 
 	apiKeyID := apiKeyIDFromContext(r.Context())
 	if req.Stream {
-		h.handleOpenAIStream(w, kiroPayload, req.Model, thinking, estimatedInputTokens, apiKeyID)
+		h.handleOpenAIStream(w, kiroPayload, req.Model, thinking, estimatedInputTokens, apiKeyID, stickyKey)
 	} else {
-		h.handleOpenAINonStream(w, kiroPayload, req.Model, thinking, estimatedInputTokens, apiKeyID)
+		h.handleOpenAINonStream(w, kiroPayload, req.Model, thinking, estimatedInputTokens, apiKeyID, stickyKey)
 	}
 }
 
 // handleOpenAIStream OpenAI 流式响应
-func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, apiKeyID string) {
+func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, apiKeyID string, stickyKey [32]byte) {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -1647,7 +1651,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 	var lastErr error
 
 	for attempt := 0; attempt < maxAccountRetryAttempts; attempt++ {
-		account := h.pool.GetNextForModelExcluding(model, excluded)
+		account := h.pool.GetForAttempt(stickyKey, model, excluded, attempt)
 		if account == nil {
 			break
 		}
@@ -1977,6 +1981,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 
 		h.recordSuccessForApiKey(apiKeyID, inputTokens, outputTokens, credits, model, account, "openai", startedAt)
 		h.pool.RecordSuccess(account.ID)
+		h.pool.SetPin(stickyKey, account.ID)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 		logSuspiciousReq("openai", model, inputTokens, outputTokens, len(toolCalls) > 0)
 
@@ -2020,13 +2025,13 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 }
 
 // handleOpenAINonStream OpenAI 非流式响应
-func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, apiKeyID string) {
+func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, apiKeyID string, stickyKey [32]byte) {
 	startedAt := time.Now()
 	excluded := make(map[string]bool)
 	var lastErr error
 
 	for attempt := 0; attempt < maxAccountRetryAttempts; attempt++ {
-		account := h.pool.GetNextForModelExcluding(model, excluded)
+		account := h.pool.GetForAttempt(stickyKey, model, excluded, attempt)
 		if account == nil {
 			break
 		}
@@ -2084,6 +2089,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 
 		h.recordSuccessForApiKey(apiKeyID, inputTokens, outputTokens, credits, model, account, "openai", startedAt)
 		h.pool.RecordSuccess(account.ID)
+		h.pool.SetPin(stickyKey, account.ID)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 		logSuspiciousReq("openai", model, inputTokens, outputTokens, len(toolUses) > 0)
 
@@ -2312,6 +2318,8 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiBulkDeleteApiKeys(w, r)
 	case path == "/api-keys/export" && r.Method == "POST":
 		h.apiExportApiKeys(w, r)
+	case path == "/api-keys/import" && r.Method == "POST":
+		h.apiImportApiKeysAdmin(w, r)
 	case strings.HasPrefix(path, "/api-keys/") && strings.HasSuffix(path, "/reset-usage") && r.Method == "POST":
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/api-keys/"), "/reset-usage")
 		h.apiResetApiKeyUsage(w, r, id)

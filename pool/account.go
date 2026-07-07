@@ -21,6 +21,8 @@ type AccountPool struct {
 	cooldowns     map[string]time.Time       // 账号冷却时间
 	errorCounts   map[string]int             // 连续错误计数
 	modelLists    map[string]map[string]bool // accountID → set of modelIDs (from ListAvailableModels)
+	pins          map[[32]byte]pinEntry      // sticky routing: prefix hash → account
+	pinsMu        sync.Mutex
 }
 
 var (
@@ -35,6 +37,7 @@ func GetPool() *AccountPool {
 			cooldowns:   make(map[string]time.Time),
 			errorCounts: make(map[string]int),
 			modelLists:  make(map[string]map[string]bool),
+			pins:        make(map[[32]byte]pinEntry),
 		}
 		pool.Reload()
 	})
