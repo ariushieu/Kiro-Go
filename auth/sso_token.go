@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 
@@ -87,8 +86,7 @@ func registerDeviceClient(oidcBase, startUrl string) (clientID, clientSecret str
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return "", "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
+		return "", "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, readErrorBody(resp.Body))
 	}
 
 	var result struct {
@@ -118,8 +116,7 @@ func startDeviceAuth(oidcBase, clientID, clientSecret, startUrl string) (deviceC
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return "", "", 0, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
+		return "", "", 0, fmt.Errorf("HTTP %d: %s", resp.StatusCode, readErrorBody(resp.Body))
 	}
 
 	var result struct {
@@ -165,8 +162,7 @@ func getDeviceSessionToken(portalBase, bearerToken string) (string, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
+		return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, readErrorBody(resp.Body))
 	}
 
 	var result struct {
@@ -201,8 +197,7 @@ func acceptUserCode(oidcBase, userCode, deviceSessionToken string) (*deviceConte
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, readErrorBody(resp.Body))
 	}
 
 	var result struct {
@@ -235,8 +230,7 @@ func approveAuth(oidcBase string, deviceContext *deviceContextInfo, deviceSessio
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, readErrorBody(resp.Body))
 	}
 	return nil
 }

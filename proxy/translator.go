@@ -110,6 +110,46 @@ func resolveClaudeThinkingMode(model string, thinkingCfg *ClaudeThinkingConfig, 
 	return actualModel, suffixThinking || isClaudeThinkingRequested(thinkingCfg)
 }
 
+// applyModelOverride returns the model to actually send upstream, applying the
+// precedence: global ForceModel > per-key Models allowlist > the resolved client model.
+// apiKeyID may be empty (no key / shared). Override values are themselves run through
+// ParseModelAndThinking so an operator can enter a friendly name (e.g. "claude-opus-4-8")
+// and it is normalized the same way a client model would be.
+//
+// Allowlist semantics: when the key has a non-empty Models list, a client model that is
+// in the list is passed through unchanged; a client model that is NOT in the list is
+// remapped to the first entry. A single-element list therefore reproduces the old
+// "force this one model" behavior exactly.
+func applyModelOverride(resolved, apiKeyID, thinkingSuffix string) string {
+	if forced := config.GetForceModel(); forced != "" {
+		norm, _ := ParseModelAndThinking(forced, thinkingSuffix)
+		return norm
+	}
+	if apiKeyID != "" {
+		if entry := config.GetApiKeyEntry(apiKeyID); entry != nil {
+			if allowed := entry.Models; len(allowed) > 0 {
+				first := ""
+				for _, m := range allowed {
+					if strings.TrimSpace(m) == "" {
+						continue
+					}
+					norm, _ := ParseModelAndThinking(m, thinkingSuffix)
+					if first == "" {
+						first = norm
+					}
+					if norm == resolved {
+						return resolved // client model is allowed — pass through
+					}
+				}
+				if first != "" {
+					return first // not allowed — remap to the first allowlisted model
+				}
+			}
+		}
+	}
+	return resolved
+}
+
 func isClaudeThinkingRequested(thinkingCfg *ClaudeThinkingConfig) bool {
 	if thinkingCfg == nil {
 		return false
@@ -368,13 +408,15 @@ func buildClaudeSystemPrompt(system interface{}, thinking bool) string {
 func applyPromptFilters(prompt string) string {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
-		return ""
+		// No system prompt from the client, but an identity override may still
+		// need to be injected so the assistant self-reports the configured model.
+		return prependIdentity("")
 	}
 
 	// 1. Detect Claude Code CLI system prompt → replace with minimal backend prompt.
 	//    Run before other filters so we don't waste time stripping a prompt we'll replace anyway.
 	if config.GetFilterClaudeCode() && isClaudeCodeSystemPrompt(prompt) {
-		return claudeCodeBackendPrompt
+		return prependIdentity(claudeCodeBackendPrompt)
 	}
 
 	// 2. Strip --- SYSTEM PROMPT --- / --- END SYSTEM PROMPT --- boundary markers.
@@ -396,7 +438,37 @@ func applyPromptFilters(prompt string) string {
 		prompt = applyFilterRule(prompt, rule)
 	}
 
-	return strings.TrimSpace(prompt)
+	return prependIdentity(strings.TrimSpace(prompt))
+}
+
+// prependIdentity injects a self-identity line at the top of the system prompt
+// when config.IdentityModel is set, so the assistant self-reports as that model
+// regardless of the real upstream model. Empty IdentityModel = no change.
+func prependIdentity(prompt string) string {
+	model := config.GetIdentityModel()
+	if model == "" {
+		return prompt
+	}
+	line := buildIdentityLine(model)
+	if prompt == "" {
+		return line
+	}
+	return line + "\n\n" + prompt
+}
+
+// buildIdentityLine turns a Kiro model id (e.g. "claude-opus-4.8") into a
+// natural identity sentence ("You are Claude Opus 4.8. Model ID: claude-opus-4-8.").
+func buildIdentityLine(model string) string {
+	display := make([]string, 0, 4)
+	for _, seg := range strings.Split(model, "-") {
+		if seg == "" {
+			continue
+		}
+		display = append(display, strings.ToUpper(seg[:1])+seg[1:])
+	}
+	name := strings.Join(display, " ")
+	id := strings.ReplaceAll(model, ".", "-")
+	return fmt.Sprintf("You are %s. Model ID: %s.", name, id)
 }
 
 // applyFilterRule applies a single user-defined filter rule.
@@ -1106,9 +1178,16 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 		}
 	}
 
+	// Apply prompt filters + identity injection, same as the Claude path.
+	systemPrompt = applyPromptFilters(systemPrompt)
+
 	// 如果启用 thinking 模式，注入 thinking 提示
 	if thinking {
-		systemPrompt = ThinkingModePrompt + "\n\n" + systemPrompt
+		if systemPrompt == "" {
+			systemPrompt = ThinkingModePrompt
+		} else {
+			systemPrompt = ThinkingModePrompt + "\n\n" + systemPrompt
+		}
 	}
 
 	// 构建历史消息

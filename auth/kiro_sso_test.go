@@ -169,6 +169,10 @@ func TestKiroSsoSessionNotFound(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRefreshExternalIdpToken_Success(t *testing.T) {
+	// This test drives a local httptest token endpoint (not an allow-listed IdP host),
+	// so disable the refresh-path SSRF allow-list check for the duration.
+	validateExternalIdpEndpoints = false
+	defer func() { validateExternalIdpEndpoints = true }()
 	// Mock IdP token endpoint
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
@@ -207,6 +211,8 @@ func TestRefreshExternalIdpToken_Success(t *testing.T) {
 }
 
 func TestRefreshExternalIdpToken_ErrorResponse(t *testing.T) {
+	validateExternalIdpEndpoints = false
+	defer func() { validateExternalIdpEndpoints = true }()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(400)
 		w.Write([]byte(`{"error":"invalid_grant"}`))
@@ -232,6 +238,22 @@ func TestRefreshExternalIdpToken_MissingIssuerURL(t *testing.T) {
 	_, _, _, _, err := RefreshExternalIdpToken("token", "", "", "client", "", nil)
 	if err == nil {
 		t.Fatal("expected error for missing issuer URL")
+	}
+}
+
+// TestRefreshExternalIdpToken_RejectsNonAllowlistedIssuer asserts the SSRF guard on
+// the refresh path: an issuer that is not on the allow-list (e.g. cloud metadata) is
+// refused before any network request is made (M2).
+func TestRefreshExternalIdpToken_RejectsNonAllowlistedIssuer(t *testing.T) {
+	// Validation is ON by default; do not disable it here.
+	_, _, _, _, err := RefreshExternalIdpToken(
+		"refresh", "http://169.254.169.254/latest", "", "test-client", "", nil,
+	)
+	if err == nil {
+		t.Fatal("expected refresh to be rejected for a non-allow-listed issuer URL")
+	}
+	if !strings.Contains(err.Error(), "issuer_url") {
+		t.Fatalf("expected an issuer_url validation error, got: %v", err)
 	}
 }
 
@@ -346,6 +368,10 @@ func (m *markerRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) 
 // client threaded from oidc.go actually reaches the discovery server. This is the
 // path the leak lived on — the direct-call test above bypasses the seam.
 func TestRefreshExternalIdpTokenDiscoveryUsesPassedClient(t *testing.T) {
+	// Drives local httptest discovery + token servers, so disable the refresh-path
+	// SSRF allow-list check for the duration.
+	validateExternalIdpEndpoints = false
+	defer func() { validateExternalIdpEndpoints = true }()
 	// Restore the production seam after the test (sibling tests mutate it).
 	old := externalIdpTokenURLFn
 	defer func() { externalIdpTokenURLFn = old }()

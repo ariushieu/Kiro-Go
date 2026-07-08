@@ -208,10 +208,47 @@ type ApiKeyEntry struct {
 	TokenLimit  int64   `json:"tokenLimit,omitempty"`
 	CreditLimit float64 `json:"creditLimit,omitempty"`
 
-	// Cumulative usage (never auto-reset)
+	// Rate/abuse limits (0 = unlimited).
+	// RPMLimit throttles requests per minute for this key (token-bucket delay, not rejection).
+	// IPLimit caps concurrent distinct client IPs using this key.
+	// IPAllowlist, when non-empty, restricts the key to the listed client IPs/CIDRs.
+	// TPMLimit is display-only metadata (tokens per minute); not enforced here.
+	RPMLimit    int      `json:"rpmLimit,omitempty"`
+	IPLimit     int      `json:"ipLimit,omitempty"`
+	IPAllowlist []string `json:"ipAllowlist,omitempty"`
+	TPMLimit    int      `json:"tpmLimit,omitempty"`
+
+	// BoundAccountIDs restricts this key to a fixed set of accounts. When non-empty,
+	// a request authenticated with this key routes ONLY through these accounts (still
+	// subject to per-account cooldown/quota/model filtering). If none of the bound
+	// accounts is currently usable, routing falls back to the shared pool so the
+	// request is not hard-failed. Empty = no binding (use the shared pool).
+	BoundAccountIDs []string `json:"boundAccountIds,omitempty"`
+
+	// Model is the legacy single-model override, kept only for migration. New code
+	// reads Models instead; on first load a non-empty Model is folded into Models and
+	// then cleared. Do not use directly.
+	Model string `json:"model,omitempty"`
+
+	// Models is the per-key model allowlist. When non-empty, a request authenticated
+	// with this key may use any client-requested model that is in the list; a request
+	// for a model NOT in the list is remapped to the first entry. Empty = no restriction
+	// (use the client's model). The global ForceModel setting still takes precedence.
+	Models []string `json:"models,omitempty"`
+
+	// Current-period usage (cleared by "Reset Usage" for a fresh quota cycle).
 	TokensUsed    int64   `json:"tokensUsed,omitempty"`
 	CreditsUsed   float64 `json:"creditsUsed,omitempty"`
 	RequestsCount int64   `json:"requestsCount,omitempty"`
+
+	// Lifetime usage. Same additions as the current-period counters, but "Reset Usage"
+	// NEVER touches these — they only grow, so an operator always sees the true grand
+	// total from the key's creation. They are cleared only by ResetApiKeyUsageAll
+	// ("Reset All"). Seeded from the current-period counters on first load (migration)
+	// so existing keys don't show a lower lifetime total than what they've already used.
+	LifetimeTokens   int64   `json:"lifetimeTokens,omitempty"`
+	LifetimeCredits  float64 `json:"lifetimeCredits,omitempty"`
+	LifetimeRequests int64   `json:"lifetimeRequests,omitempty"`
 }
 
 // Config represents the global application configuration.
@@ -307,12 +344,31 @@ type Config struct {
 	// Can be overridden by the LOG_LEVEL environment variable.
 	LogLevel string `json:"logLevel,omitempty"`
 
-	// Global statistics (persisted across restarts)
-	TotalRequests   int     `json:"totalRequests,omitempty"`   // Total API requests received
-	SuccessRequests int     `json:"successRequests,omitempty"` // Successful requests count
-	FailedRequests  int     `json:"failedRequests,omitempty"`  // Failed requests count
-	TotalTokens     int     `json:"totalTokens,omitempty"`     // Total tokens processed
+	// Global statistics (persisted across restarts). int64 so long-running 32-bit
+	// builds (GOARCH=arm/386) don't wrap TotalTokens at ~2.1B and silently corrupt
+	// the persisted counter (L8).
+	TotalRequests   int64   `json:"totalRequests,omitempty"`   // Total API requests received
+	SuccessRequests int64   `json:"successRequests,omitempty"` // Successful requests count
+	FailedRequests  int64   `json:"failedRequests,omitempty"`  // Failed requests count
+	TotalTokens     int64   `json:"totalTokens,omitempty"`     // Total tokens processed
 	TotalCredits    float64 `json:"totalCredits,omitempty"`    // Total credits consumed
+
+	// LimitNoticeMessage is a friendly in-chat reply shown to a client whose key is
+	// blocked (disabled/expired/over-limit/IP-denied) instead of a 401/429 error.
+	// Empty falls back to a built-in default at render time.
+	LimitNoticeMessage string `json:"limitNoticeMessage,omitempty"`
+
+	// ForceModel, when non-empty, overrides the model of EVERY incoming request
+	// (after thinking-suffix parsing) with this Kiro model ID. It takes precedence
+	// over a per-key model binding and the client-requested model. Empty = disabled.
+	ForceModel string `json:"forceModel,omitempty"`
+
+	// IdentityModel, when non-empty, is the model name the assistant is told to
+	// self-identify as. It does NOT change which upstream model serves the request
+	// (that is ForceModel's job); it only prepends an identity line to the system
+	// prompt so "what model are you?" answers with this name regardless of the real
+	// model. Empty = don't inject anything. See applyPromptFilters in proxy/translator.go.
+	IdentityModel string `json:"identityModel,omitempty"`
 }
 
 // PooledProxy is one outbound proxy in the shared pool, carrying persisted
@@ -351,7 +407,7 @@ type AccountInfo struct {
 }
 
 // Version current version
-const Version = "1.2.7"
+const Version = "1.2.8"
 
 var (
 	cfg     *Config
@@ -363,6 +419,11 @@ var (
 	// every request, which previously serialized all request completions on the
 	// exclusive cfgLock + os.WriteFile.
 	cfgDirty atomic.Bool
+	// passwordOverride holds the ADMIN_PASSWORD env override. It is kept OUT of the
+	// persisted Config so a later Save() (e.g. a stats flush) never writes the env
+	// secret to config.json in cleartext (L9). When set, it takes priority over the
+	// stored cfg.Password. Guarded by cfgLock.
+	passwordOverride string
 )
 
 // Init initializes the configuration system with the specified file path.
@@ -441,6 +502,49 @@ func Load() error {
 			return err
 		}
 	}
+
+	// Migration: seed lifetime counters from the current-period counters for keys that
+	// predate the lifetime fields. Without this, an existing key with usage would show a
+	// lifetime total of 0, lower than what it has already consumed. We detect an unseeded
+	// key as one whose lifetime counters are all zero while a current-period counter is
+	// non-zero. Runs once; after the save, lifetime >= current so the condition is false.
+	lifetimeMigrated := false
+	for i := range cfg.ApiKeys {
+		k := &cfg.ApiKeys[i]
+		if k.LifetimeTokens == 0 && k.LifetimeCredits == 0 && k.LifetimeRequests == 0 &&
+			(k.TokensUsed != 0 || k.CreditsUsed != 0 || k.RequestsCount != 0) {
+			k.LifetimeTokens = k.TokensUsed
+			k.LifetimeCredits = k.CreditsUsed
+			k.LifetimeRequests = k.RequestsCount
+			lifetimeMigrated = true
+		}
+	}
+	if lifetimeMigrated {
+		if err := saveLocked(); err != nil {
+			return err
+		}
+	}
+
+	// Migration: fold the legacy single Model override into the Models allowlist. A
+	// one-element allowlist reproduces the old "force this model" behavior exactly
+	// (any client model not equal to it is remapped to it). Clear the legacy field so
+	// future saves don't re-emit it.
+	modelMigrated := false
+	for i := range cfg.ApiKeys {
+		k := &cfg.ApiKeys[i]
+		if strings.TrimSpace(k.Model) != "" {
+			if len(k.Models) == 0 {
+				k.Models = []string{strings.TrimSpace(k.Model)}
+			}
+			k.Model = ""
+			modelMigrated = true
+		}
+	}
+	if modelMigrated {
+		if err := saveLocked(); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -484,20 +588,55 @@ func newUUID() string {
 
 // Save persists the current configuration to the JSON file.
 // Uses indented formatting for human readability.
+//
+// The write is atomic: the payload is written to a sibling temp file (fsync'd)
+// and then renamed over the live config. os.Rename is atomic within a filesystem
+// (and on Windows uses MoveFileEx with MOVEFILE_REPLACE_EXISTING), so a crash /
+// power loss / ENOSPC mid-write can never leave a truncated or empty config.json
+// that would fail Load() on the next boot and lose all account tokens & API keys.
+//
+// Callers already hold cfgLock, so there is no concurrent Save() to race on the
+// fixed temp name.
 func Save() error {
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(cfgPath, data, 0600)
+	tmpPath := cfgPath + ".tmp"
+	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	// Flush to stable storage before the rename so the renamed file is complete.
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, cfgPath); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	return nil
 }
 
-// SetPassword updates the admin password.
-// Primarily used for environment variable override in containerized deployments.
+// SetPassword records the ADMIN_PASSWORD env override. It is stored separately from
+// the persisted Config (see passwordOverride) so a subsequent Save() never writes the
+// env secret to config.json in cleartext (L9). The override takes priority over the
+// stored password for the lifetime of the process.
 func SetPassword(password string) {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
-	cfg.Password = password
+	passwordOverride = password
 }
 
 // GetConfigDir returns the directory containing the config JSON file.
@@ -527,6 +666,9 @@ func Get() *Config {
 func GetPassword() string {
 	cfgLock.RLock()
 	defer cfgLock.RUnlock()
+	if passwordOverride != "" {
+		return passwordOverride
+	}
 	return cfg.Password
 }
 
@@ -761,6 +903,9 @@ func UpdateSettings(apiKey string, requireApiKey bool, password string) error {
 	cfg.RequireApiKey = requireApiKey
 	if password != "" {
 		cfg.Password = password
+		// An explicit UI password change supersedes the env override, otherwise
+		// GetPassword would keep returning the stale ADMIN_PASSWORD value (L9).
+		passwordOverride = ""
 	}
 	return Save()
 }
@@ -776,11 +921,14 @@ func UpdateSettingsPatch(apiKey *string, requireApiKey *bool, password string) e
 	}
 	if password != "" {
 		cfg.Password = password
+		// An explicit UI password change supersedes the env override, otherwise
+		// GetPassword would keep returning the stale ADMIN_PASSWORD value (L9).
+		passwordOverride = ""
 	}
 	return Save()
 }
 
-func UpdateStats(totalReq, successReq, failedReq, totalTokens int, totalCredits float64) error {
+func UpdateStats(totalReq, successReq, failedReq, totalTokens int64, totalCredits float64) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
 	cfg.TotalRequests = totalReq
@@ -791,12 +939,17 @@ func UpdateStats(totalReq, successReq, failedReq, totalTokens int, totalCredits 
 	return saveLocked()
 }
 
-func GetStats() (int, int, int, int, float64) {
+func GetStats() (int64, int64, int64, int64, float64) {
 	cfgLock.RLock()
 	defer cfgLock.RUnlock()
 	return cfg.TotalRequests, cfg.SuccessRequests, cfg.FailedRequests, cfg.TotalTokens, cfg.TotalCredits
 }
 
+// UpdateAccountStats updates an account's per-request counters. This runs on the
+// request hot path, so it only marks the config dirty (like RecordApiKeyUsage);
+// the backgroundStatsSaver coalesces the write via FlushDirty. It must NOT call
+// saveLocked() inline — that would marshal and rewrite the whole config on every
+// completed request. See CLAUDE.md ("never write config on the request hot path").
 func UpdateAccountStats(id string, requestCount, errorCount, totalTokens int, totalCredits float64, lastUsed int64) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
@@ -807,7 +960,8 @@ func UpdateAccountStats(id string, requestCount, errorCount, totalTokens int, to
 			cfg.Accounts[i].TotalTokens = totalTokens
 			cfg.Accounts[i].TotalCredits = totalCredits
 			cfg.Accounts[i].LastUsed = lastUsed
-			return saveLocked()
+			markDirtyLocked()
+			return nil
 		}
 	}
 	return nil
@@ -968,6 +1122,28 @@ func UpdateThinkingConfig(suffix, openaiFormat, claudeFormat string) error {
 	cfg.ThinkingSuffix = suffix
 	cfg.OpenAIThinkingFormat = openaiFormat
 	cfg.ClaudeThinkingFormat = claudeFormat
+	return Save()
+}
+
+// defaultLimitNoticeMessage is served when no custom LimitNoticeMessage is configured.
+const defaultLimitNoticeMessage = "Your API key has reached its limit or has expired. Please contact the administrator to renew it."
+
+// GetLimitNoticeMessage returns the configured limit-notice message, or the built-in
+// default when none is set.
+func GetLimitNoticeMessage() string {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if strings.TrimSpace(cfg.LimitNoticeMessage) == "" {
+		return defaultLimitNoticeMessage
+	}
+	return cfg.LimitNoticeMessage
+}
+
+// SetLimitNoticeMessage persists the limit-notice message.
+func SetLimitNoticeMessage(msg string) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	cfg.LimitNoticeMessage = msg
 	return Save()
 }
 
@@ -1213,6 +1389,46 @@ func UpdatePublicBaseURL(u string) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
 	cfg.PublicBaseURL = strings.TrimRight(strings.TrimSpace(u), "/")
+	return Save()
+}
+
+// GetForceModel returns the global force-model override (empty = disabled). When set,
+// every request's model is rewritten to this Kiro model ID regardless of what the
+// client sent or which model a key is bound to.
+func GetForceModel() string {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil {
+		return ""
+	}
+	return strings.TrimSpace(cfg.ForceModel)
+}
+
+// SetForceModel sets (or clears, when passed "") the global force-model override.
+func SetForceModel(m string) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	cfg.ForceModel = strings.TrimSpace(m)
+	return Save()
+}
+
+// GetIdentityModel returns the model name the assistant should self-identify as
+// (empty = disabled). This only affects the injected identity line in the system
+// prompt, not which upstream model actually serves the request.
+func GetIdentityModel() string {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil {
+		return ""
+	}
+	return strings.TrimSpace(cfg.IdentityModel)
+}
+
+// SetIdentityModel sets (or clears, when passed "") the self-identify model name.
+func SetIdentityModel(m string) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	cfg.IdentityModel = strings.TrimSpace(m)
 	return Save()
 }
 

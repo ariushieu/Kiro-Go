@@ -5,6 +5,7 @@ import (
 	"kiro-go/config"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // apiKeyContextKey is an unexported type used as the context key for the matched ApiKeyEntry
@@ -12,16 +13,27 @@ import (
 type apiKeyContextKey struct{}
 
 // authError describes why authentication failed. status is the HTTP status code to send.
+//
+// When notice is true the key is VALID but blocked (over-limit, disabled, or expired):
+// callers render the configured limit-notice message as a normal successful chat reply
+// instead of writing an HTTP error. status/code are unused on the notice path.
 type authError struct {
 	status  int
 	code    string
 	message string
+	notice  bool
 }
 
 func (e *authError) Error() string { return e.message }
 
 func newAuthError(status int, code, message string) *authError {
 	return &authError{status: status, code: code, message: message}
+}
+
+// newNoticeError signals a valid-but-blocked key. The handler turns this into the
+// limit-notice chat reply once it has parsed the request (model + stream flag).
+func newNoticeError() *authError {
+	return &authError{notice: true}
 }
 
 // extractProvidedKey reads the API key from Authorization (Bearer ...) or X-Api-Key header.
@@ -68,16 +80,59 @@ func (h *Handler) authenticate(r *http.Request) (*config.ApiKeyEntry, error) {
 			return nil, newAuthError(http.StatusUnauthorized, "authentication_error", "Invalid or missing API key")
 		}
 		if !entry.Enabled {
-			return nil, newAuthError(http.StatusUnauthorized, "authentication_error", "API key disabled")
+			// Valid key, just disabled → friendly notice instead of a 401 that breaks clients.
+			return nil, newNoticeError()
 		}
 		if config.ApiKeyExpired(*entry) {
-			return nil, newAuthError(http.StatusUnauthorized, "authentication_error", "API key expired")
+			return nil, newNoticeError()
 		}
 		if overToken, overCredit := config.ApiKeyOverLimit(*entry); overToken || overCredit {
-			if overToken {
-				return nil, newAuthError(http.StatusTooManyRequests, "rate_limit_error", "token limit exceeded")
+			return nil, newNoticeError()
+		}
+		// IP 限制：优先用硬性白名单 (IPAllowlist)，非空时只有匹配的 IP/CIDR 才放行，
+		// 其余一律按“被封锁的 key”处理，返回限额提示而非 401。白名单为空时退回到
+		// 软性去重计数 (IPLimit)：滚动窗口内只允许有限个不同 IP，已见过的 IP 始终放行，
+		// 一个新 IP 若会超出上限则被拒。两者都返回友好提示，客户端不会因鉴权错误崩溃。
+		if len(entry.IPAllowlist) > 0 {
+			ip := clientIPFromContext(r.Context())
+			if ip == "" {
+				ip = h.resolveClientIP(r)
 			}
-			return nil, newAuthError(http.StatusTooManyRequests, "rate_limit_error", "credit limit exceeded")
+			if !ipMatchesAllowlist(ip, entry.IPAllowlist) {
+				return nil, newNoticeError()
+			}
+		} else if h.ipLimiter != nil && entry.IPLimit > 0 {
+			ip := clientIPFromContext(r.Context())
+			if ip == "" {
+				ip = h.resolveClientIP(r)
+			}
+			if !h.ipLimiter.allow(entry.ID, ip, entry.IPLimit) {
+				return nil, newNoticeError()
+			}
+		}
+		// RPM 限速：不拒绝请求，而是按配置的每分钟速率把请求排队延迟，
+		// 让响应均匀分布而非瞬间全部返回。客户端断开时立即放行以免占用资源。
+		if h.rpmThrottle != nil {
+			if wait := h.rpmThrottle.reserve(entry.ID, entry.RPMLimit); wait > 0 {
+				// 在途上限：一个 key 只允许有限个请求同时“睡在”延迟里。超过则立即拒绝，
+				// 而不是再挂起一条连接 (否则单个 key 的暴刷会把 goroutine/连接耗尽)。
+				if h.guard != nil && !h.guard.enterKeyWait(entry.ID) {
+					// Return the token we just reserved: this request is being
+					// rejected without waiting, so keeping the deduction would make
+					// the effective RPM drift below the configured limit.
+					h.rpmThrottle.refund(entry.ID, entry.RPMLimit)
+					return nil, newAuthError(http.StatusTooManyRequests, "rate_limit_error", "too many concurrent requests for this API key")
+				}
+				timer := time.NewTimer(wait)
+				select {
+				case <-timer.C:
+				case <-r.Context().Done():
+					timer.Stop()
+				}
+				if h.guard != nil {
+					h.guard.leaveKeyWait(entry.ID)
+				}
+			}
 		}
 		return entry, nil
 	}
@@ -110,6 +165,50 @@ func apiKeyIDFromContext(ctx context.Context) string {
 		return ""
 	}
 	if v, ok := ctx.Value(apiKeyContextKey{}).(string); ok {
+		return v
+	}
+	return ""
+}
+
+// limitNoticeContextKey marks a request whose VALID key is blocked (over-limit/disabled/
+// expired). Handlers render the limit-notice chat reply when it is set.
+type limitNoticeContextKey struct{}
+
+// withLimitNotice flags the request so the downstream handler emits the notice reply.
+func withLimitNotice(r *http.Request) *http.Request {
+	ctx := context.WithValue(r.Context(), limitNoticeContextKey{}, true)
+	return r.WithContext(ctx)
+}
+
+// limitNoticeRequested reports whether the request was flagged by withLimitNotice.
+func limitNoticeRequested(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	v, _ := ctx.Value(limitNoticeContextKey{}).(bool)
+	return v
+}
+
+// clientIPContextKey carries the resolved client IP down to request handlers / auth
+// so the request log can record it and rate-limiters can reuse it. It is set once at
+// the top of ServeHTTP.
+type clientIPContextKey struct{}
+
+// withClientIP attaches the resolved client IP to the request context.
+func withClientIP(r *http.Request, ip string) *http.Request {
+	if ip == "" {
+		return r
+	}
+	ctx := context.WithValue(r.Context(), clientIPContextKey{}, ip)
+	return r.WithContext(ctx)
+}
+
+// clientIPFromContext returns the client IP stored in ctx, or empty string.
+func clientIPFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if v, ok := ctx.Value(clientIPContextKey{}).(string); ok {
 		return v
 	}
 	return ""

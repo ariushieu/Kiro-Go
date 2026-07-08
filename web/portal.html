@@ -571,10 +571,34 @@
             <span class="dots"></span>
             <span class="v" id="reqVal"></span>
           </div>
+          <div class="p-meta-row" id="dailyRow" style="display:none;">
+            <span class="k" data-t="dailyTokens"></span>
+            <span class="dots"></span>
+            <span class="v" id="dailyVal"></span>
+          </div>
           <div class="p-meta-row" id="expiryRow" style="display:none;">
             <span class="k" data-t="expiry"></span>
             <span class="dots"></span>
             <span class="v" id="expiryVal"></span>
+          </div>
+        </div>
+
+        <div class="p-ledger" id="byModelBlock" style="display:none;">
+          <div class="p-ledger-head">
+            <h3 data-t="byModelTitle"></h3>
+          </div>
+          <div class="p-ledger-scroll">
+            <table class="p-ledger-table">
+              <thead>
+                <tr>
+                  <th data-t="colModel"></th>
+                  <th class="num" data-t="colReqs"></th>
+                  <th class="num" data-t="colIn"></th>
+                  <th class="num" data-t="colOut"></th>
+                </tr>
+              </thead>
+              <tbody id="byModelBody"></tbody>
+            </table>
           </div>
         </div>
 
@@ -655,6 +679,11 @@
           tokens: 'Tokens',
           credits: 'Credits',
           requests: 'Tổng yêu cầu',
+          dailyTokens: 'Token hôm nay',
+          byModelTitle: 'Chi tiết theo model',
+          colReqs: 'Yêu cầu',
+          colIn: 'Token vào',
+          colOut: 'Token ra',
           expiry: 'Hết hạn',
           unlimited: 'Không giới hạn',
           used: 'đã dùng',
@@ -695,6 +724,11 @@
           tokens: 'Tokens',
           credits: 'Credits',
           requests: 'Total requests',
+          dailyTokens: 'Tokens today',
+          byModelTitle: 'Breakdown by model',
+          colReqs: 'Reqs',
+          colIn: 'Input',
+          colOut: 'Output',
           expiry: 'Expiry',
           unlimited: 'Unlimited',
           used: 'used',
@@ -856,6 +890,15 @@
           $('expiryRow').style.display = 'none';
         }
 
+        // Daily tokens + per-model breakdown (in-memory, resets on server restart).
+        if (d.dailyTokens != null) {
+          $('dailyRow').style.display = '';
+          $('dailyVal').textContent = fmtNum(d.dailyTokens || 0);
+        } else {
+          $('dailyRow').style.display = 'none';
+        }
+        renderByModel(d.byModel);
+
         renderConnect(d);
       }
 
@@ -878,6 +921,25 @@
           '  -d \'{"model":"claude-sonnet-4","messages":[{"role":"user","content":"Hi"}]}\'';
       }
 
+      function renderByModel(list) {
+        var block = $('byModelBlock');
+        var body = $('byModelBody');
+        if (!Array.isArray(list) || !list.length) {
+          block.style.display = 'none';
+          body.innerHTML = '';
+          return;
+        }
+        block.style.display = '';
+        body.innerHTML = list.map(function (m) {
+          return '<tr>' +
+            '<td class="model" title="' + escapeAttr(m.model || '') + '">' + escapeHtml(m.model || '—') + '</td>' +
+            '<td class="num">' + fmtNum(m.requests || 0) + '</td>' +
+            '<td class="num">' + fmtNum(m.inputTok || 0) + '</td>' +
+            '<td class="num">' + fmtNum(m.outputTok || 0) + '</td>' +
+            '</tr>';
+        }).join('');
+      }
+
       function renderLedger(logs) {
         lastLogs = logs;
         var body = $('ledgerBody');
@@ -896,7 +958,7 @@
           totalCredits += (e.credits || 0);
           return '<tr>' +
             '<td class="time">' + fmtTime(e.time) + '</td>' +
-            '<td class="model" title="' + (e.model || '') + '">' + escapeHtml(e.model || '—') + '</td>' +
+            '<td class="model" title="' + escapeAttr(e.model || '') + '">' + escapeHtml(e.model || '—') + '</td>' +
             '<td class="num">' + fmtNum(e.totalTokens || 0) + '</td>' +
             '<td class="num credits">' + fmtNum(e.credits || 0) + '</td>' +
             '</tr>';
@@ -910,6 +972,13 @@
         var d = document.createElement('div');
         d.textContent = s == null ? '' : String(s);
         return d.innerHTML;
+      }
+
+      // escapeAttr is for values placed inside a double-quoted HTML attribute.
+      // escapeHtml (textContent) does NOT escape quotes, so a value with a `"`
+      // could break out of a title="..." attribute; escape quotes explicitly.
+      function escapeAttr(s) {
+        return escapeHtml(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
       }
 
       function flash(msg) {

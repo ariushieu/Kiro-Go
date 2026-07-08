@@ -2,6 +2,7 @@ package config
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"strings"
@@ -78,6 +79,11 @@ func AddApiKeys(entries []ApiKeyEntry) ([]ApiKeyEntry, error) {
 		if entry.CreatedAt == 0 {
 			entry.CreatedAt = now
 		}
+		// Bound accounts are optional: an empty set means the key routes through the
+		// shared pool. When set, drop unknown/duplicate ids so only live accounts remain.
+		entry.BoundAccountIDs = sanitizeBoundAccountIDsLocked(entry.BoundAccountIDs)
+		entry.Models = sanitizeModelList(entry.Models)
+		entry.Model = ""
 		out[i] = entry
 	}
 
@@ -129,6 +135,15 @@ func UpdateApiKey(id string, patch ApiKeyEntry) error {
 	cfg.ApiKeys[idx].TokenLimit = patch.TokenLimit
 	cfg.ApiKeys[idx].CreditLimit = patch.CreditLimit
 	cfg.ApiKeys[idx].ExpiresAt = patch.ExpiresAt
+	cfg.ApiKeys[idx].RPMLimit = patch.RPMLimit
+	cfg.ApiKeys[idx].IPLimit = patch.IPLimit
+	cfg.ApiKeys[idx].IPAllowlist = patch.IPAllowlist
+	cfg.ApiKeys[idx].TPMLimit = patch.TPMLimit
+	// Bound accounts are always overwritten from the patch (sanitized). Empty = the key
+	// falls back to shared-pool routing; a non-empty set restricts it to those accounts.
+	cfg.ApiKeys[idx].BoundAccountIDs = sanitizeBoundAccountIDsLocked(patch.BoundAccountIDs)
+	cfg.ApiKeys[idx].Models = sanitizeModelList(patch.Models)
+	cfg.ApiKeys[idx].Model = ""
 	if patch.Migrated {
 		cfg.ApiKeys[idx].Migrated = true
 	}
@@ -187,7 +202,7 @@ func FindApiKeyByValue(key string) *ApiKeyEntry {
 		return nil
 	}
 	for i := range cfg.ApiKeys {
-		if cfg.ApiKeys[i].Key == key {
+		if subtle.ConstantTimeCompare([]byte(cfg.ApiKeys[i].Key), []byte(key)) == 1 {
 			cp := cfg.ApiKeys[i]
 			return &cp
 		}
@@ -206,7 +221,8 @@ func HasApiKeys() bool {
 }
 
 // RecordApiKeyUsage atomically adds tokens and credits to the entry's counters,
-// updates LastUsedAt, increments RequestsCount, and persists.
+// updates LastUsedAt, and increments RequestsCount. This is a hot-path call, so it
+// only marks the config dirty; the backgroundStatsSaver persists via FlushDirty.
 func RecordApiKeyUsage(id string, tokens int64, credits float64) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
@@ -217,20 +233,26 @@ func RecordApiKeyUsage(id string, tokens int64, credits float64) error {
 		if cfg.ApiKeys[i].ID == id {
 			if tokens > 0 {
 				cfg.ApiKeys[i].TokensUsed += tokens
+				cfg.ApiKeys[i].LifetimeTokens += tokens
 			}
 			if credits > 0 {
 				cfg.ApiKeys[i].CreditsUsed += credits
+				cfg.ApiKeys[i].LifetimeCredits += credits
 			}
 			cfg.ApiKeys[i].RequestsCount++
+			cfg.ApiKeys[i].LifetimeRequests++
 			cfg.ApiKeys[i].LastUsedAt = time.Now().Unix()
-			return saveLocked()
+			markDirtyLocked()
+			return nil
 		}
 	}
 	return errors.New("api key not found")
 }
 
-// ResetApiKeyUsage clears TokensUsed/CreditsUsed/RequestsCount for the entry.
-// LastUsedAt is preserved so operators can still see when the key was last used.
+// ResetApiKeyUsage clears the current-period counters (TokensUsed/CreditsUsed/
+// RequestsCount) for the entry, granting a fresh quota. Lifetime counters are left
+// untouched so the grand total survives. LastUsedAt is preserved so operators can
+// still see when the key was last used.
 func ResetApiKeyUsage(id string) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
@@ -246,6 +268,79 @@ func ResetApiKeyUsage(id string) error {
 		}
 	}
 	return errors.New("api key not found")
+}
+
+// ResetApiKeyUsageAll clears BOTH the current-period counters and the lifetime counters
+// for the entry, wiping all recorded usage as if the key were new. LastUsedAt is
+// preserved. Use this for the "Reset All" action; use ResetApiKeyUsage for a routine
+// per-cycle quota reset that keeps the grand total.
+func ResetApiKeyUsageAll(id string) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	if cfg == nil {
+		return errors.New("config not initialized")
+	}
+	for i := range cfg.ApiKeys {
+		if cfg.ApiKeys[i].ID == id {
+			cfg.ApiKeys[i].TokensUsed = 0
+			cfg.ApiKeys[i].CreditsUsed = 0
+			cfg.ApiKeys[i].RequestsCount = 0
+			cfg.ApiKeys[i].LifetimeTokens = 0
+			cfg.ApiKeys[i].LifetimeCredits = 0
+			cfg.ApiKeys[i].LifetimeRequests = 0
+			return saveLocked()
+		}
+	}
+	return errors.New("api key not found")
+}
+
+// sanitizeBoundAccountIDsLocked trims, de-duplicates, and drops unknown IDs from a
+// key's bound-account list, keeping only IDs that match a currently-stored account.
+// Order is preserved (first occurrence wins). MUST be called with cfgLock held,
+// since it reads cfg.Accounts directly (the RWMutex is not reentrant).
+func sanitizeBoundAccountIDsLocked(ids []string) []string {
+	if len(ids) == 0 {
+		return nil
+	}
+	known := make(map[string]bool, len(cfg.Accounts))
+	for _, a := range cfg.Accounts {
+		known[a.ID] = true
+	}
+	seen := make(map[string]bool, len(ids))
+	out := make([]string, 0, len(ids))
+	for _, raw := range ids {
+		id := strings.TrimSpace(raw)
+		if id == "" || seen[id] || !known[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	return out
+}
+
+// sanitizeModelList trims, drops empties, and de-duplicates a key's model allowlist,
+// preserving order (first occurrence wins). Returns nil for an empty result so the
+// field is omitted from JSON. Model IDs are stored verbatim (as chosen in the UI);
+// normalization to the canonical upstream name happens later in applyModelOverride.
+func sanitizeModelList(models []string) []string {
+	if len(models) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(models))
+	out := make([]string, 0, len(models))
+	for _, raw := range models {
+		m := strings.TrimSpace(raw)
+		if m == "" || seen[m] {
+			continue
+		}
+		seen[m] = true
+		out = append(out, m)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // GenerateApiKeyValue returns a new random 32-byte hex API key prefixed with "sk-".

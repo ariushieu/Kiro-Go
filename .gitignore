@@ -23,5 +23,11 @@ Thumbs.db
 backup*/
 PR-*.md
 
+# Internal dev notes — not for publication
+# INTEGRATION_PROMPTS.md: contains local personal paths + internal task plan
+# SECURITY_AUDIT.md: lists unpatched vulnerabilities — do NOT publish until fixed
+INTEGRATION_PROMPTS.md
+SECURITY_AUDIT.md
+
 # Playwright MCP test artifacts
 .playwright-mcp/

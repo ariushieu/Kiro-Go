@@ -14,15 +14,19 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"kiro-go/config"
 	"kiro-go/logger"
 	"kiro-go/pool"
 	"kiro-go/proxy"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 )
 
@@ -51,6 +55,15 @@ func main() {
 		config.SetPassword(envPassword)
 	}
 
+	// Security guard: refuse to boot a publicly-reachable instance that still uses the
+	// built-in default admin password. A public VPS that forgets to set ADMIN_PASSWORD
+	// would otherwise expose full admin access (account tokens, key creation) to anyone.
+	// Loopback-only binds are allowed for local development.
+	if config.GetPassword() == "changeme" && !isLoopbackHost(config.GetHost()) {
+		log.Fatalf("Refusing to start: admin password is still the default on a non-loopback host (%s). "+
+			"Set the ADMIN_PASSWORD environment variable to a strong secret, or bind to 127.0.0.1.", config.GetHost())
+	}
+
 	// 初始化账号池
 	pool.GetPool()
 
@@ -73,9 +86,48 @@ func main() {
 		ReadHeaderTimeout: 30 * time.Second,
 		ReadTimeout:       60 * time.Second,
 		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20, // 1 MiB — cap header size to blunt header-flood / slowloris.
 	}
 
-	if err := srv.ListenAndServe(); err != nil {
+	// Graceful shutdown: on SIGINT/SIGTERM stop accepting new connections, let
+	// in-flight requests drain, stop background goroutines, and flush any pending
+	// hot-path config changes (usage/stats) so nothing accumulated since the last
+	// 30s tick is lost — e.g. on `docker-compose down`.
+	serverErr := make(chan error, 1)
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			serverErr <- err
+		}
+	}()
+
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+
+	select {
+	case err := <-serverErr:
 		logger.Fatalf("Server failed: %v", err)
+	case sig := <-stop:
+		logger.Infof("Received %s, shutting down gracefully...", sig)
 	}
+
+	// Stop background goroutines and flush stats/usage before the process exits.
+	handler.Shutdown()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		logger.Warnf("Graceful shutdown timed out: %v", err)
+	}
+	logger.Infof("Shutdown complete")
+}
+
+// isLoopbackHost reports whether the configured bind host is loopback-only, in which
+// case the admin panel is not reachable from the network and the default-password
+// startup guard can be safely skipped.
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

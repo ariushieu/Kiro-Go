@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"encoding/json"
-	"io"
 	"kiro-go/config"
 	"net/http"
 	"strconv"
@@ -26,6 +25,22 @@ type apiKeyView struct {
 	TokensUsed    int64   `json:"tokensUsed"`
 	CreditsUsed   float64 `json:"creditsUsed"`
 	RequestsCount int64   `json:"requestsCount"`
+	RPMLimit      int      `json:"rpmLimit,omitempty"`
+	IPLimit       int      `json:"ipLimit,omitempty"`
+	IPAllowlist   []string `json:"ipAllowlist,omitempty"`
+	TPMLimit      int      `json:"tpmLimit,omitempty"`
+
+	// BoundAccountIDs restricts routing to a fixed set of accounts (empty = shared pool).
+	BoundAccountIDs []string `json:"boundAccountIds,omitempty"`
+
+	// Models is the per-key model allowlist (empty = use client's model). A client model
+	// in the list passes through; one not in the list is remapped to the first entry.
+	Models []string `json:"models,omitempty"`
+
+	// Lifetime totals — never cleared by "Reset Usage", only by "Reset All".
+	LifetimeTokens   int64   `json:"lifetimeTokens"`
+	LifetimeCredits  float64 `json:"lifetimeCredits"`
+	LifetimeRequests int64   `json:"lifetimeRequests"`
 }
 
 func toApiKeyView(e config.ApiKeyEntry) apiKeyView {
@@ -43,6 +58,17 @@ func toApiKeyView(e config.ApiKeyEntry) apiKeyView {
 		TokensUsed:    e.TokensUsed,
 		CreditsUsed:   e.CreditsUsed,
 		RequestsCount: e.RequestsCount,
+		RPMLimit:      e.RPMLimit,
+		IPLimit:       e.IPLimit,
+		IPAllowlist:   e.IPAllowlist,
+		TPMLimit:      e.TPMLimit,
+
+		BoundAccountIDs: e.BoundAccountIDs,
+		Models:          e.Models,
+
+		LifetimeTokens:   e.LifetimeTokens,
+		LifetimeCredits:  e.LifetimeCredits,
+		LifetimeRequests: e.LifetimeRequests,
 	}
 }
 
@@ -72,6 +98,16 @@ type apiKeyCreateRequest struct {
 	TokenLimit  int64   `json:"tokenLimit,omitempty"`
 	CreditLimit float64 `json:"creditLimit,omitempty"`
 	ExpiresAt   int64   `json:"expiresAt,omitempty"`
+	RPMLimit    int      `json:"rpmLimit,omitempty"`
+	IPLimit     int      `json:"ipLimit,omitempty"`
+	IPAllowlist []string `json:"ipAllowlist,omitempty"`
+	TPMLimit    int      `json:"tpmLimit,omitempty"`
+
+	BoundAccountIDs []string `json:"boundAccountIds,omitempty"`
+	// Models is the per-key model allowlist. Model is a legacy single-value alias folded
+	// into Models when Models is empty.
+	Models []string `json:"models,omitempty"`
+	Model  string   `json:"model,omitempty"`
 }
 
 func (h *Handler) apiCreateApiKey(w http.ResponseWriter, r *http.Request) {
@@ -110,13 +146,31 @@ func createApiKeyFromRequest(req apiKeyCreateRequest) (config.ApiKeyEntry, error
 	}
 
 	return config.AddApiKey(config.ApiKeyEntry{
-		Name:        req.Name,
-		Key:         keyValue,
-		Enabled:     enabled,
-		TokenLimit:  req.TokenLimit,
-		CreditLimit: req.CreditLimit,
-		ExpiresAt:   req.ExpiresAt,
+		Name:            req.Name,
+		Key:             keyValue,
+		Enabled:         enabled,
+		TokenLimit:      req.TokenLimit,
+		CreditLimit:     req.CreditLimit,
+		ExpiresAt:       req.ExpiresAt,
+		RPMLimit:        req.RPMLimit,
+		IPLimit:         req.IPLimit,
+		IPAllowlist:     sanitizeIPAllowlist(req.IPAllowlist),
+		TPMLimit:        req.TPMLimit,
+		BoundAccountIDs: req.BoundAccountIDs,
+		Models:          mergeModelList(req.Models, req.Model),
 	})
+}
+
+// mergeModelList folds a legacy single-value model into the allowlist: the list wins
+// when non-empty, otherwise a non-empty legacy value becomes a one-element list.
+func mergeModelList(list []string, legacy string) []string {
+	if len(list) > 0 {
+		return list
+	}
+	if strings.TrimSpace(legacy) != "" {
+		return []string{legacy}
+	}
+	return nil
 }
 
 type apiKeyBulkCreateRequest struct {
@@ -126,6 +180,15 @@ type apiKeyBulkCreateRequest struct {
 	TokenLimit  int64   `json:"tokenLimit,omitempty"`
 	CreditLimit float64 `json:"creditLimit,omitempty"`
 	ExpiresAt   int64   `json:"expiresAt,omitempty"`
+	RPMLimit    int      `json:"rpmLimit,omitempty"`
+	IPLimit     int      `json:"ipLimit,omitempty"`
+	IPAllowlist []string `json:"ipAllowlist,omitempty"`
+	TPMLimit    int      `json:"tpmLimit,omitempty"`
+
+	BoundAccountIDs []string `json:"boundAccountIds,omitempty"`
+	// Models is the per-key model allowlist; Model is a legacy single-value alias.
+	Models []string `json:"models,omitempty"`
+	Model  string   `json:"model,omitempty"`
 }
 
 func (h *Handler) apiBulkCreateApiKeys(w http.ResponseWriter, r *http.Request) {
@@ -150,15 +213,23 @@ func (h *Handler) apiBulkCreateApiKeys(w http.ResponseWriter, r *http.Request) {
 		prefix = "API Key"
 	}
 
+	ipAllowlist := sanitizeIPAllowlist(req.IPAllowlist)
+	models := mergeModelList(req.Models, req.Model)
 	entries := make([]config.ApiKeyEntry, req.Count)
 	for i := range entries {
 		entries[i] = config.ApiKeyEntry{
-			Name:        prefix + " " + strconv.Itoa(i+1),
-			Key:         config.GenerateApiKeyValue(),
-			Enabled:     enabled,
-			TokenLimit:  req.TokenLimit,
-			CreditLimit: req.CreditLimit,
-			ExpiresAt:   req.ExpiresAt,
+			Name:            prefix + " " + strconv.Itoa(i+1),
+			Key:             config.GenerateApiKeyValue(),
+			Enabled:         enabled,
+			TokenLimit:      req.TokenLimit,
+			CreditLimit:     req.CreditLimit,
+			ExpiresAt:       req.ExpiresAt,
+			RPMLimit:        req.RPMLimit,
+			IPLimit:         req.IPLimit,
+			IPAllowlist:     ipAllowlist,
+			TPMLimit:        req.TPMLimit,
+			BoundAccountIDs: req.BoundAccountIDs,
+			Models:          models,
 		}
 	}
 	created, err := config.AddApiKeys(entries)
@@ -203,12 +274,23 @@ func (h *Handler) apiBulkDeleteApiKeys(w http.ResponseWriter, r *http.Request) {
 }
 
 type apiKeyUpdateRequest struct {
-	Name        *string  `json:"name,omitempty"`
-	Key         *string  `json:"key,omitempty"`
-	Enabled     *bool    `json:"enabled,omitempty"`
-	TokenLimit  *int64   `json:"tokenLimit,omitempty"`
-	CreditLimit *float64 `json:"creditLimit,omitempty"`
-	ExpiresAt   *int64   `json:"expiresAt,omitempty"`
+	Name        *string   `json:"name,omitempty"`
+	Key         *string   `json:"key,omitempty"`
+	Enabled     *bool     `json:"enabled,omitempty"`
+	TokenLimit  *int64    `json:"tokenLimit,omitempty"`
+	CreditLimit *float64  `json:"creditLimit,omitempty"`
+	ExpiresAt   *int64    `json:"expiresAt,omitempty"`
+	RPMLimit    *int      `json:"rpmLimit,omitempty"`
+	IPLimit     *int      `json:"ipLimit,omitempty"`
+	IPAllowlist *[]string `json:"ipAllowlist,omitempty"`
+	TPMLimit    *int      `json:"tpmLimit,omitempty"`
+
+	BoundAccountIDs *[]string `json:"boundAccountIds,omitempty"`
+
+	// Models is the per-key model allowlist. Model is a legacy single-value alias kept
+	// for older API clients; it is folded into a one-element allowlist below.
+	Models *[]string `json:"models,omitempty"`
+	Model  *string   `json:"model,omitempty"`
 }
 
 func (h *Handler) apiUpdateApiKey(w http.ResponseWriter, r *http.Request, id string) {
@@ -245,11 +327,42 @@ func (h *Handler) apiUpdateApiKey(w http.ResponseWriter, r *http.Request, id str
 	if req.ExpiresAt != nil {
 		patch.ExpiresAt = *req.ExpiresAt
 	}
+	if req.RPMLimit != nil {
+		patch.RPMLimit = *req.RPMLimit
+	}
+	if req.IPLimit != nil {
+		patch.IPLimit = *req.IPLimit
+	}
+	if req.IPAllowlist != nil {
+		patch.IPAllowlist = sanitizeIPAllowlist(*req.IPAllowlist)
+	}
+	if req.TPMLimit != nil {
+		patch.TPMLimit = *req.TPMLimit
+	}
+	if req.BoundAccountIDs != nil {
+		patch.BoundAccountIDs = *req.BoundAccountIDs
+	}
+	// Models is authoritative when present; Model is the legacy single-value alias.
+	if req.Models != nil {
+		patch.Models = *req.Models
+	} else if req.Model != nil {
+		if m := *req.Model; m != "" {
+			patch.Models = []string{m}
+		} else {
+			patch.Models = nil
+		}
+	}
 
 	if err := config.UpdateApiKey(id, patch); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
+	}
+
+	// If the key value or IP limits changed, drop the tracked IP allow-set so stale
+	// slots don't linger.
+	if h.ipLimiter != nil && (req.Key != nil || req.IPLimit != nil || req.IPAllowlist != nil) {
+		h.ipLimiter.forget(id)
 	}
 
 	updated := config.GetApiKeyEntry(id)
@@ -271,7 +384,6 @@ type apiKeyExportView struct {
 	ID                string  `json:"id"`
 	Name              string  `json:"name,omitempty"`
 	KeyMasked         string  `json:"keyMasked"`
-	Key               string  `json:"key,omitempty"` // Raw value, only populated when export is called with includeSecret=true.
 	Enabled           bool    `json:"enabled"`
 	RequestsCount     int64   `json:"requestsCount"`
 	TokensUsed        int64   `json:"tokensUsed"`
@@ -288,7 +400,7 @@ type apiKeyExportView struct {
 	Expired           bool    `json:"expired"`
 }
 
-func toApiKeyExportView(e config.ApiKeyEntry, includeSecret bool) apiKeyExportView {
+func toApiKeyExportView(e config.ApiKeyEntry) apiKeyExportView {
 	overToken, overCredit := config.ApiKeyOverLimit(e)
 	tokenPct := 0.0
 	if e.TokenLimit > 0 {
@@ -298,15 +410,10 @@ func toApiKeyExportView(e config.ApiKeyEntry, includeSecret bool) apiKeyExportVi
 	if e.CreditLimit > 0 {
 		creditPct = e.CreditsUsed / e.CreditLimit * 100
 	}
-	rawKey := ""
-	if includeSecret {
-		rawKey = e.Key
-	}
 	return apiKeyExportView{
 		ID:                e.ID,
 		Name:              e.Name,
 		KeyMasked:         config.MaskApiKey(e.Key),
-		Key:               rawKey,
 		Enabled:           e.Enabled,
 		RequestsCount:     e.RequestsCount,
 		TokensUsed:        e.TokensUsed,
@@ -324,18 +431,13 @@ func toApiKeyExportView(e config.ApiKeyEntry, includeSecret bool) apiKeyExportVi
 	}
 }
 
-// apiExportApiKeys handles POST /admin/api/api-keys/export.
-//
-// By default it returns a masked usage report (keys are obscured). When the body
-// sets "includeSecret": true, the raw key value is included in the "key" field so
-// the export can be re-imported as a backup. Body: {"ids": [...], "includeSecret": bool};
-// empty/missing ids = all.
+// apiExportApiKeys handles POST /admin/api/api-keys/export. It returns a masked
+// usage report (never re-importable). Body: {"ids": [...]}; empty/missing = all.
 func (h *Handler) apiExportApiKeys(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		IDs           []string `json:"ids"`
-		IncludeSecret bool     `json:"includeSecret"`
+		IDs []string `json:"ids"`
 	}
-	// Empty/invalid body = export all, masked.
+	// Empty/invalid body = export all.
 	_ = json.NewDecoder(r.Body).Decode(&req)
 
 	entries := config.ListApiKeys()
@@ -355,101 +457,13 @@ func (h *Handler) apiExportApiKeys(w http.ResponseWriter, r *http.Request) {
 
 	views := make([]apiKeyExportView, len(entries))
 	for i, e := range entries {
-		views[i] = toApiKeyExportView(e, req.IncludeSecret)
+		views[i] = toApiKeyExportView(e)
 	}
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"version":    config.Version,
 		"exportedAt": time.Now().Unix(),
 		"apiKeys":    views,
-	})
-}
-
-// apiKeyImportEntry is one key in an import payload. It mirrors the export
-// shape; only Key is required (masked-only exports cannot be re-imported).
-type apiKeyImportEntry struct {
-	Name          string  `json:"name,omitempty"`
-	Key           string  `json:"key"`
-	Enabled       *bool   `json:"enabled,omitempty"`
-	TokenLimit    int64   `json:"tokenLimit,omitempty"`
-	CreditLimit   float64 `json:"creditLimit,omitempty"`
-	ExpiresAt     int64   `json:"expiresAt,omitempty"`
-	TokensUsed    int64   `json:"tokensUsed,omitempty"`
-	CreditsUsed   float64 `json:"creditsUsed,omitempty"`
-	RequestsCount int64   `json:"requestsCount,omitempty"`
-}
-
-// apiImportApiKeysAdmin handles POST /admin/api/api-keys/import. It restores keys
-// from an export produced with includeSecret=true. Entries whose key is empty or
-// masked (contains "***") are skipped, as are keys already present. Name, limits,
-// expiry, and usage counters are preserved so the import is a faithful backup.
-//
-// Body accepts either the full export wrapper {"apiKeys": [...]} or a bare array.
-func (h *Handler) apiImportApiKeysAdmin(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, 8<<20))
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "failed to read body"})
-		return
-	}
-
-	var wrapper struct {
-		ApiKeys []apiKeyImportEntry `json:"apiKeys"`
-	}
-	var items []apiKeyImportEntry
-	if err := json.Unmarshal(body, &wrapper); err == nil && wrapper.ApiKeys != nil {
-		items = wrapper.ApiKeys
-	} else if err := json.Unmarshal(body, &items); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON: expected {\"apiKeys\": [...]} or an array"})
-		return
-	}
-
-	existing := make(map[string]bool)
-	for _, e := range config.ListApiKeys() {
-		existing[e.Key] = true
-	}
-
-	imported, skipped := 0, 0
-	seen := make(map[string]bool)
-	for _, it := range items {
-		key := strings.TrimSpace(it.Key)
-		if key == "" || strings.Contains(key, "***") || strings.Contains(key, "…") {
-			skipped++
-			continue
-		}
-		if existing[key] || seen[key] {
-			skipped++
-			continue
-		}
-		seen[key] = true
-
-		enabled := true
-		if it.Enabled != nil {
-			enabled = *it.Enabled
-		}
-		if _, err := config.AddApiKey(config.ApiKeyEntry{
-			Name:          it.Name,
-			Key:           key,
-			Enabled:       enabled,
-			TokenLimit:    it.TokenLimit,
-			CreditLimit:   it.CreditLimit,
-			ExpiresAt:     it.ExpiresAt,
-			TokensUsed:    it.TokensUsed,
-			CreditsUsed:   it.CreditsUsed,
-			RequestsCount: it.RequestsCount,
-		}); err != nil {
-			skipped++
-			continue
-		}
-		imported++
-	}
-
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success":  true,
-		"total":    len(items),
-		"imported": imported,
-		"skipped":  skipped,
 	})
 }
 
@@ -467,6 +481,34 @@ func (h *Handler) apiResetApiKeyUsage(w http.ResponseWriter, r *http.Request, id
 		w.WriteHeader(http.StatusNotFound)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
+	}
+	// Clear the tracked IP allow-set so a reset also frees all IP slots.
+	if h.ipLimiter != nil {
+		h.ipLimiter.forget(id)
+	}
+	updated := config.GetApiKeyEntry(id)
+	if updated == nil {
+		json.NewEncoder(w).Encode(map[string]bool{"success": true})
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"apiKey":  toApiKeyView(*updated),
+	})
+}
+
+// apiResetApiKeyUsageAll wipes BOTH the current-period and lifetime counters, resetting
+// the key as if it were new. Unlike apiResetApiKeyUsage (which keeps the lifetime total),
+// this is the destructive "Reset All" action.
+func (h *Handler) apiResetApiKeyUsageAll(w http.ResponseWriter, r *http.Request, id string) {
+	if err := config.ResetApiKeyUsageAll(id); err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	// Clear the tracked IP allow-set so a full reset also frees all IP slots.
+	if h.ipLimiter != nil {
+		h.ipLimiter.forget(id)
 	}
 	updated := config.GetApiKeyEntry(id)
 	if updated == nil {

@@ -41,12 +41,24 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 		storeResponse = *req.Store
 	}
 
+	apiKeyID := apiKeyIDFromContext(r.Context())
+
 	var historyMessages []OpenAIMessage
 	if req.PreviousResponseID != "" {
 		prev, loadErr := loadResponse(req.PreviousResponseID)
 		if loadErr != nil {
 			h.sendOpenAIError(w, 404, "invalid_request_error",
 				fmt.Sprintf("previous_response_id not found: %v", loadErr))
+			return
+		}
+		// Tenant isolation (M3): only the API key that created a response may chain
+		// from it. Reject with the same 404 as "not found" so a caller cannot probe
+		// for the existence of another tenant's response IDs. Responses created while
+		// key auth was off (empty owner) are only chainable by unauthenticated
+		// requests (also empty), preserving single-tenant behaviour.
+		if prev.APIKeyID != apiKeyID {
+			h.sendOpenAIError(w, 404, "invalid_request_error",
+				"previous_response_id not found")
 			return
 		}
 		historyMessages = expandPreviousResponseHistory(prev)
@@ -105,13 +117,20 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 
 	thinkingCfg := config.GetThinkingConfig()
 	actualModel, thinking := ParseModelAndThinking(req.Model, thinkingCfg.Suffix)
+	// Apply global/per-key model override (ForceModel > per-key Model > client model).
+	actualModel = applyModelOverride(actualModel, apiKeyID, thinkingCfg.Suffix)
 	openaiReq.Model = actualModel
 
 	estimatedInputTokens := estimateOpenAIRequestInputTokens(openaiReq)
 	kiroPayload := OpenAIToKiro(openaiReq, thinking)
 
-	apiKeyID := apiKeyIDFromContext(r.Context())
 	respID := generateResponseID()
+
+	// Valid-but-blocked key: render the limit-notice as a normal assistant reply.
+	if limitNoticeRequested(r.Context()) {
+		h.sendResponsesNotice(w, actualModel, req.Stream, config.GetLimitNoticeMessage(), respID, &req)
+		return
+	}
 
 	if req.Stream {
 		h.handleResponsesStream(w, kiroPayload, actualModel, thinking, estimatedInputTokens,
@@ -133,7 +152,7 @@ func (h *Handler) handleResponsesNonStream(
 	var lastErr error
 
 	for attempt := 0; attempt < maxAccountRetryAttempts; attempt++ {
-		account := h.pool.GetNextForModelExcluding(model, excluded)
+		account := h.nextAccountForKey(apiKeyID, model, excluded)
 		if account == nil {
 			break
 		}
@@ -193,6 +212,7 @@ func (h *Handler) handleResponsesNonStream(
 		respObj := buildResponsesObject(respID, model, finalContent, toolUses, inputTokens, outputTokens, req)
 		respObj.StoredInput = storedInput
 		respObj.Instructions = req.Instructions
+		respObj.APIKeyID = apiKeyID
 
 		if storeResponse {
 			if saveErr := saveResponse(respObj); saveErr != nil {
@@ -273,6 +293,96 @@ func buildResponsesObject(
 	}
 }
 
+// sendResponsesNotice returns the limit-notice text as a normal assistant reply in the
+// OpenAI /v1/responses shape. Used when a valid key is over-limit/disabled/expired so
+// coding clients show the message in the chat window instead of erroring out. No upstream
+// call, no billing.
+func (h *Handler) sendResponsesNotice(w http.ResponseWriter, model string, stream bool, msg, respID string, req *ResponsesRequest) {
+	outTok := noticeOutputTokens(msg)
+	if !stream {
+		respObj := buildResponsesObject(respID, model, msg, nil, 1, outTok, req)
+		respObj.Instructions = req.Instructions
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_ = json.NewEncoder(w).Encode(respObj)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		respObj := buildResponsesObject(respID, model, msg, nil, 1, outTok, req)
+		respObj.Instructions = req.Instructions
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_ = json.NewEncoder(w).Encode(respObj)
+		return
+	}
+
+	send := func(eventName string, payload interface{}) {
+		data, err := json.Marshal(payload)
+		if err != nil {
+			return
+		}
+		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventName, string(data))
+		flusher.Flush()
+	}
+
+	createdAt := time.Now().Unix()
+	initial := &ResponsesObject{
+		ID:                 respID,
+		Object:             "response",
+		CreatedAt:          createdAt,
+		Status:             "in_progress",
+		Model:              model,
+		Output:             []ResponseOutputItem{},
+		Usage:              ResponsesUsage{},
+		PreviousResponseID: req.PreviousResponseID,
+		Metadata:           req.Metadata,
+	}
+	send("response.created", map[string]interface{}{"type": "response.created", "response": initial})
+	send("response.in_progress", map[string]interface{}{"type": "response.in_progress", "response": initial})
+
+	messageItemID := generateOutputItemID("msg")
+	send("response.output_item.added", map[string]interface{}{
+		"type":         "response.output_item.added",
+		"output_index": 0,
+		"item": map[string]interface{}{
+			"id": messageItemID, "type": "message", "role": "assistant",
+			"status": "in_progress", "content": []map[string]interface{}{},
+		},
+	})
+	send("response.content_part.added", map[string]interface{}{
+		"type": "response.content_part.added", "item_id": messageItemID,
+		"output_index": 0, "content_index": 0,
+		"part": map[string]interface{}{"type": "output_text", "text": ""},
+	})
+	send("response.output_text.delta", map[string]interface{}{
+		"type": "response.output_text.delta", "item_id": messageItemID,
+		"output_index": 0, "content_index": 0, "delta": msg,
+	})
+	send("response.content_part.done", map[string]interface{}{
+		"type": "response.content_part.done", "item_id": messageItemID,
+		"output_index": 0, "content_index": 0,
+		"part": map[string]interface{}{"type": "output_text", "text": msg},
+	})
+	send("response.output_item.done", map[string]interface{}{
+		"type":         "response.output_item.done",
+		"output_index": 0,
+		"item": map[string]interface{}{
+			"id": messageItemID, "type": "message", "role": "assistant", "status": "completed",
+			"content": []map[string]interface{}{{"type": "output_text", "text": msg}},
+		},
+	})
+
+	respObj := buildResponsesObject(respID, model, msg, nil, 1, outTok, req)
+	respObj.CreatedAt = createdAt
+	respObj.Instructions = req.Instructions
+	send("response.completed", map[string]interface{}{"type": "response.completed", "response": respObj})
+	fmt.Fprintf(w, "data: [DONE]\n\n")
+	flusher.Flush()
+}
+
 func (h *Handler) handleResponsesStream(
 	w http.ResponseWriter, payload *KiroPayload, model string, thinking bool,
 	estimatedInputTokens int, apiKeyID, respID string,
@@ -320,7 +430,7 @@ func (h *Handler) handleResponsesStream(
 	responseStarted := false
 
 	for attempt := 0; attempt < maxAccountRetryAttempts; attempt++ {
-		account := h.pool.GetNextForModelExcluding(model, excluded)
+		account := h.nextAccountForKey(apiKeyID, model, excluded)
 		if account == nil {
 			break
 		}
@@ -543,6 +653,7 @@ func (h *Handler) handleResponsesStream(
 		respObj.CreatedAt = createdAt
 		respObj.StoredInput = storedInput
 		respObj.Instructions = req.Instructions
+		respObj.APIKeyID = apiKeyID
 
 		if storeResponse {
 			if saveErr := saveResponse(respObj); saveErr != nil {

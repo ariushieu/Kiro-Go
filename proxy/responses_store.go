@@ -63,6 +63,7 @@ func saveResponse(resp *ResponsesObject) error {
 		Instructions:       resp.Instructions,
 		StoredInput:        resp.StoredInput,
 		StoredAt:           resp.StoredAt,
+		APIKeyID:           resp.APIKeyID,
 	}
 
 	path := filepath.Join(dir, sanitizeResponseID(resp.ID)+".json")
@@ -111,6 +112,7 @@ func loadResponse(id string) (*ResponsesObject, error) {
 		Instructions:       doc.Instructions,
 		StoredInput:        doc.StoredInput,
 		StoredAt:           doc.StoredAt,
+		APIKeyID:           doc.APIKeyID,
 	}, nil
 }
 
@@ -179,4 +181,5 @@ type storedResponseDoc struct {
 	Instructions       string               `json:"instructions,omitempty"`
 	StoredInput        json.RawMessage      `json:"stored_input,omitempty"`
 	StoredAt           int64                `json:"stored_at"`
+	APIKeyID           string               `json:"api_key_id,omitempty"`
 }

@@ -22,6 +22,12 @@ import (
 	"github.com/google/uuid"
 )
 
+// maxEventStreamFrameBytes caps the size of a single AWS Event Stream frame we are
+// willing to allocate. totalLength is read straight off the wire (4 bytes), so without
+// an upper bound a corrupt/hostile frame could make us allocate multiple GiB and OOM the
+// whole process from a single response. 32 MiB is far above any legitimate SSE frame.
+const maxEventStreamFrameBytes = 32 << 20
+
 // Endpoint configuration (auto-fallback on quota exhaustion).
 type kiroEndpoint struct {
 	URL       string
@@ -694,6 +700,9 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 
 		if totalLength < 16 {
 			continue
+		}
+		if totalLength > maxEventStreamFrameBytes {
+			return fmt.Errorf("event stream frame too large: %d bytes (max %d)", totalLength, maxEventStreamFrameBytes)
 		}
 
 		// Read the remaining message bytes.

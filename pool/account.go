@@ -12,6 +12,17 @@ import (
 
 const tokenRefreshSkewSeconds int64 = 120
 
+// copyAccount returns a shallow copy of an account so callers can mutate
+// scalar fields (token, expiry, profile ARN) without racing the pool's own
+// writers (UpdateToken, Reload). Returns nil for a nil input.
+func copyAccount(a *config.Account) *config.Account {
+	if a == nil {
+		return nil
+	}
+	c := *a
+	return &c
+}
+
 // AccountPool 账号池
 type AccountPool struct {
 	mu            sync.RWMutex
@@ -21,8 +32,6 @@ type AccountPool struct {
 	cooldowns     map[string]time.Time       // 账号冷却时间
 	errorCounts   map[string]int             // 连续错误计数
 	modelLists    map[string]map[string]bool // accountID → set of modelIDs (from ListAvailableModels)
-	pins          map[[32]byte]pinEntry      // sticky routing: prefix hash → account
-	pinsMu        sync.Mutex
 }
 
 var (
@@ -37,7 +46,6 @@ func GetPool() *AccountPool {
 			cooldowns:   make(map[string]time.Time),
 			errorCounts: make(map[string]int),
 			modelLists:  make(map[string]map[string]bool),
-			pins:        make(map[[32]byte]pinEntry),
 		}
 		pool.Reload()
 	})
@@ -66,6 +74,38 @@ func (p *AccountPool) Reload() {
 	}
 	p.accounts = weighted
 	p.totalAccounts = len(enabled)
+
+	// Prune per-account bookkeeping for accounts that no longer exist in config, so
+	// the cooldowns/errorCounts/modelLists maps don't leak entries as accounts are
+	// deleted (L7). The live set is built from ALL config accounts (GetAccounts),
+	// enabled or not, so a temporarily-disabled or quota-blocked account keeps its
+	// state. errorCounts and modelLists never self-expire, so they are pruned strictly
+	// by the live set. Cooldowns are pruned by the live set too, EXCEPT entries whose
+	// cooldown is still in the future: DisableAccount sets a deliberate 24h safety-net
+	// cooldown right before calling Reload (for an account that may already be gone),
+	// so an active cooldown must survive the prune. Expired cooldowns for missing
+	// accounts are removed, bounding the leak to at most one cooldown interval.
+	live := make(map[string]bool)
+	for _, a := range config.GetAccounts() {
+		live[a.ID] = true
+	}
+	now := time.Now()
+	for id, until := range p.cooldowns {
+		if !live[id] && !until.After(now) {
+			delete(p.cooldowns, id)
+		}
+	}
+	pruneStaleKeys(p.errorCounts, live)
+	pruneStaleKeys(p.modelLists, live)
+}
+
+// pruneStaleKeys deletes entries whose key is not in live.
+func pruneStaleKeys[V any](m map[string]V, live map[string]bool) {
+	for k := range m {
+		if !live[k] {
+			delete(m, k)
+		}
+	}
 }
 
 // GetNext 获取下一个可用账号（加权轮询）
@@ -118,7 +158,7 @@ func (p *AccountPool) GetNextExcluding(excluded map[string]bool) *config.Account
 			continue
 		}
 
-		return acc
+		return copyAccount(acc)
 	}
 
 		// 无可用账号，返回冷却时间最短的（排除额度用尽的，除非允许超额）
@@ -138,10 +178,10 @@ func (p *AccountPool) GetNextExcluding(excluded map[string]bool) *config.Account
 				earliest = cooldown
 			}
 		} else {
-			return acc
+			return copyAccount(acc)
 		}
 	}
-	return best
+	return copyAccount(best)
 }
 
 // SetModelList 缓存账号支持的模型集合（由 handler 在刷新后调用）
@@ -229,7 +269,7 @@ func (p *AccountPool) GetNextForModelExcluding(model string, excluded map[string
 			seen[acc.ID] = true
 			continue
 		}
-		return acc
+		return copyAccount(acc)
 	}
 
 	// fallback：找冷却时间最短且支持该模型的账号
@@ -252,10 +292,64 @@ func (p *AccountPool) GetNextForModelExcluding(model string, excluded map[string
 				earliest = cooldown
 			}
 		} else {
-			return acc
+			return copyAccount(acc)
 		}
 	}
-	return best
+	return copyAccount(best)
+}
+
+// GetNextForModelBoundExcluding is like GetNextForModelExcluding but restricts the
+// selection to accounts whose ID is in allowed (the API key's bound-account set).
+// It applies the same skip rules (excluded, model support, cooldown, near-expiry
+// token, quota). Returns nil when no bound account is currently usable, so the caller
+// can decide whether to fall back to the shared pool. An empty allowed set also
+// returns nil (a bound key with no live bound account is not silently widened).
+func (p *AccountPool) GetNextForModelBoundExcluding(model string, allowed, excluded map[string]bool) *config.Account {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	if len(p.accounts) == 0 || len(allowed) == 0 {
+		return nil
+	}
+
+	allowOverUsage := config.GetAllowOverUsage()
+	now := time.Now()
+	n := len(p.accounts)
+	seen := make(map[string]bool)
+
+	for i := 0; i < n; i++ {
+		idx := atomic.AddUint64(&p.currentIndex, 1) % uint64(n)
+		acc := &p.accounts[idx]
+
+		if !allowed[acc.ID] {
+			continue
+		}
+		if excluded != nil && excluded[acc.ID] {
+			seen[acc.ID] = true
+			continue
+		}
+		if seen[acc.ID] {
+			continue
+		}
+		if !p.accountHasModel(acc.ID, model) {
+			seen[acc.ID] = true
+			continue
+		}
+		if cooldown, ok := p.cooldowns[acc.ID]; ok && now.Before(cooldown) {
+			seen[acc.ID] = true
+			continue
+		}
+		if acc.ExpiresAt > 0 && time.Now().Unix() > acc.ExpiresAt-tokenRefreshSkewSeconds {
+			seen[acc.ID] = true
+			continue
+		}
+		if isQuotaBlocked(*acc, allowOverUsage) {
+			seen[acc.ID] = true
+			continue
+		}
+		return copyAccount(acc)
+	}
+	return nil
 }
 
 // GetByID 根据 ID 获取账号
@@ -264,7 +358,7 @@ func (p *AccountPool) GetByID(id string) *config.Account {
 	defer p.mu.RUnlock()
 	for i := range p.accounts {
 		if p.accounts[i].ID == id {
-			return &p.accounts[i]
+			return copyAccount(&p.accounts[i])
 		}
 	}
 	return nil
@@ -466,7 +560,9 @@ func (p *AccountPool) UpdateStats(id string, tokens int, credits float64) {
 		}
 	}
 	if updated {
-		go config.UpdateAccountStats(id, requestCount, errorCount, totalTokens, totalCredits, lastUsed)
+		// UpdateAccountStats only marks the config dirty now (no inline disk write),
+		// so call it directly instead of spawning an unbounded goroutine per request.
+		_ = config.UpdateAccountStats(id, requestCount, errorCount, totalTokens, totalCredits, lastUsed)
 	}
 }
 

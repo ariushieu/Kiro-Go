@@ -21,9 +21,9 @@
   --destructive: #e54b4f;
   --destructive-foreground: #ffffff;
   --border: #e4e4e4;
-  --border-focus: #2d62ef;
+  --border-focus: #a3a3a3;
   --input: #ebebeb;
-  --ring: #2d62ef;
+  --ring: #a3a3a3;
   --success: #0f766e;
   --success-foreground: #ffffff;
   --warning: #ffae04;
@@ -32,38 +32,35 @@
   --info-foreground: #ffffff;
   --brand-purple: #9148ff;
   --brand-purple-foreground: #ffffff;
-  /* Electric blue accent */
-  --accent-blue: #2d62ef;
-  --accent-blue-fg: #ffffff;
-  --accent-blue-soft: #2d62ef;
   --modal-overlay: rgba(0, 0, 0, 0.42);
   --sidebar: #fcfcfc;
   --sidebar-foreground: #000000;
   --sidebar-border: #ebebeb;
-  /* Glassmorphism surfaces */
-  --glass-bg: rgba(255, 255, 255, 0.55);
-  --glass-bg-strong: rgba(255, 255, 255, 0.72);
-  --glass-border: rgba(255, 255, 255, 0.7);
-  --glass-border-inner: rgba(255, 255, 255, 0.9);
-  --glass-blur: blur(20px) saturate(160%);
-  --glass-shadow: 0 8px 32px -8px rgba(45, 98, 239, 0.18),
-    0 2px 8px -4px rgba(15, 23, 42, 0.12);
-  --glass-shadow-lg: 0 24px 64px -16px rgba(45, 98, 239, 0.24),
-    0 8px 24px -8px rgba(15, 23, 42, 0.16);
-  --glass-inset: inset 0 1px 0 0 var(--glass-border-inner);
-  /* Ambient background tints */
-  --ambient-1: rgba(45, 98, 239, 0.1);
-  --ambient-2: rgba(145, 72, 255, 0.08);
-  --ambient-3: rgba(15, 118, 110, 0.06);
-  /* Tinted shadow scale (re-enabled for glass depth) */
-  --shadow-2xs: 0 1px 2px -1px rgba(15, 23, 42, 0.06);
-  --shadow-xs: 0 1px 3px -1px rgba(15, 23, 42, 0.08);
-  --shadow-sm: 0 2px 8px -3px rgba(15, 23, 42, 0.1);
-  --shadow: 0 4px 16px -6px rgba(15, 23, 42, 0.12);
-  --shadow-md: 0 8px 24px -8px rgba(15, 23, 42, 0.14);
-  --shadow-lg: 0 16px 40px -12px rgba(15, 23, 42, 0.16);
-  --shadow-xl: 0 24px 56px -16px rgba(15, 23, 42, 0.18);
-  --shadow-2xl: 0 32px 72px -20px rgba(15, 23, 42, 0.22);
+  /* Flat UI: glass surfaces collapsed to solid cards, no blur. */
+  --accent-blue: #000000;
+  --accent-blue-fg: #ffffff;
+  --accent-blue-soft: #000000;
+  --glass-bg: var(--card);
+  --glass-bg-strong: var(--card);
+  --glass-border: var(--border);
+  --glass-border-inner: transparent;
+  --glass-blur: none;
+  --glass-shadow: none;
+  --glass-shadow-lg: none;
+  --glass-inset: none;
+  /* Ambient background disabled for flat UI. */
+  --ambient-1: transparent;
+  --ambient-2: transparent;
+  --ambient-3: transparent;
+  /* Shadows stay disabled for the flat UI. */
+  --shadow-2xs: none;
+  --shadow-xs: none;
+  --shadow-sm: none;
+  --shadow: none;
+  --shadow-md: none;
+  --shadow-lg: none;
+  --shadow-xl: none;
+  --shadow-2xl: none;
   /* Radius scale */
   --radius: 0.5rem;
   --radius-sm: 0.25rem;
@@ -78,9 +75,9 @@
 }
 
 .dark {
-  --background: #0a0b0f;
+  --background: #000000;
   --foreground: #ffffff;
-  --card: #12141a;
+  --card: #090909;
   --card-foreground: #ffffff;
   --popover: #121212;
   --popover-foreground: #ffffff;
@@ -95,9 +92,9 @@
   --destructive: #ff5b5b;
   --destructive-foreground: #ffffff;
   --border: #242424;
-  --border-focus: #4b82ff;
+  --border-focus: #525252;
   --input: #333333;
-  --ring: #4b82ff;
+  --ring: #525252;
   --success: #2dd4bf;
   --success-foreground: #001f1d;
   --warning: #ffae04;
@@ -106,39 +103,36 @@
   --info-foreground: #ffffff;
   --brand-purple: #b582ff;
   --brand-purple-foreground: #ffffff;
-  /* Electric blue accent (brighter for dark bg) */
-  --accent-blue: #4b82ff;
-  --accent-blue-fg: #ffffff;
-  --accent-blue-soft: #6b9bff;
   --modal-overlay: rgba(0, 0, 0, 0.76);
   --sidebar: #121212;
   --sidebar-foreground: #ffffff;
   --sidebar-border: #333333;
   --kiro-icon-filter: invert(1);
-  /* Glassmorphism surfaces */
-  --glass-bg: rgba(24, 27, 36, 0.55);
-  --glass-bg-strong: rgba(24, 27, 36, 0.74);
-  --glass-border: rgba(255, 255, 255, 0.1);
-  --glass-border-inner: rgba(255, 255, 255, 0.14);
-  --glass-blur: blur(22px) saturate(150%);
-  --glass-shadow: 0 8px 32px -8px rgba(0, 0, 0, 0.6),
-    0 2px 8px -4px rgba(0, 0, 0, 0.5);
-  --glass-shadow-lg: 0 24px 64px -16px rgba(0, 0, 0, 0.7),
-    0 8px 24px -8px rgba(0, 0, 0, 0.55);
-  --glass-inset: inset 0 1px 0 0 var(--glass-border-inner);
-  /* Ambient background tints */
-  --ambient-1: rgba(75, 130, 255, 0.16);
-  --ambient-2: rgba(145, 72, 255, 0.12);
-  --ambient-3: rgba(45, 212, 191, 0.08);
-  /* Tinted shadow scale (re-enabled for glass depth) */
-  --shadow-2xs: 0 1px 2px -1px rgba(0, 0, 0, 0.4);
-  --shadow-xs: 0 1px 3px -1px rgba(0, 0, 0, 0.45);
-  --shadow-sm: 0 2px 8px -3px rgba(0, 0, 0, 0.5);
-  --shadow: 0 4px 16px -6px rgba(0, 0, 0, 0.55);
-  --shadow-md: 0 8px 24px -8px rgba(0, 0, 0, 0.6);
-  --shadow-lg: 0 16px 40px -12px rgba(0, 0, 0, 0.65);
-  --shadow-xl: 0 24px 56px -16px rgba(0, 0, 0, 0.7);
-  --shadow-2xl: 0 32px 72px -20px rgba(0, 0, 0, 0.75);
+  /* Flat UI: glass surfaces collapsed to solid cards, no blur. */
+  --accent-blue: #ffffff;
+  --accent-blue-fg: #000000;
+  --accent-blue-soft: #ffffff;
+  --glass-bg: var(--card);
+  --glass-bg-strong: var(--card);
+  --glass-border: var(--border);
+  --glass-border-inner: transparent;
+  --glass-blur: none;
+  --glass-shadow: none;
+  --glass-shadow-lg: none;
+  --glass-inset: none;
+  /* Ambient background disabled for flat UI. */
+  --ambient-1: transparent;
+  --ambient-2: transparent;
+  --ambient-3: transparent;
+  /* Shadows stay disabled for the flat UI. */
+  --shadow-2xs: none;
+  --shadow-xs: none;
+  --shadow-sm: none;
+  --shadow: none;
+  --shadow-md: none;
+  --shadow-lg: none;
+  --shadow-xl: none;
+  --shadow-2xl: none;
   color-scheme: dark;
 }
 
@@ -177,40 +171,24 @@
   --font-mono: var(--font-mono);
 }
 
-/* Reset — text-shadow off, box-shadow allowed for glass depth */
+/* Flat reset */
 *,
 *::before,
 *::after {
+  box-shadow: none !important;
+  -webkit-box-shadow: none !important;
   text-shadow: none !important;
 }
 
 /* Base */
-html {
-  background: var(--background);
-}
 html,
 body {
+  background: var(--background);
   color: var(--foreground);
   font-family: var(--font-sans);
   font-feature-settings: "cv02", "cv03", "cv04", "cv11";
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-}
-body {
-  background: transparent;
-}
-
-/* Ambient mesh — gives backdrop-filter something to refract */
-body::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  z-index: -1;
-  pointer-events: none;
-  background:
-    radial-gradient(60rem 60rem at 12% -8%, var(--ambient-1), transparent 55%),
-    radial-gradient(52rem 52rem at 92% 6%, var(--ambient-2), transparent 55%),
-    radial-gradient(44rem 44rem at 78% 96%, var(--ambient-3), transparent 55%);
 }
 
 html {
@@ -323,8 +301,8 @@ pre,
   border-color: var(--accent-blue);
 }
 .btn-primary:hover {
-  background: color-mix(in oklab, var(--accent-blue) 88%, #000);
-  border-color: color-mix(in oklab, var(--accent-blue) 88%, #000);
+  background: color-mix(in oklab, var(--accent-blue) 88%, var(--accent-blue-fg));
+  border-color: color-mix(in oklab, var(--accent-blue) 88%, var(--accent-blue-fg));
 }
 .btn-secondary {
   background: var(--secondary);
@@ -439,6 +417,61 @@ pre,
   gap: 0.5rem;
   align-items: center;
   flex-wrap: wrap;
+}
+
+/* API Request Log toolbar: title left, controls wrap into a tidy row on the right. */
+.logs-header {
+  flex-wrap: wrap;
+  row-gap: 0.75rem;
+}
+.logs-header .card-title {
+  flex: 0 0 auto;
+}
+.logs-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.logs-actions .custom-select {
+  width: auto;
+  flex: 0 0 auto;
+}
+.logs-actions .custom-select .custom-select-trigger {
+  min-width: 8.5rem;
+}
+.logs-search {
+  flex: 1 1 12rem;
+  min-width: 8rem;
+  max-width: 20rem;
+  height: 2.25rem;
+}
+.logs-auto-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.8125rem;
+  color: var(--muted-foreground);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.logs-auto-toggle input {
+  cursor: pointer;
+}
+/* Slightly separate the destructive Clear action from the neutral buttons. */
+.logs-actions #logsClearBtn {
+  margin-left: 0.25rem;
+}
+@media (max-width: 640px) {
+  .logs-actions {
+    justify-content: flex-start;
+  }
+  .logs-search {
+    max-width: none;
+  }
 }
 
 /* Inputs */
@@ -2112,6 +2145,16 @@ body:has(#tabApilog:not(.hidden)) #mainPage > .container {
   overflow-y: auto;
   min-height: 0;
 }
+/* Bound-account picker inside the API-key modal */
+.apikey-account-list {
+  max-height: 12rem;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 0.375rem;
+  padding: 0.5rem;
+  display: grid;
+  gap: 0.15rem;
+}
 .modal-footer {
   display: flex;
   justify-content: flex-end;
@@ -3294,6 +3337,15 @@ body:has(#tabApilog:not(.hidden)) #mainPage > .container {
 }
 .help-block p + p {
   margin-top: 0.375rem;
+}
+.warn-block {
+  font-size: 0.8125rem;
+  line-height: 1.6;
+  margin: 0.5rem 0 0;
+  padding: 0.625rem 0.75rem;
+  color: var(--warning-foreground);
+  background: var(--warning);
+  border-radius: var(--radius-md);
 }
 .code-card {
   background: var(--muted);

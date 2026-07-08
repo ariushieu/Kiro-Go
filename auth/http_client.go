@@ -2,12 +2,35 @@
 package auth
 
 import (
+	"io"
 	"net/http"
 	"net/url"
 	"sync"
 	"sync/atomic"
 	"time"
 )
+
+// maxErrorBodyBytes caps how much of a non-2xx upstream body we fold into an error
+// string. OAuth/OIDC error bodies can carry tokens, session ids, or internal
+// hostnames that then propagate to the admin API / SSO error pages; a full dump is
+// both a leak risk and a log-bloat risk. The truncated prefix is enough to identify
+// the error class (e.g. `{"error":"invalid_grant"}`); the full body is only logged
+// at debug level by callers that need it.
+const maxErrorBodyBytes = 512
+
+// readErrorBody reads at most maxErrorBodyBytes from an upstream error response and
+// returns it as a string, appending an ellipsis marker when the body was truncated.
+// It never returns an error — a body that cannot be read yields an empty string.
+func readErrorBody(body io.Reader) string {
+	if body == nil {
+		return ""
+	}
+	buf, _ := io.ReadAll(io.LimitReader(body, maxErrorBodyBytes+1))
+	if len(buf) > maxErrorBodyBytes {
+		return string(buf[:maxErrorBodyBytes]) + "…(truncated)"
+	}
+	return string(buf)
+}
 
 // 全局 HTTP 客户端存储，支持运行时代理重配置
 var httpClientStore atomic.Pointer[http.Client]

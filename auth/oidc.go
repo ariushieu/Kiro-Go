@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"kiro-go/config"
 	"net/http"
 	"time"
@@ -75,8 +74,7 @@ func refreshOIDCToken(refreshToken, clientID, clientSecret, region string, clien
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return "", "", 0, "", fmt.Errorf("refresh failed: %d %s", resp.StatusCode, string(respBody))
+		return "", "", 0, "", fmt.Errorf("refresh failed: %d %s", resp.StatusCode, readErrorBody(resp.Body))
 	}
 
 	var result struct {
@@ -113,8 +111,7 @@ func refreshSocialToken(refreshToken string, client *http.Client) (string, strin
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return "", "", 0, "", fmt.Errorf("refresh failed: %d %s", resp.StatusCode, string(respBody))
+		return "", "", 0, "", fmt.Errorf("refresh failed: %d %s", resp.StatusCode, readErrorBody(resp.Body))
 	}
 
 	var result struct {

@@ -236,6 +236,8 @@ type apiKeySelfInfo struct {
 	ExpiresAt     int64   `json:"expiresAt,omitempty"`
 	Valid         bool    `json:"valid"` // false when the key is disabled/expired/over-limit
 	BaseURL       string  `json:"baseURL,omitempty"` // externally reachable API base, so the customer knows where to point their client
+	DailyTokens   int64           `json:"dailyTokens"` // input+output tokens since local midnight (in-memory, resets on restart)
+	ByModel       []modelStatView `json:"byModel"`     // per-model breakdown (in-memory, resets on restart)
 }
 
 // apiKeySelfLogEntry is one row of a customer's own usage history. Deliberately
@@ -341,6 +343,8 @@ func (h *Handler) apiKeySelfInfo(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	usage := h.usage.snapshot(entry.ID)
+
 	json.NewEncoder(w).Encode(apiKeySelfInfo{
 		Enabled:       entry.Enabled,
 		TokenLimit:    entry.TokenLimit,
@@ -356,6 +360,8 @@ func (h *Handler) apiKeySelfInfo(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt:     entry.ExpiresAt,
 		Valid:         entry.Enabled && !expired && !overToken && !overCredit,
 		BaseURL:       selfServiceBaseURL(r),
+		DailyTokens:   usage.DailyTokens,
+		ByModel:       usage.ByModel,
 	})
 }
 

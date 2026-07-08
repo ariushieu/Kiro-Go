@@ -177,8 +177,7 @@ func registerOIDCClient(oidcBase, startUrl, redirectUri string) (clientID, clien
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return "", "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
+		return "", "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, readErrorBody(resp.Body))
 	}
 
 	var result struct {
@@ -214,8 +213,7 @@ func exchangeToken(oidcBase, clientID, clientSecret, code, codeVerifier, redirec
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return "", "", 0, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
+		return "", "", 0, fmt.Errorf("HTTP %d: %s", resp.StatusCode, readErrorBody(resp.Body))
 	}
 
 	var result struct {
@@ -233,7 +231,11 @@ func exchangeToken(oidcBase, clientID, clientSecret, code, codeVerifier, redirec
 
 func generateCodeVerifier() string {
 	b := make([]byte, 32)
-	rand.Read(b)
+	// Fail loudly rather than emit an all-zero (guessable) PKCE verifier if the
+	// system CSPRNG is somehow unavailable. crypto/rand.Read essentially never fails.
+	if _, err := io.ReadFull(rand.Reader, b); err != nil {
+		panic("crypto/rand unavailable: " + err.Error())
+	}
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 

@@ -31,6 +31,11 @@ type ResponsesObject struct {
 	StoredInput        json.RawMessage      `json:"-"`
 	StoredInstr        string               `json:"-"`
 	StoredAt           int64                `json:"stored_at,omitempty"`
+	// APIKeyID is the ID of the API key that created this response. Persisted (see
+	// storedResponseDoc) but never echoed to the client (json:"-") — it enforces
+	// that only the owning key may reference the response via previous_response_id
+	// (M3 tenant isolation).
+	APIKeyID string `json:"-"`
 }
 
 type ResponseOutputItem struct {

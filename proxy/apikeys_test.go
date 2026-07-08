@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"encoding/json"
 	"kiro-go/config"
 	"net/http"
 	"net/http/httptest"
@@ -76,11 +75,8 @@ func TestAuthenticateRejectsDisabledKey(t *testing.T) {
 		t.Fatalf("expected disabled key to be rejected, got entry=%v", entry)
 	}
 	ae, ok := err.(*authError)
-	if !ok || ae.status != http.StatusUnauthorized {
-		t.Fatalf("expected 401 authError, got %v", err)
-	}
-	if !strings.Contains(ae.message, "disabled") {
-		t.Fatalf("expected disabled message, got %q", ae.message)
+	if !ok || !ae.notice {
+		t.Fatalf("expected notice authError for a valid-but-disabled key, got %v", err)
 	}
 }
 
@@ -134,14 +130,8 @@ func TestAuthenticateRejectsOverTokenLimit(t *testing.T) {
 		t.Fatalf("expected token limit rejection, got entry=%v", entry)
 	}
 	ae, ok := err.(*authError)
-	if !ok {
-		t.Fatalf("expected *authError, got %T", err)
-	}
-	if ae.status != http.StatusTooManyRequests {
-		t.Fatalf("expected 429, got %d", ae.status)
-	}
-	if !strings.Contains(ae.message, "token limit") {
-		t.Fatalf("expected token limit message, got %q", ae.message)
+	if !ok || !ae.notice {
+		t.Fatalf("expected notice authError for over-token-limit valid key, got %v", err)
 	}
 }
 
@@ -165,14 +155,8 @@ func TestAuthenticateRejectsOverCreditLimit(t *testing.T) {
 		t.Fatalf("expected credit limit rejection, got entry=%v", entry)
 	}
 	ae, ok := err.(*authError)
-	if !ok {
-		t.Fatalf("expected *authError, got %T", err)
-	}
-	if ae.status != http.StatusTooManyRequests {
-		t.Fatalf("expected 429, got %d", ae.status)
-	}
-	if !strings.Contains(ae.message, "credit limit") {
-		t.Fatalf("expected credit limit message, got %q", ae.message)
+	if !ok || !ae.notice {
+		t.Fatalf("expected notice authError for over-credit-limit valid key, got %v", err)
 	}
 }
 
@@ -236,7 +220,7 @@ func TestRouteWritesUnauthorizedClaude(t *testing.T) {
 	}
 }
 
-func TestRouteWritesTooManyRequestsOpenAI(t *testing.T) {
+func TestRouteOverLimitRendersNoticeOpenAI(t *testing.T) {
 	mustInitConfig(t)
 	created, err := config.AddApiKey(config.ApiKeyEntry{
 		Name: "openai", Key: "sk-openai", Enabled: true, TokenLimit: 50,
@@ -247,22 +231,22 @@ func TestRouteWritesTooManyRequestsOpenAI(t *testing.T) {
 	if err := config.RecordApiKeyUsage(created.ID, 50, 0); err != nil {
 		t.Fatalf("record: %v", err)
 	}
+	if err := config.SetLimitNoticeMessage("quota gone, renew via bot"); err != nil {
+		t.Fatalf("set notice: %v", err)
+	}
 	requireAuth(t)
 
 	h := &Handler{}
 	rec := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("{}"))
+	body := `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
 	r.Header.Set("Authorization", "Bearer sk-openai")
 	h.ServeHTTP(rec, r)
-	if rec.Code != http.StatusTooManyRequests {
-		t.Fatalf("expected 429, got %d body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 notice reply, got %d body=%s", rec.Code, rec.Body.String())
 	}
-	var payload map[string]interface{}
-	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
-		t.Fatalf("invalid JSON body: %v / %s", err, rec.Body.String())
-	}
-	if _, ok := payload["error"]; !ok {
-		t.Fatalf("expected OpenAI-style error envelope, got %s", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), "quota gone, renew via bot") {
+		t.Fatalf("expected notice message in body, got %s", rec.Body.String())
 	}
 }
 

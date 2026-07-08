@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -12,12 +13,31 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
 
 	"kiro-go/logger"
 )
+
+// reuseAddrListen binds a TCP listener with SO_REUSEADDR set on the socket before
+// bind. Without it, on Windows the loopback callback port lingers in TIME_WAIT after
+// the previous SSO login closes, so an immediate retry fails to rebind with "Only one
+// usage of each socket address ... is normally permitted" (WSAEADDRINUSE). setReuseAddr
+// is platform-specific (see reuseaddr_windows.go / reuseaddr_other.go).
+func reuseAddrListen(addr string) (net.Listener, error) {
+	lc := net.ListenConfig{
+		Control: func(_, _ string, c syscall.RawConn) error {
+			var sockErr error
+			if err := c.Control(func(fd uintptr) { sockErr = setReuseAddr(fd) }); err != nil {
+				return err
+			}
+			return sockErr
+		},
+	}
+	return lc.Listen(context.Background(), "tcp", addr)
+}
 
 // KiroSsoSession đại diện cho một phiên đăng nhập Kiro Hosted SSO đang diễn ra.
 // Flow gồm 2 leg (theo zsecducna/cli-cache-proxy-api social.go):
@@ -132,10 +152,19 @@ func bindKiroLoopback() (net.Listener, int, error) {
 	host := "127.0.0.1"
 	if v := strings.TrimSpace(os.Getenv("LOOPBACK_HOST")); v != "" {
 		host = v
+		// L5: binding the OAuth callback listener to a non-loopback address exposes
+		// it on the network for the ~10-minute login window. State/PKCE still guard
+		// against CSRF, but warn so an operator who set this for Docker convenience
+		// knows the trade-off; a reverse proxy + RedirectBase is the safer pattern.
+		if ip := net.ParseIP(host); host != "localhost" && (ip == nil || !ip.IsLoopback()) {
+			logger.Warnf("[KiroSSO] LOOPBACK_HOST=%q binds the OAuth callback on a non-loopback "+
+				"interface — it is reachable from the network during login. Prefer 127.0.0.1 with a "+
+				"reverse proxy + RedirectBase for Docker.", host)
+		}
 	}
 
 	for _, p := range ports {
-		ln, err := net.Listen("tcp", fmt.Sprintf("%s:%d", host, p))
+		ln, err := reuseAddrListen(fmt.Sprintf("%s:%d", host, p))
 		if err == nil {
 			return ln, ln.Addr().(*net.TCPAddr).Port, nil
 		}
@@ -159,7 +188,7 @@ func bindKiroLoopback() (net.Listener, int, error) {
 // Hàm này block trên việc serve IPv4 listener (gọi trong goroutine ở StartKiroSsoLogin).
 func serveLoopback(s *KiroSsoSession, v4Listener net.Listener, port int) {
 	// IPv6 loopback best-effort trên cùng port.
-	if v6Listener, err := net.Listen("tcp", fmt.Sprintf("[::1]:%d", port)); err != nil {
+	if v6Listener, err := reuseAddrListen(fmt.Sprintf("[::1]:%d", port)); err != nil {
 		logger.Debugf("[KiroSSO] bind IPv6 loopback [::1]:%d thất bại (best-effort, bỏ qua): %v", port, err)
 	} else {
 		go func() {
@@ -356,6 +385,20 @@ func GetKiroSsoSession(sessionID string) *KiroSsoSession {
 	return kiroSsoSessions[sessionID]
 }
 
+// validateExternalIdpEndpoints gates the SSRF allow-list check on the token-refresh
+// path. Always true in production; refresh-path unit tests that drive local httptest
+// servers set it to false. The write boundaries (credential import, local-cache scan,
+// and the login flow) validate unconditionally, so this refresh-path check is
+// defense-in-depth against a hand-tampered config.json.
+var validateExternalIdpEndpoints = true
+
+// ValidateExternalIdpURL is the exported entry point for callers outside this package
+// (e.g. credential import) to enforce the external-IdP allow-list on untrusted issuer /
+// endpoint URLs before they are stored or used to make a request.
+func ValidateExternalIdpURL(rawURL string) error {
+	return validateExternalIdpURL(rawURL)
+}
+
 // RefreshExternalIdpToken làm mới access token qua IdP token endpoint.
 // Được gọi từ oidc.go khi AuthMethod == "external_idp".
 func RefreshExternalIdpToken(refreshToken, issuerURL, tokenEndpoint, clientID, scopes string, httpClient *http.Client) (string, string, int64, string, error) {
@@ -366,12 +409,28 @@ func RefreshExternalIdpToken(refreshToken, issuerURL, tokenEndpoint, clientID, s
 		return "", "", 0, "", fmt.Errorf("external_idp refresh requires idpClientId")
 	}
 
+	// SSRF guard: the issuer is used to run OIDC discovery (an HTTP GET) below, so it
+	// must be allow-listed BEFORE any request is made. Mirrors the login-path check.
+	if validateExternalIdpEndpoints {
+		if err := validateExternalIdpURL(issuerURL); err != nil {
+			return "", "", 0, "", fmt.Errorf("external_idp refresh: invalid issuer_url: %w", err)
+		}
+	}
+
 	// Dùng cached token endpoint nếu có, nếu không thì OIDC discovery
 	if tokenEndpoint == "" {
 		var err error
 		tokenEndpoint, err = resolveExternalIdpTokenEndpoint(issuerURL, httpClient)
 		if err != nil {
 			return "", "", 0, "", err
+		}
+	}
+
+	// SSRF guard: whether the token endpoint came from a cached (possibly tampered)
+	// value or from discovery, validate it before POSTing credentials to it.
+	if validateExternalIdpEndpoints {
+		if err := validateExternalIdpURL(tokenEndpoint); err != nil {
+			return "", "", 0, "", fmt.Errorf("external_idp refresh: invalid token endpoint: %w", err)
 		}
 	}
 
@@ -397,8 +456,7 @@ func RefreshExternalIdpToken(refreshToken, issuerURL, tokenEndpoint, clientID, s
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return "", "", 0, "", fmt.Errorf("token refresh failed: HTTP %d — %s", resp.StatusCode, string(respBody))
+		return "", "", 0, "", fmt.Errorf("token refresh failed: HTTP %d — %s", resp.StatusCode, readErrorBody(resp.Body))
 	}
 
 	var result struct {
@@ -537,7 +595,9 @@ func (s *KiroSsoSession) resolveIdpAuthorizeURL(query url.Values) (string, error
 
 	// Tạo PKCE pair mới cho Leg-2 (96-byte verifier như zsec randomURLSafe(96))
 	verifierBytes := make([]byte, 96)
-	rand.Read(verifierBytes)
+	if _, err := io.ReadFull(rand.Reader, verifierBytes); err != nil {
+		return "", fmt.Errorf("generate PKCE verifier: %w", err)
+	}
 	idpCodeVerifier := base64.RawURLEncoding.EncodeToString(verifierBytes)
 	idpCodeChallenge := generateCodeChallenge(idpCodeVerifier)
 	idpState := uuid.New().String()
@@ -700,8 +760,7 @@ func exchangeExternalIdpCode(tokenEndpoint, clientID, code, codeVerifier, redire
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("token endpoint returned %d: %s", resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("token endpoint returned %d: %s", resp.StatusCode, readErrorBody(resp.Body))
 	}
 
 	var result struct {

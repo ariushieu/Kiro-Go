@@ -6,15 +6,24 @@
 
   // State
   const baseUrl = location.origin;
-  if (localStorage.getItem('kiro_remember') !== '1') {
-    localStorage.removeItem('admin_password');
-    localStorage.removeItem('admin_login_time');
-  }
-  let password = sessionStorage.getItem('admin_password') || localStorage.getItem('admin_password') || '';
+  // Auth is cookie-based: the server issues an opaque HttpOnly session token at
+  // login. The admin password is never stored client-side. Purge any credential
+  // left over from older builds that persisted the raw password.
+  ['admin_password', 'admin_login_time', 'kiro_remembered_pwd'].forEach((k) => {
+    localStorage.removeItem(k);
+    sessionStorage.removeItem(k);
+  });
   let currentLang = localStorage.getItem('kiro_lang') || 'zh';
   const dict = { en: null, zh: null };
   let accountsData = [];
   const selectedAccounts = new Set();
+  // Canonical Kiro model IDs offered in the Force-Model and per-key model dropdowns.
+  // Keep in sync with the model list advertised at /v1/models (handler.go buildModelInfo).
+  const KIRO_MODEL_OPTIONS = [
+    'claude-opus-4.8', 'claude-opus-4.7', 'claude-opus-4.6', 'claude-opus-4.5',
+    'claude-sonnet-4.6', 'claude-sonnet-4.5', 'claude-sonnet-4',
+    'claude-haiku-4.5'
+  ];
   let filterKeyword = '';
   let filterStatus = 'all';
   let privacyModeEnabled = true;
@@ -24,7 +33,6 @@
   let iamSession = '';
   let exportSelectedIds = new Set();
   let apiKeyExportSelectedIds = new Set();
-  let apiKeyExportIncludeSecret = false;
   let currentVersion = '';
   let testLogs = [];
   let testModalAccountId = '';
@@ -586,74 +594,49 @@
     return pending;
   }
 
-  // Fetch wrapper
+  // Fetch wrapper. Auth rides on the HttpOnly session cookie (same-origin), so no
+  // credential header is sent from JS.
   function api(path, opts) {
     opts = opts || {};
-    opts.headers = Object.assign({ 'X-Admin-Password': password }, opts.headers || {});
+    opts.credentials = 'same-origin';
+    opts.headers = Object.assign({}, opts.headers || {});
     if (opts.body && !opts.headers['Content-Type']) opts.headers['Content-Type'] = 'application/json';
     return fetch('/admin/api' + path, opts);
   }
 
   // Login
-  // The SSE log stream (EventSource) cannot send custom headers, so the admin
-  // password is mirrored into a cookie that the backend also accepts.
-  function setAdminCookie(value) {
-    document.cookie = 'admin_password=' + encodeURIComponent(value) + '; path=/; SameSite=Strict';
-  }
-  function clearAdminCookie() {
-    document.cookie = 'admin_password=; path=/; SameSite=Strict; expires=Thu, 01 Jan 1970 00:00:00 GMT';
-  }
-  function clearActivePassword() {
-    sessionStorage.removeItem('admin_password');
-    sessionStorage.removeItem('admin_login_time');
-    localStorage.removeItem('admin_password');
-    localStorage.removeItem('admin_login_time');
-    clearAdminCookie();
-    password = '';
-  }
-  function getActiveLoginTime() {
-    const storage = sessionStorage.getItem('admin_password') ? sessionStorage : localStorage;
-    return parseInt(storage.getItem('admin_login_time') || '0', 10);
-  }
-  function setActivePassword(nextPassword, remember) {
-    const now = Date.now().toString();
-    password = nextPassword;
-    setAdminCookie(nextPassword);
-    sessionStorage.setItem('admin_password', nextPassword);
-    sessionStorage.setItem('admin_login_time', now);
-    if (remember) {
-      localStorage.setItem('admin_password', nextPassword);
-      localStorage.setItem('admin_login_time', now);
-      localStorage.setItem('kiro_remember', '1');
-      localStorage.setItem('kiro_remembered_pwd', nextPassword);
-    } else {
-      localStorage.removeItem('admin_password');
-      localStorage.removeItem('admin_login_time');
-      localStorage.removeItem('kiro_remember');
-      localStorage.removeItem('kiro_remembered_pwd');
-    }
-  }
+  //
+  // The admin password is exchanged once at /admin/api/login for an opaque, expiring
+  // session token that the server stores server-side and delivers in an HttpOnly,
+  // SameSite=Strict (Secure on HTTPS) cookie. The browser never stores the password,
+  // and the cookie cannot be read by JavaScript — so an XSS can't lift a reusable
+  // credential. The SSE log stream (EventSource) authenticates with the same cookie
+  // automatically. "Remember me" controls whether the cookie persists across browser
+  // restarts (server sets Max-Age) versus lasting only for the browser session.
   async function tryAutoLogin() {
-    if (!password) return;
-    setAdminCookie(password);
-    const loginTime = getActiveLoginTime();
-    if (loginTime && Date.now() - loginTime > 72 * 3600 * 1000) {
-      clearActivePassword();
-      return;
-    }
+    // No stored credential — just probe whether the session cookie is still valid.
     try {
       const res = await api('/status');
       if (res.ok) { showMain(); loadData(); }
     } catch (e) { }
   }
   async function login() {
-    password = $('pwdField').value;
+    const pwd = $('pwdField').value;
+    const rememberEl = $('rememberPwd');
+    const remember = !!(rememberEl && rememberEl.checked);
     try {
-      const res = await api('/status');
+      const res = await api('/login', {
+        method: 'POST',
+        body: JSON.stringify({ password: pwd, remember: remember }),
+      });
       if (res.ok) {
-        const remember = $('rememberPwd');
-        setActivePassword(password, !!(remember && remember.checked));
+        // Persist only the non-secret remember preference, never the password.
+        if (remember) localStorage.setItem('kiro_remember', '1');
+        else localStorage.removeItem('kiro_remember');
+        $('pwdField').value = '';
         showMain(); loadData();
+      } else if (res.status === 429) {
+        toast(t('login.error'), 'error');
       } else {
         toast(t('login.error'), 'error');
       }
@@ -663,16 +646,14 @@
   }
   function initRememberMe() {
     const remember = $('rememberPwd');
-    const field = $('pwdField');
-    if (!remember || !field) return;
+    if (!remember) return;
+    // Restore only the checkbox state; never pre-fill the password field.
     if (localStorage.getItem('kiro_remember') === '1') {
       remember.checked = true;
-      const saved = localStorage.getItem('kiro_remembered_pwd');
-      if (saved) field.value = saved;
     }
   }
-  function logout() {
-    clearActivePassword();
+  async function logout() {
+    try { await api('/logout', { method: 'POST' }); } catch (e) { }
     location.reload();
   }
   function showMain() {
@@ -1128,23 +1109,6 @@
   function detailItem(label, value) {
     return '<div class="detail-item"><div class="detail-label">' + escapeHtml(label) + '</div><div class="detail-value">' + escapeHtml(value) + '</div></div>';
   }
-  function renderAccountProxySelect(current) {
-    const pool = window.__proxyPoolData || [];
-    const seen = new Set();
-    let options = '<option value="">' + escapeHtml(t('detail.proxyUseGlobal')) + '</option>';
-    pool.forEach(p => {
-      if (!p.url || seen.has(p.url)) return;
-      seen.add(p.url);
-      const masked = maskProxyForDisplay(p.url) || p.url;
-      const disabled = p.disabledPermanent ? ' (' + t('settings.proxyPoolDisabled') + ')' : '';
-      options += '<option value="' + escapeAttr(p.url) + '"' + (p.url === current ? ' selected' : '') + '>' + escapeHtml(masked + disabled) + '</option>';
-    });
-    if (current && !seen.has(current)) {
-      const masked = maskProxyForDisplay(current) || current;
-      options += '<option value="' + escapeAttr(current) + '" selected>' + escapeHtml(masked + ' (' + t('detail.proxyCustom') + ')') + '</option>';
-    }
-    return '<select id="proxyURLInput">' + options + '</select>';
-  }
   function showDetail(id) {
     const a = accountsData.find(x => x.id === id);
     if (!a) return;
@@ -1180,7 +1144,7 @@
       '</div>' +
 
       '<div class="detail-section"><h4>' + escapeHtml(t('detail.proxyURL')) + '</h4><div class="machine-id-row">' +
-      renderAccountProxySelect(a.proxyURL || '') +
+      '<input type="text" id="proxyURLInput" value="' + escapeAttr(a.proxyURL || '') + '" placeholder="socks5://host:port" />' +
       '<button class="btn btn-sm btn-primary" data-detail-action="saveProxyURL" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.save')) + '</button>' +
       '</div><p class="help-block">' + escapeHtml(t('detail.proxyHint')) + '</p></div>' +
 
@@ -1503,6 +1467,9 @@
     $('allowOverUsage').checked = d.allowOverUsage || false;
     $('maxPayloadBytes').value = String(d.maxPayloadBytes || 2000000);
     if ($('publicBaseURL')) $('publicBaseURL').value = d.publicBaseURL || '';
+    if ($('limitNoticeMessage')) $('limitNoticeMessage').value = d.limitNoticeMessage || '';
+    populateForceModelOptions(d.forceModel || '');
+    populateIdentityModelOptions(d.identityModel || '');
     await Promise.all([loadThinkingConfig(), loadEndpointConfig(), loadProxyConfig(), loadProxyPool(), loadPromptFilter(), loadApiKeys()]);
     refreshCustomSelects();
   }
@@ -1605,6 +1572,75 @@
       toast((e && e.message) || t('common.saveFailed'), 'error');
     }
   }
+  async function saveLimitNotice() {
+    const msg = $('limitNoticeMessage').value.trim();
+    try {
+      const res = await api('/settings', { method: 'POST', body: JSON.stringify({ limitNoticeMessage: msg }) });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok || d.success === false) throw new Error(d.error || t('common.saveFailed'));
+      toast(t('settings.limitNoticeSaved'), 'success');
+    } catch (e) {
+      toast((e && e.message) || t('common.saveFailed'), 'error');
+    }
+  }
+  // populateForceModelOptions fills the Force-Model <select>. First option ("") = off
+  // (each request keeps its own model); the rest force every request to that model.
+  function populateForceModelOptions(selected) {
+    const sel = $('forceModel');
+    if (!sel) return;
+    const opts = KIRO_MODEL_OPTIONS.slice();
+    if (selected && !opts.includes(selected)) opts.unshift(selected);
+    let html = '<option value="">' + escapeHtml(t('settings.forceModelOff')) + '</option>';
+    html += opts.map(m => '<option value="' + escapeAttr(m) + '"' + (m === selected ? ' selected' : '') + '>' + escapeHtml(m) + '</option>').join('');
+    sel.innerHTML = html;
+    sel.value = selected || '';
+  }
+  async function saveForceModel() {
+    const sel = $('forceModel');
+    const model = sel ? sel.value.trim() : '';
+    try {
+      const res = await api('/settings', { method: 'POST', body: JSON.stringify({ forceModel: model }) });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok || d.success === false) throw new Error(d.error || t('common.saveFailed'));
+      toast(t('settings.forceModelSaved'), 'success');
+    } catch (e) {
+      toast((e && e.message) || t('common.saveFailed'), 'error');
+    }
+  }
+  // populateIdentityModelOptions fills the Identity-Model <select>. First option ("") = off
+  // (assistant self-identifies from its own training); the rest inject a "You are <model>"
+  // line into the system prompt so the assistant self-reports as that model.
+  function populateIdentityModelOptions(selected) {
+    const sel = $('identityModel');
+    if (!sel) return;
+    const opts = KIRO_MODEL_OPTIONS.slice();
+    if (selected && !opts.includes(selected)) opts.unshift(selected);
+    let html = '<option value="">' + escapeHtml(t('settings.identityModelOff')) + '</option>';
+    html += opts.map(m => '<option value="' + escapeAttr(m) + '"' + (m === selected ? ' selected' : '') + '>' + escapeHtml(m) + '</option>').join('');
+    sel.innerHTML = html;
+    sel.value = selected || '';
+    updateIdentityModelWarning();
+  }
+  // Show the "please be a dev with a conscience" warning only when an identity
+  // model is actually selected (i.e. the feature is on).
+  function updateIdentityModelWarning() {
+    const sel = $('identityModel');
+    const warn = $('identityModelWarn');
+    if (!sel || !warn) return;
+    warn.classList.toggle('hidden', !sel.value.trim());
+  }
+  async function saveIdentityModel() {
+    const sel = $('identityModel');
+    const model = sel ? sel.value.trim() : '';
+    try {
+      const res = await api('/settings', { method: 'POST', body: JSON.stringify({ identityModel: model }) });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok || d.success === false) throw new Error(d.error || t('common.saveFailed'));
+      toast(t('settings.identityModelSaved'), 'success');
+    } catch (e) {
+      toast((e && e.message) || t('common.saveFailed'), 'error');
+    }
+  }
   async function importProxies() {
     const raw = $('proxyImportList').value.trim();
     if (!raw) { toast(t('proxyImport.listRequired'), 'warning'); return; }
@@ -1671,7 +1707,6 @@
     try {
       const res = await api('/proxy/pool');
       const d = await res.json();
-      window.__proxyPoolData = d.pool || [];
       renderProxyPool(d.pool || []);
     } catch (e) {
       box.innerHTML = '<p class="help-block error-text">' + escapeHtml(t('common.failed')) + '</p>';
@@ -1756,7 +1791,8 @@
       const res = await api('/settings', { method: 'POST', body: JSON.stringify({ password: np }) });
       const d = await res.json().catch(() => ({}));
       if (!res.ok || d.success === false) throw new Error(d.error || t('common.saveFailed'));
-      setActivePassword(np, localStorage.getItem('kiro_remember') === '1');
+      // The current session token stays valid after a password change (sessions are
+      // independent of the password), so no re-login is needed.
       toast(t('settings.passwordChanged'), 'success');
       $('newPassword').value = '';
     } catch (e) {
@@ -1849,6 +1885,21 @@
     const n = selectedApiKeyIds.size;
     bar.classList.toggle('hidden', n === 0);
     count.textContent = t('apiKeys.selected', n);
+    // Keep the select-all checkbox in sync: checked when every key is selected,
+    // indeterminate when only some are.
+    const cb = $('apiKeySelectAll');
+    if (cb) {
+      const total = apiKeysCache.length;
+      cb.checked = total > 0 && n === total;
+      cb.indeterminate = n > 0 && n < total;
+    }
+  }
+
+  // toggleApiKeySelectAll selects or clears every created API key at once.
+  function toggleApiKeySelectAll(checked) {
+    selectedApiKeyIds.clear();
+    if (checked) apiKeysCache.forEach(k => { if (k.id) selectedApiKeyIds.add(k.id); });
+    renderApiKeys();
   }
 
   function renderApiKeys() {
@@ -1879,6 +1930,31 @@
       const tokensLine = usageLine(t('apiKeys.tokens'), item.tokensUsed || 0, item.tokenLimit || 0);
       const creditsLine = usageLine(t('apiKeys.credits'), item.creditsUsed || 0, item.creditLimit || 0);
       const requestsLine = '<div class="text-xs muted-text">' + escapeHtml(t('apiKeys.requests')) + ': ' + escapeHtml(formatNumber(item.requestsCount || 0)) + '</div>';
+      // Lifetime grand total — survives "Reset Usage", only cleared by "Reset All".
+      const lifetimeLine = '<div class="text-xs muted-text">' + escapeHtml(t('apiKeys.lifetime')) + ': ' +
+        escapeHtml(formatNumber(item.lifetimeTokens || 0)) + ' ' + escapeHtml(t('apiKeys.tokens')) + ' · ' +
+        escapeHtml(formatNumber(item.lifetimeRequests || 0)) + ' ' + escapeHtml(t('apiKeys.requests')) + '</div>';
+      const rpmValue = item.rpmLimit && item.rpmLimit > 0 ? formatNumber(item.rpmLimit) + ' ' + t('apiKeys.rpmUnit') : t('apiKeys.unlimited');
+      const rpmLine = '<div class="text-xs muted-text">' + escapeHtml(t('apiKeys.limitRPM')) + ': ' + escapeHtml(rpmValue) + '</div>';
+      const hasAllowlist = Array.isArray(item.ipAllowlist) && item.ipAllowlist.length > 0;
+      // A non-empty allowlist takes precedence over the IP count limit, so show whichever is active.
+      const ipLine = hasAllowlist
+        ? '<div class="text-xs muted-text">' + escapeHtml(t('apiKeys.ipAllowlist')) + ': ' + escapeHtml(item.ipAllowlist.join(', ')) + '</div>'
+        : '<div class="text-xs muted-text">' + escapeHtml(t('apiKeys.limitIP')) + ': ' + escapeHtml(item.ipLimit && item.ipLimit > 0 ? formatNumber(item.ipLimit) : t('apiKeys.unlimited')) + '</div>';
+      // Bound-account line: map ids to a readable email/nickname via the account cache.
+      const boundIds = Array.isArray(item.boundAccountIds) ? item.boundAccountIds : [];
+      const acctById = {};
+      (Array.isArray(accountsData) ? accountsData : []).forEach(a => { acctById[a.id] = a; });
+      const boundNames = boundIds.map(bid => {
+        const a = acctById[bid];
+        return a ? (a.email || a.nickname || bid) : bid;
+      });
+      const boundValue = boundNames.length ? boundNames.join(', ') : t('apiKeys.boundAccountsNone');
+      const boundLine = '<div class="text-xs muted-text">' + escapeHtml(t('apiKeys.boundAccounts')) + ': ' + escapeHtml(boundValue) + '</div>';
+      // Model allowlist line: empty = the key accepts the client's requested model.
+      const modelList = Array.isArray(item.models) ? item.models.filter(Boolean) : [];
+      const modelValue = modelList.length ? modelList.join(', ') : t('apiKeys.modelDefault');
+      const modelsLine = '<div class="text-xs muted-text">' + escapeHtml(t('apiKeys.model')) + ': ' + escapeHtml(modelValue) + '</div>';
       return '<div class="card" data-apikey-id="' + id + '" style="margin-top:0.5rem;padding:0.75rem;">' +
         '<div class="flex items-center gap-2" style="flex-wrap:wrap;justify-content:space-between;">' +
           '<div class="flex items-center gap-2" style="flex-wrap:wrap;">' +
@@ -1897,6 +1973,7 @@
             '<button class="btn btn-outline btn-sm" type="button" data-apikey-action="portal" data-id="' + id + '" title="' + escapeAttr(t('apiKeys.portalLinkHint')) + '"><i class="fa-solid fa-link"></i></button>' +
             '<button class="btn btn-outline btn-sm" type="button" data-apikey-action="edit" data-id="' + id + '">' + escapeHtml(t('apiKeys.actionEdit')) + '</button>' +
             '<button class="btn btn-outline btn-sm" type="button" data-apikey-action="reset" data-id="' + id + '">' + escapeHtml(t('apiKeys.actionReset')) + '</button>' +
+            '<button class="btn btn-outline btn-sm" type="button" data-apikey-action="reset-all" data-id="' + id + '">' + escapeHtml(t('apiKeys.actionResetAll')) + '</button>' +
             '<button class="btn btn-danger btn-sm" type="button" data-apikey-action="delete" data-id="' + id + '">' + escapeHtml(t('apiKeys.actionDelete')) + '</button>' +
           '</div>' +
         '</div>' +
@@ -1904,11 +1981,129 @@
           tokensLine +
           creditsLine +
           requestsLine +
+          lifetimeLine +
+          rpmLine +
+          ipLine +
           expiryLine +
+          boundLine +
+          modelsLine +
         '</div>' +
       '</div>';
     }).join('');
     list.innerHTML = html;
+  }
+
+  // apiKeyBoundSelected is the live set of bound-account ids chosen in the modal. It
+  // persists across search-filter re-renders (a checkbox hidden by the filter must not
+  // lose its selection), so it — not the DOM — is the source of truth for what gets saved.
+  let apiKeyBoundSelected = new Set();
+
+  // initApiKeyBoundAccounts seeds the selection set from the key being edited and paints
+  // the (unfiltered) picker. Call once when opening the modal.
+  function initApiKeyBoundAccounts(selectedIds) {
+    apiKeyBoundSelected = new Set(selectedIds || []);
+    const search = $('apiKeyForm_boundSearch');
+    if (search) search.value = '';
+    renderApiKeyBoundAccounts('');
+  }
+
+  // renderBoundAccounts paints one checkbox per account into containerId, checked from
+  // selectedSet (not the DOM), filtered by the search term. Disabled/banned accounts are
+  // still listed (so an operator can bind ahead of re-enabling) but labelled. Shared by the
+  // single-key and bulk-create modals, each of which owns its own selection set.
+  function renderBoundAccounts(containerId, selectedSet, filter) {
+    const box = $(containerId);
+    if (!box) return;
+    const accts = Array.isArray(accountsData) ? accountsData : [];
+    if (!accts.length) {
+      box.innerHTML = '<div class="muted-text text-xs" style="padding:0.25rem 0;">' + escapeHtml(t('apiKeys.boundAccountsEmpty')) + '</div>';
+      return;
+    }
+    const kw = (filter || '').trim().toLowerCase();
+    const matched = accts.filter(a => {
+      if (!kw) return true;
+      return (a.email || '').toLowerCase().includes(kw) ||
+        (a.nickname || '').toLowerCase().includes(kw) ||
+        (a.id || '').toLowerCase().includes(kw);
+    });
+    if (!matched.length) {
+      box.innerHTML = '<div class="muted-text text-xs" style="padding:0.25rem 0;">' + escapeHtml(t('apiKeys.boundAccountsNoMatch')) + '</div>';
+      return;
+    }
+    box.innerHTML = matched.map(a => {
+      const id = escapeHtml(a.id);
+      const label = escapeHtml(a.email || a.nickname || a.id);
+      const off = !a.enabled || (a.banStatus && a.banStatus !== 'ACTIVE')
+        ? ' <span class="muted-text text-xs">(' + escapeHtml(t('apiKeys.disabled')) + ')</span>'
+        : '';
+      const checked = selectedSet.has(a.id) ? ' checked' : '';
+      return '<label class="flex items-center gap-2" style="padding:2px 0;">' +
+        '<input type="checkbox" class="apikey-bound-account" value="' + id + '"' + checked + ' />' +
+        '<span class="text-sm">' + label + off + '</span>' +
+        '</label>';
+    }).join('');
+  }
+
+  function renderApiKeyBoundAccounts(filter) {
+    renderBoundAccounts('apiKeyForm_boundAccounts', apiKeyBoundSelected, filter);
+  }
+
+  // onApiKeyBoundToggle keeps apiKeyBoundSelected in sync when a checkbox flips.
+  function onApiKeyBoundToggle(id, checked) {
+    if (checked) apiKeyBoundSelected.add(id);
+    else apiKeyBoundSelected.delete(id);
+  }
+
+  // selectedBoundAccountIds returns the chosen ids from the persistent set (not the DOM,
+  // which only holds the currently-filtered subset).
+  function selectedBoundAccountIds() {
+    return Array.from(apiKeyBoundSelected);
+  }
+
+  // Bulk-create modal keeps its own selection set, mirroring the single-key modal above.
+  let apiKeyBulkBoundSelected = new Set();
+
+  function initApiKeyBulkBoundAccounts(selectedIds) {
+    apiKeyBulkBoundSelected = new Set(selectedIds || []);
+    const search = $('apiKeyBulk_boundSearch');
+    if (search) search.value = '';
+    renderApiKeyBulkBoundAccounts('');
+  }
+
+  function renderApiKeyBulkBoundAccounts(filter) {
+    renderBoundAccounts('apiKeyBulk_boundAccounts', apiKeyBulkBoundSelected, filter);
+  }
+
+  // Per-key model allowlist pickers. Each modal owns a Set of ticked model ids; empty =
+  // "use the client's requested model". A ticked model passes through; a client model not
+  // in the set is remapped upstream to the first ticked entry (see applyModelOverride).
+  let apiKeyModelsSelected = new Set();
+  let apiKeyBulkModelsSelected = new Set();
+
+  // renderModelPicker paints one checkbox per canonical Kiro model into containerId,
+  // checked from selectedSet. Any already-selected model that isn't canonical is listed
+  // first so an existing value is never silently dropped.
+  function renderModelPicker(containerId, selectedSet) {
+    const box = $(containerId);
+    if (!box) return;
+    const opts = KIRO_MODEL_OPTIONS.slice();
+    selectedSet.forEach(m => { if (m && !opts.includes(m)) opts.unshift(m); });
+    box.innerHTML = opts.map(m => {
+      const val = escapeAttr(m);
+      const checked = selectedSet.has(m) ? ' checked' : '';
+      return '<label class="flex items-center gap-2" style="padding:2px 0;">' +
+        '<input type="checkbox" class="apikey-model-option" value="' + val + '"' + checked + ' />' +
+        '<span class="text-sm">' + escapeHtml(m) + '</span>' +
+        '</label>';
+    }).join('');
+  }
+
+  // initApiKeyModels seeds a picker's selection set from the key being edited and paints it.
+  function initApiKeyModels(containerId, selectedSet, selectedList) {
+    const set = new Set(Array.isArray(selectedList) ? selectedList.filter(Boolean) : []);
+    if (containerId === 'apiKeyForm_models') apiKeyModelsSelected = set;
+    else apiKeyBulkModelsSelected = set;
+    renderModelPicker(containerId, set);
   }
 
   function openApiKeyModal(entry) {
@@ -1917,17 +2112,25 @@
     titleEl.textContent = t(apiKeyEditingId ? 'apiKeys.modalTitleEdit' : 'apiKeys.modalTitleCreate');
     $('apiKeyForm_name').value = entry ? (entry.name || '') : '';
     const keyEl = $('apiKeyForm_key');
+    // Key is always editable. On edit we leave it blank and show the current masked value
+    // as a placeholder — typing a new value changes the key, leaving it blank keeps it.
+    keyEl.readOnly = false;
+    keyEl.value = '';
     if (apiKeyEditingId) {
-      keyEl.value = entry.keyMasked || '';
-      keyEl.readOnly = true;
+      keyEl.placeholder = t('apiKeys.formKeyEditPlaceholder', entry.keyMasked || '');
     } else {
-      keyEl.value = '';
-      keyEl.readOnly = false;
+      keyEl.placeholder = t('apiKeys.formKeyPlaceholder');
     }
     $('apiKeyForm_enabled').checked = entry ? !!entry.enabled : true;
     $('apiKeyForm_tokenLimit').value = entry ? String(entry.tokenLimit || 0) : '0';
     $('apiKeyForm_creditLimit').value = entry ? String(entry.creditLimit || 0) : '0';
     $('apiKeyForm_expiresAt').value = (entry && entry.expiresAt) ? unixToLocalInput(normalizeUnixSeconds(entry.expiresAt)) : '';
+    if ($('apiKeyForm_rpmLimit')) $('apiKeyForm_rpmLimit').value = entry ? String(entry.rpmLimit || 0) : '0';
+    if ($('apiKeyForm_ipLimit')) $('apiKeyForm_ipLimit').value = entry ? String(entry.ipLimit || 0) : '0';
+    if ($('apiKeyForm_ipAllowlist')) $('apiKeyForm_ipAllowlist').value = (entry && Array.isArray(entry.ipAllowlist)) ? entry.ipAllowlist.join('\n') : '';
+    if ($('apiKeyForm_tpmLimit')) $('apiKeyForm_tpmLimit').value = entry ? String(entry.tpmLimit || 0) : '0';
+    initApiKeyModels('apiKeyForm_models', apiKeyModelsSelected, entry && Array.isArray(entry.models) ? entry.models : []);
+    initApiKeyBoundAccounts(entry && Array.isArray(entry.boundAccountIds) ? entry.boundAccountIds : []);
     apiKeyModalSubmitting = false;
     $('apiKeyModalSaveBtn').disabled = false;
     openDialog('apiKeyModal');
@@ -1947,6 +2150,12 @@
     $('apiKeyBulk_tokenLimit').value = '0';
     $('apiKeyBulk_creditLimit').value = '0';
     $('apiKeyBulk_expiresAt').value = '';
+    if ($('apiKeyBulk_rpmLimit')) $('apiKeyBulk_rpmLimit').value = '0';
+    if ($('apiKeyBulk_ipLimit')) $('apiKeyBulk_ipLimit').value = '0';
+    if ($('apiKeyBulk_ipAllowlist')) $('apiKeyBulk_ipAllowlist').value = '';
+    if ($('apiKeyBulk_tpmLimit')) $('apiKeyBulk_tpmLimit').value = '0';
+    initApiKeyModels('apiKeyBulk_models', apiKeyBulkModelsSelected, []);
+    initApiKeyBulkBoundAccounts([]);
     $('apiKeyBulkSaveBtn').disabled = false;
     openDialog('apiKeyBulkModal');
   }
@@ -1964,13 +2173,25 @@
       if (isNaN(count) || count < 1 || count > 100) throw new Error(t('apiKeys.bulkCountError'));
       const tokenLimit = parseInt($('apiKeyBulk_tokenLimit').value, 10);
       const creditLimit = parseFloat($('apiKeyBulk_creditLimit').value);
+      const rpmLimit = parseInt($('apiKeyBulk_rpmLimit') ? $('apiKeyBulk_rpmLimit').value : '0', 10);
+      const ipLimit = parseInt($('apiKeyBulk_ipLimit') ? $('apiKeyBulk_ipLimit').value : '0', 10);
+      const tpmLimit = parseInt($('apiKeyBulk_tpmLimit') ? $('apiKeyBulk_tpmLimit').value : '0', 10);
+      const ipAllowlist = $('apiKeyBulk_ipAllowlist')
+        ? $('apiKeyBulk_ipAllowlist').value.split(/[\r\n,]+/).map(s => s.trim()).filter(Boolean)
+        : [];
       const payload = {
         count,
         namePrefix: $('apiKeyBulk_namePrefix').value.trim(),
         enabled: $('apiKeyBulk_enabled').checked,
         tokenLimit: isNaN(tokenLimit) || tokenLimit < 0 ? 0 : tokenLimit,
         creditLimit: isNaN(creditLimit) || creditLimit < 0 ? 0 : creditLimit,
-        expiresAt: localInputToUnix($('apiKeyBulk_expiresAt').value)
+        expiresAt: localInputToUnix($('apiKeyBulk_expiresAt').value),
+        rpmLimit: isNaN(rpmLimit) || rpmLimit < 0 ? 0 : rpmLimit,
+        ipLimit: isNaN(ipLimit) || ipLimit < 0 ? 0 : ipLimit,
+        ipAllowlist: ipAllowlist,
+        tpmLimit: isNaN(tpmLimit) || tpmLimit < 0 ? 0 : tpmLimit,
+        boundAccountIds: Array.from(apiKeyBulkBoundSelected),
+        models: Array.from(apiKeyBulkModelsSelected)
       };
       const res = await api('/api-keys/bulk', { method: 'POST', body: JSON.stringify(payload) });
       const d = await res.json().catch(() => ({}));
@@ -2017,15 +2238,30 @@
       const tokenLimit = parseInt($('apiKeyForm_tokenLimit').value, 10);
       const creditLimit = parseFloat($('apiKeyForm_creditLimit').value);
       const expiresAt = localInputToUnix($('apiKeyForm_expiresAt').value);
+      const rpmLimit = parseInt($('apiKeyForm_rpmLimit') ? $('apiKeyForm_rpmLimit').value : '0', 10);
+      const ipLimit = parseInt($('apiKeyForm_ipLimit') ? $('apiKeyForm_ipLimit').value : '0', 10);
+      const tpmLimit = parseInt($('apiKeyForm_tpmLimit') ? $('apiKeyForm_tpmLimit').value : '0', 10);
+      const ipAllowlist = $('apiKeyForm_ipAllowlist')
+        ? $('apiKeyForm_ipAllowlist').value.split(/[\r\n,]+/).map(s => s.trim()).filter(Boolean)
+        : [];
       const payload = {
         name: name,
         enabled: enabled,
         tokenLimit: isNaN(tokenLimit) || tokenLimit < 0 ? 0 : tokenLimit,
         creditLimit: isNaN(creditLimit) || creditLimit < 0 ? 0 : creditLimit,
-        expiresAt: expiresAt
+        expiresAt: expiresAt,
+        rpmLimit: isNaN(rpmLimit) || rpmLimit < 0 ? 0 : rpmLimit,
+        ipLimit: isNaN(ipLimit) || ipLimit < 0 ? 0 : ipLimit,
+        ipAllowlist: ipAllowlist,
+        tpmLimit: isNaN(tpmLimit) || tpmLimit < 0 ? 0 : tpmLimit,
+        boundAccountIds: selectedBoundAccountIds(),
+        models: Array.from(apiKeyModelsSelected)
       };
+      const keyVal = $('apiKeyForm_key').value.trim();
       let res, d;
       if (apiKeyEditingId) {
+        // Only send the key when the operator typed a new value; blank keeps the current one.
+        if (keyVal) payload.key = keyVal;
         res = await api('/api-keys/' + encodeURIComponent(apiKeyEditingId), { method: 'PUT', body: JSON.stringify(payload) });
         d = await res.json().catch(() => ({}));
         if (!res.ok || d.success === false) throw new Error(d.error || t('common.saveFailed'));
@@ -2033,7 +2269,6 @@
         closeApiKeyModal();
         await loadApiKeys();
       } else {
-        const keyVal = $('apiKeyForm_key').value.trim();
         if (keyVal) payload.key = keyVal;
         res = await api('/api-keys', { method: 'POST', body: JSON.stringify(payload) });
         d = await res.json().catch(() => ({}));
@@ -2099,6 +2334,25 @@
     }
   }
 
+  // resetAllApiKeyUsageEntry wipes BOTH current-period and lifetime counters (destructive).
+  async function resetAllApiKeyUsageEntry(id, name) {
+    const ok = await confirmAction(t('apiKeys.confirmResetAll', name || t('apiKeys.unnamed')), {
+      title: t('apiKeys.actionResetAll'),
+      confirmText: t('apiKeys.actionResetAll'),
+      variant: 'danger'
+    });
+    if (!ok) return;
+    try {
+      const res = await api('/api-keys/' + encodeURIComponent(id) + '/reset-all', { method: 'POST' });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok || d.success === false) throw new Error(d.error || t('common.failed'));
+      toast(t('apiKeys.usageReset'), 'success');
+      await loadApiKeys();
+    } catch (e) {
+      toast((e && e.message) || t('common.failed'), 'error');
+    }
+  }
+
   // Copies the self-service portal URL so the seller can hand it to a customer
   // alongside their key. Prefers the configured public base URL, else this origin.
   async function copyPortalLink() {
@@ -2150,6 +2404,7 @@
         if (action === 'edit') openApiKeyModal(entry);
         else if (action === 'delete') deleteApiKeyEntry(id, name);
         else if (action === 'reset') resetApiKeyUsageEntry(id, name);
+        else if (action === 'reset-all') resetAllApiKeyUsageEntry(id, name);
         else if (action === 'portal') copyPortalLink();
       });
       list.addEventListener('change', e => {
@@ -2172,27 +2427,44 @@
     }
     const exportBtn = $('exportApiKeysBtn');
     if (exportBtn) exportBtn.addEventListener('click', showApiKeyExportModal);
-    const importBtn = $('importApiKeysBtn');
-    if (importBtn) importBtn.addEventListener('click', showApiKeyImportModal);
-    const importCancelBtn = $('apiKeyImportCancelBtn');
-    if (importCancelBtn) importCancelBtn.addEventListener('click', closeApiKeyImportModal);
-    const importCloseBtn = $('apiKeyImportModalClose');
-    if (importCloseBtn) importCloseBtn.addEventListener('click', closeApiKeyImportModal);
-    const importSubmitBtn = $('apiKeyImportSubmitBtn');
-    if (importSubmitBtn) importSubmitBtn.addEventListener('click', submitApiKeyImport);
-    const importFile = $('apiKeyImportFile');
-    if (importFile) importFile.addEventListener('change', readApiKeyImportFile);
-    bindDialogBackdropClose('apiKeyImportModal', closeApiKeyImportModal);
     const addBtn = $('addApiKeyBtn');
     if (addBtn) addBtn.addEventListener('click', () => openApiKeyModal(null));
     const bulkAddBtn = $('bulkAddApiKeyBtn');
     if (bulkAddBtn) bulkAddBtn.addEventListener('click', openApiKeyBulkModal);
     const bulkDeleteBtn = $('bulkDeleteApiKeyBtn');
     if (bulkDeleteBtn) bulkDeleteBtn.addEventListener('click', bulkDeleteApiKeys);
+    const selectAllApiKeys = $('apiKeySelectAll');
+    if (selectAllApiKeys) selectAllApiKeys.addEventListener('change', e => toggleApiKeySelectAll(e.target.checked));
     const saveBtn = $('apiKeyModalSaveBtn');
     if (saveBtn) saveBtn.addEventListener('click', submitApiKeyModal);
     const cancelBtn = $('apiKeyModalCancelBtn');
     if (cancelBtn) cancelBtn.addEventListener('click', closeApiKeyModal);
+    // Bound-account picker: live search, select-all/clear, and keep the selection set in sync.
+    const boundSearch = $('apiKeyForm_boundSearch');
+    if (boundSearch) boundSearch.addEventListener('input', () => renderApiKeyBoundAccounts(boundSearch.value));
+    const boundBox = $('apiKeyForm_boundAccounts');
+    if (boundBox) boundBox.addEventListener('change', e => {
+      const cb = e.target.closest('input.apikey-bound-account');
+      if (cb) onApiKeyBoundToggle(cb.value, cb.checked);
+    });
+    const modelBox = $('apiKeyForm_models');
+    if (modelBox) modelBox.addEventListener('change', e => {
+      const cb = e.target.closest('input.apikey-model-option');
+      if (cb) {
+        if (cb.checked) apiKeyModelsSelected.add(cb.value);
+        else apiKeyModelsSelected.delete(cb.value);
+      }
+    });
+    const boundSelectAll = $('apiKeyForm_boundSelectAll');
+    if (boundSelectAll) boundSelectAll.addEventListener('click', () => {
+      (Array.isArray(accountsData) ? accountsData : []).forEach(a => apiKeyBoundSelected.add(a.id));
+      renderApiKeyBoundAccounts(boundSearch ? boundSearch.value : '');
+    });
+    const boundClear = $('apiKeyForm_boundClear');
+    if (boundClear) boundClear.addEventListener('click', () => {
+      apiKeyBoundSelected.clear();
+      renderApiKeyBoundAccounts(boundSearch ? boundSearch.value : '');
+    });
     const closeBtn = $('apiKeyModalClose');
     if (closeBtn) closeBtn.addEventListener('click', closeApiKeyModal);
     const showCloseBtn = $('apiKeyShowCloseBtn');
@@ -2207,6 +2479,35 @@
     if (bulkCancelBtn) bulkCancelBtn.addEventListener('click', closeApiKeyBulkModal);
     const bulkCloseBtn = $('apiKeyBulkModalClose');
     if (bulkCloseBtn) bulkCloseBtn.addEventListener('click', closeApiKeyBulkModal);
+    // Bulk bound-account picker: mirrors the single-key picker, backed by its own selection set.
+    const bulkBoundSearch = $('apiKeyBulk_boundSearch');
+    if (bulkBoundSearch) bulkBoundSearch.addEventListener('input', () => renderApiKeyBulkBoundAccounts(bulkBoundSearch.value));
+    const bulkBoundBox = $('apiKeyBulk_boundAccounts');
+    if (bulkBoundBox) bulkBoundBox.addEventListener('change', e => {
+      const cb = e.target.closest('input.apikey-bound-account');
+      if (cb) {
+        if (cb.checked) apiKeyBulkBoundSelected.add(cb.value);
+        else apiKeyBulkBoundSelected.delete(cb.value);
+      }
+    });
+    const bulkModelBox = $('apiKeyBulk_models');
+    if (bulkModelBox) bulkModelBox.addEventListener('change', e => {
+      const cb = e.target.closest('input.apikey-model-option');
+      if (cb) {
+        if (cb.checked) apiKeyBulkModelsSelected.add(cb.value);
+        else apiKeyBulkModelsSelected.delete(cb.value);
+      }
+    });
+    const bulkBoundSelectAll = $('apiKeyBulk_boundSelectAll');
+    if (bulkBoundSelectAll) bulkBoundSelectAll.addEventListener('click', () => {
+      (Array.isArray(accountsData) ? accountsData : []).forEach(a => apiKeyBulkBoundSelected.add(a.id));
+      renderApiKeyBulkBoundAccounts(bulkBoundSearch ? bulkBoundSearch.value : '');
+    });
+    const bulkBoundClear = $('apiKeyBulk_boundClear');
+    if (bulkBoundClear) bulkBoundClear.addEventListener('click', () => {
+      apiKeyBulkBoundSelected.clear();
+      renderApiKeyBulkBoundAccounts(bulkBoundSearch ? bulkBoundSearch.value : '');
+    });
     bindDialogBackdropClose('apiKeyModal', closeApiKeyModal);
     bindDialogBackdropClose('apiKeyBulkModal', closeApiKeyBulkModal);
     bindDialogBackdropClose('apiKeyShowModal', closeShowApiKeyModal);
@@ -2932,7 +3233,7 @@
     const rows = (d.results || []).map(r => {
       let status, cls;
       if (r.skipped) { status = '⊘ ' + t('apikeyBatch.skipped'); cls = 'warning-text'; }
-      else if (r.error && !r.imported) { status = '✗ ' + r.error; cls = 'error-text'; }
+      else if (r.error && !r.imported) { status = '✗ ' + escapeHtml(r.error); cls = 'error-text'; }
       else if (r.imported) {
         const credit = r.infoOk
           ? (formatCredit(r.usageCurrent) + ' / ' + formatCredit(r.usageLimit))
@@ -3161,11 +3462,10 @@
     URL.revokeObjectURL(url);
   }
 
-  // API key export modal. Masked by default; opt-in secret export is re-importable.
+  // API key usage export modal (masked report, not re-importable)
   function showApiKeyExportModal() {
     if (!apiKeysCache.length) return toastWarning(t('apiKeys.export.empty'));
     apiKeyExportSelectedIds = new Set(apiKeysCache.map(k => k.id));
-    apiKeyExportIncludeSecret = false;
     renderApiKeyExportModal();
     openDialog('exportModal');
   }
@@ -3191,11 +3491,6 @@
           '</label>';
       }).join('') +
       '</div>' +
-      '<label class="flex items-center gap-2 mb-3 cursor-pointer select-none">' +
-      '<input type="checkbox" id="apiKeyExportIncludeSecret" ' + (apiKeyExportIncludeSecret ? 'checked' : '') + ' />' +
-      '<span class="text-sm">' + escapeHtml(t('apiKeys.export.includeSecret')) + '</span>' +
-      '</label>' +
-      '<p class="help-block" id="apiKeyExportSecretHint" style="' + (apiKeyExportIncludeSecret ? '' : 'display:none;') + '">' + escapeHtml(t('apiKeys.export.includeSecretHint')) + '</p>' +
       '<div id="apiKeyExportJsonPreview" class="hidden mb-3"><textarea id="apiKeyExportJsonText" readonly class="font-mono"></textarea></div>' +
       '<div class="modal-footer">' +
       '<button class="btn btn-secondary" id="apiKeyExportCloseBtn" type="button">' + escapeHtml(t('common.cancel')) + '</button>' +
@@ -3208,10 +3503,6 @@
       if (apiKeyExportSelectedIds.size === apiKeysCache.length) apiKeyExportSelectedIds.clear();
       else apiKeyExportSelectedIds = new Set(apiKeysCache.map(k => k.id));
       renderApiKeyExportModal();
-    });
-    $('apiKeyExportIncludeSecret').addEventListener('change', e => {
-      apiKeyExportIncludeSecret = e.target.checked;
-      $('apiKeyExportSecretHint').style.display = e.target.checked ? '' : 'none';
     });
     $('apiKeyExportCloseBtn').addEventListener('click', () => closeDialog('exportModal'));
     $('apiKeyExportShowJsonBtn').addEventListener('click', apiKeyExportShowJson);
@@ -3227,7 +3518,7 @@
   }
   async function getApiKeyExportData() {
     if (apiKeyExportSelectedIds.size === 0) { toastWarning(t('export.noSelection')); return null; }
-    const res = await api('/api-keys/export', { method: 'POST', body: JSON.stringify({ ids: Array.from(apiKeyExportSelectedIds), includeSecret: apiKeyExportIncludeSecret }) });
+    const res = await api('/api-keys/export', { method: 'POST', body: JSON.stringify({ ids: Array.from(apiKeyExportSelectedIds) }) });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       toastError(t('common.failed') + ': ' + (err.error || t('common.unknownError')));
@@ -3290,50 +3581,6 @@
     a.download = 'kiro-apikeys-' + new Date().toISOString().slice(0, 10) + '.csv';
     a.click();
     URL.revokeObjectURL(url);
-  }
-
-  // API key import (restore from an export produced with "include key value")
-  function showApiKeyImportModal() {
-    $('apiKeyImportText').value = '';
-    $('apiKeyImportFile').value = '';
-    openDialog('apiKeyImportModal');
-  }
-  function closeApiKeyImportModal() { closeDialog('apiKeyImportModal'); }
-  function readApiKeyImportFile(e) {
-    const file = e.target.files && e.target.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => { $('apiKeyImportText').value = String(reader.result || ''); };
-    reader.onerror = () => toastError(t('common.failed'));
-    reader.readAsText(file);
-  }
-  async function submitApiKeyImport() {
-    const raw = $('apiKeyImportText').value.trim();
-    if (!raw) { toastWarning(t('apiKeys.import.empty')); return; }
-    let payload;
-    try {
-      payload = JSON.parse(raw);
-    } catch {
-      toastError(t('apiKeys.import.parseError'));
-      return;
-    }
-    const btn = $('apiKeyImportSubmitBtn');
-    btn.disabled = true;
-    try {
-      const res = await api('/api-keys/import', { method: 'POST', body: JSON.stringify(payload) });
-      const d = await res.json();
-      if (!res.ok || !d.success) {
-        toastError(t('common.failed') + ': ' + (d.error || t('common.unknownError')));
-        return;
-      }
-      closeApiKeyImportModal();
-      toastPrimary(t('apiKeys.import.summary', d.imported || 0, d.skipped || 0, d.total || 0), { duration: 5200 });
-      loadApiKeys();
-    } catch (e) {
-      toastError((e && e.message) || t('common.failed'));
-    } finally {
-      btn.disabled = false;
-    }
   }
 
   // Version and update
@@ -3552,7 +3799,8 @@
       if (d && d.level) $('consoleLevel').value = d.level;
       refreshCustomSelects($('tabConsole'));
     }).catch(() => { });
-    // EventSource authenticates via the admin_password cookie (no headers).
+    // EventSource authenticates via the HttpOnly admin_session cookie (sent
+    // automatically for same-origin requests; EventSource cannot set headers).
     const src = new EventSource('/admin/api/logs/stream');
     consoleSource = src;
     src.onopen = () => consoleSetStatus('connected');
@@ -3857,6 +4105,13 @@
     stopTabPolling();
     tabPollTimer = setInterval(fn, TAB_POLL_MS);
   }
+  // refreshApiKeysIfIdle silently reloads the API-key list for the live-updating card
+  // stats, but skips while any modal is open so it can't clobber an in-progress edit.
+  function refreshApiKeysIfIdle() {
+    if (document.body.classList.contains('modal-open')) return;
+    loadApiKeys();
+  }
+
   function switchTab(tab) {
     qsa('.tab').forEach(el => el.classList.toggle('active', el.dataset.tab === tab));
     qsa('.tab-content').forEach(c => c.classList.add('hidden'));
@@ -3865,6 +4120,7 @@
     else closeConsole();
     stopTabPolling();
     if (tab === 'apilog') { populateApiLogKeyFilter(); loadApiLog(); startTabPolling(loadApiLog); }
+    else if (tab === 'settings') { startTabPolling(refreshApiKeysIfIdle); }
   }
 
   // Event wiring
@@ -3989,6 +4245,14 @@
     $('saveProxyBtn').addEventListener('click', saveProxyConfig);
     const savePbu = $('savePublicBaseURLBtn');
     if (savePbu) savePbu.addEventListener('click', savePublicBaseURL);
+    const saveLn = $('saveLimitNoticeBtn');
+    if (saveLn) saveLn.addEventListener('click', saveLimitNotice);
+    const saveFm = $('saveForceModelBtn');
+    if (saveFm) saveFm.addEventListener('click', saveForceModel);
+    const saveIm = $('saveIdentityModelBtn');
+    if (saveIm) saveIm.addEventListener('click', saveIdentityModel);
+    const idSel = $('identityModel');
+    if (idSel) idSel.addEventListener('change', updateIdentityModelWarning);
     $('proxyImportBtn').addEventListener('click', importProxies);
     $('proxyPoolList').addEventListener('click', e => {
       const btn = e.target.closest('button[data-pool-action]');
@@ -4105,7 +4369,7 @@
     const yr = $('footerYear');
     if (yr) yr.textContent = new Date().getFullYear();
     wireEvents();
-    if (password) tryAutoLogin();
+    tryAutoLogin();
     setInterval(() => {
       if (!$('mainPage').classList.contains('hidden')) loadStats();
     }, 10000);
