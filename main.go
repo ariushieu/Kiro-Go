@@ -26,6 +26,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -55,6 +56,15 @@ func main() {
 		config.SetPassword(envPassword)
 	}
 
+	// 环境变量覆盖管理面板路径（充当共享秘密，永不写入 config.json）。
+	// 设置后，旧的 /admin 前缀与任何未知路由一样返回 404，扫描器无法定位面板。
+	if envAdminPath := os.Getenv("ADMIN_PATH"); envAdminPath != "" {
+		if err := validateAdminPath(envAdminPath); err != nil {
+			log.Fatalf("Invalid ADMIN_PATH %q: %v", envAdminPath, err)
+		}
+		config.SetAdminPath(envAdminPath)
+	}
+
 	// Security guard: refuse to boot a publicly-reachable instance that still uses the
 	// built-in default admin password. A public VPS that forgets to set ADMIN_PASSWORD
 	// would otherwise expose full admin access (account tokens, key creation) to anyone.
@@ -73,7 +83,7 @@ func main() {
 	// 启动服务器
 	addr := fmt.Sprintf("%s:%d", config.GetHost(), config.GetPort())
 	logger.Infof("Kiro-Go starting on http://%s (log level: %s)", addr, logger.LevelName(logger.GetLevel()))
-	logger.Infof("Admin panel: http://%s/admin", addr)
+	logger.Infof("Admin panel: http://%s%s", addr, config.GetAdminPath())
 	logger.Infof("Claude API: http://%s/v1/messages", addr)
 	logger.Infof("OpenAI API: http://%s/v1/chat/completions", addr)
 
@@ -119,6 +129,28 @@ func main() {
 		logger.Warnf("Graceful shutdown timed out: %v", err)
 	}
 	logger.Infof("Shutdown complete")
+}
+
+// validateAdminPath rejects ADMIN_PATH values whose first segment collides with an
+// existing public route — a colliding prefix would shadow API endpoints (e.g.
+// ADMIN_PATH=/v1 would swallow /v1/messages). Normalization (leading/trailing
+// slashes) is handled by config.SetAdminPath; this only guards against collisions
+// and unusable values.
+func validateAdminPath(path string) error {
+	trimmed := strings.Trim(strings.TrimSpace(path), "/")
+	if trimmed == "" {
+		return fmt.Errorf("path must contain at least one segment, e.g. /my-panel")
+	}
+	first := strings.ToLower(strings.SplitN(trimmed, "/", 2)[0])
+	reserved := map[string]bool{
+		"v1": true, "messages": true, "chat": true, "responses": true,
+		"models": true, "key": true, "anthropic": true, "api": true,
+		"health": true, "check": true, "usage": true, "assets": true,
+	}
+	if reserved[first] {
+		return fmt.Errorf("first segment %q collides with a public API route", first)
+	}
+	return nil
 }
 
 // isLoopbackHost reports whether the configured bind host is loopback-only, in which

@@ -5,17 +5,17 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>API Key — Kiro-Go</title>
-  <link rel="icon" type="image/x-icon" href="/admin/favicon.ico" />
-  <link rel="stylesheet" href="/admin/vendor/fontawesome/css/all.min.css" />
-  <link rel="stylesheet" href="/admin/styles.css" id="__cssAsset" />
-  <link rel="stylesheet" href="/admin/toast.css" id="__toastCss" />
+  <link rel="icon" type="image/x-icon" href="/assets/favicon.ico" />
+  <link rel="stylesheet" href="/assets/vendor/fontawesome/css/all.min.css" />
+  <link rel="stylesheet" href="/assets/styles.css" id="__cssAsset" />
+  <link rel="stylesheet" href="/assets/toast.css" id="__toastCss" />
   <script>
     (function () {
       var v = Date.now();
       var css = document.getElementById('__cssAsset');
-      if (css) css.href = '/admin/styles.css?v=' + v;
+      if (css) css.href = '/assets/styles.css?v=' + v;
       var tcss = document.getElementById('__toastCss');
-      if (tcss) tcss.href = '/admin/toast.css?v=' + v;
+      if (tcss) tcss.href = '/assets/toast.css?v=' + v;
       // Resolve theme before first paint to avoid a flash.
       try {
         var pref = localStorage.getItem('kiro_theme') || 'system';

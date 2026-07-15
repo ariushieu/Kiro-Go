@@ -123,6 +123,7 @@ Configure in Settings → Outbound Proxy. Supports SOCKS5 and HTTP. This fork ad
 |----------|-------------|---------|
 | `CONFIG_PATH` | Config file path | `data/config.json` |
 | `ADMIN_PASSWORD` | Admin panel password (overrides config at startup) | - |
+| `ADMIN_PATH` | URL prefix for the admin panel & admin API (e.g. `/panel-x7k9`). Acts as a shared secret: when set, the old `/admin` returns a plain 404 like any unknown route. Never persisted to config. | `/admin` |
 | `LOG_LEVEL` | `debug` / `info` / `warn` / `error` | `info` |
 | `LOOPBACK_HOST` | Host to bind the SSO loopback server. **Set to `0.0.0.0` in Docker.** | `127.0.0.1` |
 | `KIRO_MAX_BODY_BYTES` | Max request body size (`0` = disable) | `10485760` (10 MiB) |

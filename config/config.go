@@ -424,7 +424,16 @@ var (
 	// secret to config.json in cleartext (L9). When set, it takes priority over the
 	// stored cfg.Password. Guarded by cfgLock.
 	passwordOverride string
+	// adminPathOverride holds the ADMIN_PATH env override (the URL prefix the admin
+	// panel + admin API are served under). Like passwordOverride it is deliberately
+	// NOT persisted: the whole point of a custom path is that it acts as a shared
+	// secret, so it must never be written to config.json. Empty means the default
+	// DefaultAdminPath. Guarded by cfgLock.
+	adminPathOverride string
 )
+
+// DefaultAdminPath is the admin URL prefix used when no ADMIN_PATH override is set.
+const DefaultAdminPath = "/admin"
 
 // Init initializes the configuration system with the specified file path.
 // If the file doesn't exist, a default configuration is created.
@@ -637,6 +646,31 @@ func SetPassword(password string) {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
 	passwordOverride = password
+}
+
+// SetAdminPath records the ADMIN_PATH env override (see adminPathOverride). The
+// value is normalized to "/prefix" form: leading slash enforced, trailing slashes
+// stripped. An empty value clears the override (back to DefaultAdminPath).
+func SetAdminPath(path string) {
+	path = strings.Trim(strings.TrimSpace(path), "/")
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	if path == "" {
+		adminPathOverride = ""
+		return
+	}
+	adminPathOverride = "/" + path
+}
+
+// GetAdminPath returns the URL prefix the admin panel and admin API are served
+// under, without a trailing slash (e.g. "/admin" or "/my-secret-panel").
+func GetAdminPath() string {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if adminPathOverride != "" {
+		return adminPathOverride
+	}
+	return DefaultAdminPath
 }
 
 // GetConfigDir returns the directory containing the config JSON file.

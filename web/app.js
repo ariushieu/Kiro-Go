@@ -115,7 +115,7 @@
   async function loadLocale(lang) {
     if (dict[lang]) return dict[lang];
     try {
-      const res = await fetch('/admin/locales/' + lang + '.json?v=' + Date.now(), { cache: 'no-store' });
+      const res = await fetch('locales/' + lang + '.json?v=' + Date.now(), { cache: 'no-store' });
       dict[lang] = await res.json();
     } catch (e) {
       dict[lang] = {};
@@ -601,12 +601,14 @@
     opts.credentials = 'same-origin';
     opts.headers = Object.assign({}, opts.headers || {});
     if (opts.body && !opts.headers['Content-Type']) opts.headers['Content-Type'] = 'application/json';
-    return fetch('/admin/api' + path, opts);
+    // Relative to the page URL (<adminPath>/), so the panel works under any
+    // ADMIN_PATH prefix without knowing it.
+    return fetch('api' + path, opts);
   }
 
   // Login
   //
-  // The admin password is exchanged once at /admin/api/login for an opaque, expiring
+  // The admin password is exchanged once at <adminPath>/api/login for an opaque, expiring
   // session token that the server stores server-side and delivers in an HttpOnly,
   // SameSite=Strict (Secure on HTTPS) cookie. The browser never stores the password,
   // and the cookie cannot be read by JavaScript — so an XSS can't lift a reusable
@@ -3801,7 +3803,7 @@
     }).catch(() => { });
     // EventSource authenticates via the HttpOnly admin_session cookie (sent
     // automatically for same-origin requests; EventSource cannot set headers).
-    const src = new EventSource('/admin/api/logs/stream');
+    const src = new EventSource('api/logs/stream');
     consoleSource = src;
     src.onopen = () => consoleSetStatus('connected');
     src.onmessage = ev => {

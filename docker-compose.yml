@@ -13,4 +13,9 @@ services:
     environment:
       - CONFIG_PATH=/app/data/config.json
       - LOOPBACK_HOST=0.0.0.0
+      # Các biến dưới đây nạp từ file .env cạnh docker-compose.yml (compose tự đọc).
+      # Xem .env.example — copy thành .env rồi điền giá trị. Để trống = dùng mặc định.
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+      - ADMIN_PATH=${ADMIN_PATH:-}
+      - LOG_LEVEL=${LOG_LEVEL:-}
     restart: unless-stopped

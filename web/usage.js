@@ -1,6 +1,6 @@
 // Self-service usage dashboard. Fetches per-key usage from POST /usage using the key
 // as a Bearer token (never in the URL, so it doesn't leak via referrer/logs).
-// i18n: shares localStorage key "kiro_lang" and /admin/locales/*.json with the admin
+// i18n: shares localStorage key "kiro_lang" and /assets/locales/*.json with the admin
 // app, so switching language here stays in sync with the admin panel.
 
 (function () {
@@ -29,7 +29,7 @@
   }
 
   function loadLocale(lang) {
-    return fetch("/admin/locales/" + lang + ".json?v=" + Date.now(), { cache: "no-store" })
+    return fetch("/assets/locales/" + lang + ".json?v=" + Date.now(), { cache: "no-store" })
       .then(function (r) { return r.json(); })
       .then(function (j) { dict[lang] = j; })
       .catch(function () { dict[lang] = {}; });

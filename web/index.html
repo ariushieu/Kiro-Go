@@ -5,19 +5,19 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Kiro-Go</title>
-  <link rel="icon" type="image/x-icon" href="/admin/favicon.ico" />
-  <script src="/admin/vendor/tailwindcss-browser/index.global.js"></script>
-  <link rel="stylesheet" href="/admin/vendor/fontawesome/css/all.min.css" />
-  <link rel="stylesheet" href="/admin/styles.css" id="__cssAsset" />
-  <link rel="stylesheet" href="/admin/toast.css" id="__toastCss" />
+  <link rel="icon" type="image/x-icon" href="favicon.ico" />
+  <script src="vendor/tailwindcss-browser/index.global.js"></script>
+  <link rel="stylesheet" href="vendor/fontawesome/css/all.min.css" />
+  <link rel="stylesheet" href="styles.css" id="__cssAsset" />
+  <link rel="stylesheet" href="toast.css" id="__toastCss" />
   <script>
     (function () {
       var v = Date.now();
       window.__v = v;
       var css = document.getElementById('__cssAsset');
-      if (css) css.href = '/admin/styles.css?v=' + v;
+      if (css) css.href = 'styles.css?v=' + v;
       var tcss = document.getElementById('__toastCss');
-      if (tcss) tcss.href = '/admin/toast.css?v=' + v;
+      if (tcss) tcss.href = 'toast.css?v=' + v;
     })();
   </script>
 </head>
@@ -42,7 +42,7 @@
     <header class="login-topbar">
       <div class="login-topbar-inner">
         <div class="brand" aria-label="Kiro-Go" data-i18n-aria-label="app.title">
-          <img class="brand-icon" src="/admin/favicon.ico" alt="" />
+          <img class="brand-icon" src="favicon.ico" alt="" />
           <span class="brand-text">Kiro-Go</span>
         </div>
         <div class="topbar-actions">
@@ -96,7 +96,7 @@
       <div class="app-header-inner">
         <div class="brand-wrap">
           <div class="brand">
-            <img class="brand-icon" src="/admin/favicon.ico" alt="" />
+            <img class="brand-icon" src="favicon.ico" alt="" />
             <span class="brand-text">Kiro-Go</span>
           </div>
         </div>
@@ -694,7 +694,7 @@
       <div class="app-footer-inner">
         <div class="footer-panel">
           <div class="footer-identity">
-            <img class="footer-icon" src="/admin/favicon.ico" alt="" />
+            <img class="footer-icon" src="favicon.ico" alt="" />
             <div class="footer-copy">
               <div class="footer-title-row">
                 <span class="footer-title">Kiro-Go</span>
@@ -984,10 +984,10 @@
     (function () {
       var v = window.__v || Date.now();
       var t = document.createElement('script');
-      t.src = '/admin/toast.js?v=' + v;
+      t.src = 'toast.js?v=' + v;
       document.body.appendChild(t);
       var s = document.createElement('script');
-      s.src = '/admin/app.js?v=' + v;
+      s.src = 'app.js?v=' + v;
       s.defer = true;
       document.body.appendChild(s);
     })();

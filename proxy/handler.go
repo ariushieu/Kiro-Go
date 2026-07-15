@@ -437,14 +437,18 @@ func resolvePublicBaseURL() string {
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 
+	// 管理面板前缀：默认 /admin，可用 ADMIN_PATH 环境变量改成秘密路径。
+	// 使用自定义前缀时，旧的 /admin 与任何未知路由一样落入 404，不暴露面板存在。
+	adminPath := config.GetAdminPath()
+
 	// Debug-level request trace for fine-grained visibility
 	logger.Debugf("[HTTP] %s %s from %s", r.Method, path, r.RemoteAddr)
 
 	// CORS: only the public API surface (/v1/... consumed by third-party tools) is meant
 	// to be called cross-origin. The admin panel is served same-origin, so we do NOT emit
-	// a wildcard Access-Control-Allow-Origin for /admin/* — that would invite any website
-	// to script the admin API against a logged-in operator's browser.
-	if !strings.HasPrefix(path, "/admin") {
+	// a wildcard Access-Control-Allow-Origin for the admin prefix — that would invite any
+	// website to script the admin API against a logged-in operator's browser.
+	if !strings.HasPrefix(path, adminPath) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Api-Key, anthropic-version, anthropic-beta, x-api-key, x-stainless-os, x-stainless-lang, x-stainless-package-version, x-stainless-runtime, x-stainless-runtime-version, x-stainless-arch")
@@ -536,8 +540,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Write([]byte(`{"status":"ok"}`))
 
-	// 管理端点
-	case path == "/admin" || path == "/admin/":
+	// 管理端点（前缀可配置，见 adminPath）。裸前缀重定向到带斜杠的形式，
+	// 这样页面内的相对路径（api/...、styles.css）才能正确解析。
+	case path == adminPath:
+		target := adminPath + "/"
+		if r.URL.RawQuery != "" {
+			target += "?" + r.URL.RawQuery
+		}
+		http.Redirect(w, r, target, http.StatusMovedPermanently)
+	case path == adminPath+"/":
 		h.serveAdminPage(w, r)
 	// 客户自助门户（无需 admin 密码，用自己的 API key 查询用量）
 	case path == "/check" || path == "/check/":
@@ -548,15 +559,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveUsagePage(w, r)
 	case (path == "/usage" || path == "/usage/" || path == "/v1/usage") && r.Method == "POST":
 		h.apiUsageSelfService(w, r)
+	// 公共静态资源（portal/usage 等公开页面共用；不含 .html，避免绕过页面路由）
+	case strings.HasPrefix(path, "/assets/"):
+		h.serveSharedAsset(w, r)
 	// Session login/logout must be reachable WITHOUT a prior session (they sit
 	// before the password gate in handleAdminAPI).
-	case path == "/admin/api/login":
+	case path == adminPath+"/api/login":
 		h.handleAdminLogin(w, r)
-	case path == "/admin/api/logout":
+	case path == adminPath+"/api/logout":
 		h.handleAdminLogout(w, r)
-	case strings.HasPrefix(path, "/admin/api/"):
+	case strings.HasPrefix(path, adminPath+"/api/"):
 		h.handleAdminAPI(w, r)
-	case strings.HasPrefix(path, "/admin/"):
+	case strings.HasPrefix(path, adminPath+"/"):
 		h.serveStaticFile(w, r)
 
 	// 健康检查
@@ -2647,7 +2661,7 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.adminGuard.recordSuccess(ip)
 	}
 
-	path := strings.TrimPrefix(r.URL.Path, "/admin/api")
+	path := strings.TrimPrefix(r.URL.Path, config.GetAdminPath()+"/api")
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 
 	switch {
@@ -4471,7 +4485,22 @@ func (h *Handler) serveAdminPage(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) serveStaticFile(w http.ResponseWriter, r *http.Request) {
 	setWebSecurityHeaders(w)
-	path := strings.TrimPrefix(r.URL.Path, "/admin/")
+	path := strings.TrimPrefix(r.URL.Path, config.GetAdminPath()+"/")
+	http.ServeFile(w, r, "web/"+path)
+}
+
+// serveSharedAsset serves the static assets shared with the PUBLIC pages (/check,
+// /usage) under the fixed /assets/ prefix, so those pages keep working when the
+// admin prefix is customized via ADMIN_PATH. HTML files are excluded: pages are
+// only reachable through their dedicated routes, and the admin panel HTML stays
+// behind the (possibly secret) admin prefix.
+func (h *Handler) serveSharedAsset(w http.ResponseWriter, r *http.Request) {
+	setWebSecurityHeaders(w)
+	path := strings.TrimPrefix(r.URL.Path, "/assets/")
+	if path == "" || strings.HasSuffix(strings.ToLower(path), ".html") {
+		http.Error(w, "Not Found", 404)
+		return
+	}
 	http.ServeFile(w, r, "web/"+path)
 }
 

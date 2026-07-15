@@ -168,6 +168,7 @@ Claude 请求里带顶层 `thinking` 配置（如 `{"type":"enabled","budget_tok
 |------|------|--------|
 | `CONFIG_PATH` | 配置文件路径 | `data/config.json` |
 | `ADMIN_PASSWORD` | 管理密码（覆盖配置文件） | - |
+| `ADMIN_PATH` | 管理面板与管理 API 的 URL 前缀（如 `/panel-x7k9`）。相当于共享秘密：设置后旧的 `/admin` 与未知路由一样返回纯 404。永不写入配置文件。 | `/admin` |
 | `LOOPBACK_HOST` | SSO loopback 绑定地址，**Docker 内必须设为 `0.0.0.0`** | `127.0.0.1` |
 | `LOG_LEVEL` | 日志级别 `debug`/`info`/`warn`/`error` | `info` |
 | `KIRO_MAX_BODY_BYTES` | 单请求最大 body | `10485760`（10 MiB） |

@@ -271,3 +271,28 @@ func TestAccountAllowOverageMigration(t *testing.T) {
 		}
 	}
 }
+
+func TestAdminPathOverrideNormalization(t *testing.T) {
+	t.Cleanup(func() { SetAdminPath("") })
+
+	if got := GetAdminPath(); got != DefaultAdminPath {
+		t.Fatalf("default: want %q, got %q", DefaultAdminPath, got)
+	}
+	for in, want := range map[string]string{
+		"panel":             "/panel",
+		"/panel":            "/panel",
+		"/panel/":           "/panel",
+		"  /ops/panel/  ":   "/ops/panel",
+		"my-secret-9f2a":    "/my-secret-9f2a",
+	} {
+		SetAdminPath(in)
+		if got := GetAdminPath(); got != want {
+			t.Errorf("SetAdminPath(%q): want %q, got %q", in, want, got)
+		}
+	}
+	// Clearing the override restores the default.
+	SetAdminPath("")
+	if got := GetAdminPath(); got != DefaultAdminPath {
+		t.Fatalf("cleared: want %q, got %q", DefaultAdminPath, got)
+	}
+}

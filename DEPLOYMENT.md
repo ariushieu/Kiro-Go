@@ -126,14 +126,19 @@ compose chỉ map 5 port thấp.
 | `CONFIG_PATH` | `data/config.json` | Đường dẫn file config |
 | `LOOPBACK_HOST` | `127.0.0.1` | Host bind loopback SSO. **Đặt `0.0.0.0` trong Docker.** |
 | `ADMIN_PASSWORD` | (dùng giá trị trong config, mặc định `changeme`) | Ghi đè mật khẩu admin lúc khởi động |
+| `ADMIN_PATH` | `/admin` | Prefix URL của panel & API admin (ví dụ `/panel-x7k9`). Khi đặt, `/admin` cũ trả 404 trơn — scanner không định vị được panel. Không ghi vào config. |
 | `LOG_LEVEL` | `info` | Mức log (`debug`/`info`/`warn`/`error`) |
 
-Ví dụ đổi mật khẩu admin:
+Ví dụ đổi mật khẩu admin: copy `.env.example` thành `.env` cạnh `docker-compose.yml`
+rồi điền giá trị — compose tự đọc file này (`.env` đã nằm trong `.gitignore`):
 
-```yaml
-    environment:
-      - LOOPBACK_HOST=0.0.0.0
-      - ADMIN_PASSWORD=my-strong-password
+```bash
+cp .env.example .env
+```
+
+```dotenv
+ADMIN_PASSWORD=my-strong-password
+ADMIN_PATH=/panel-x7k9   # tùy chọn: giấu panel khỏi đường dẫn /admin mặc định
 ```
 
 ---
