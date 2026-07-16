@@ -666,11 +666,16 @@
   // Data loaders
   async function loadData() {
     await Promise.all([loadStats(), loadAccounts(), loadSettings(), loadVersion()]);
-    renderEndpointCode('claudeEndpoint', baseUrl + '/v1/messages');
-    renderEndpointCode('openaiEndpoint', baseUrl + '/v1/chat/completions');
-    renderEndpointCode('openaiResponsesEndpoint', baseUrl + '/v1/responses');
-    renderEndpointCode('modelsEndpoint', baseUrl + '/v1/models');
-    renderEndpointCode('statsEndpoint', baseUrl + '/v1/stats');
+    // Endpoint /v1/* phải hiển thị theo publicBaseURL (domain API công khai) khi nó
+    // được set: panel có thể được serve từ subdomain admin riêng, nơi location.origin
+    // KHÔNG route được tới /v1/* (nginx rewrite mọi path về ADMIN_PATH). loadSettings
+    // ở trên đã điền giá trị vào ô #publicBaseURL nên đọc lại từ đó.
+    const apiBase = (($('publicBaseURL') && $('publicBaseURL').value.trim()) || baseUrl).replace(/\/+$/, '');
+    renderEndpointCode('claudeEndpoint', apiBase + '/v1/messages');
+    renderEndpointCode('openaiEndpoint', apiBase + '/v1/chat/completions');
+    renderEndpointCode('openaiResponsesEndpoint', apiBase + '/v1/responses');
+    renderEndpointCode('modelsEndpoint', apiBase + '/v1/models');
+    renderEndpointCode('statsEndpoint', apiBase + '/v1/stats');
     setTimeout(checkUpdate, 2000);
   }
   async function loadStats() {
@@ -1570,6 +1575,13 @@
       const d = await res.json().catch(() => ({}));
       if (!res.ok || d.success === false) throw new Error(d.error || t('common.saveFailed'));
       toast(t('settings.publicBaseURLSaved'), 'success');
+      // Các ô endpoint /v1/* hiển thị theo publicBaseURL — render lại ngay
+      const apiBase = (url || baseUrl).replace(/\/+$/, '');
+      renderEndpointCode('claudeEndpoint', apiBase + '/v1/messages');
+      renderEndpointCode('openaiEndpoint', apiBase + '/v1/chat/completions');
+      renderEndpointCode('openaiResponsesEndpoint', apiBase + '/v1/responses');
+      renderEndpointCode('modelsEndpoint', apiBase + '/v1/models');
+      renderEndpointCode('statsEndpoint', apiBase + '/v1/stats');
     } catch (e) {
       toast((e && e.message) || t('common.saveFailed'), 'error');
     }
