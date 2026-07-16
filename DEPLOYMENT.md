@@ -117,6 +117,38 @@ compose chỉ map 5 port thấp.
 > Nếu bạn vận hành ngoài Docker hoặc môi trường nơi 3128 đã bận, hãy đảm bảo ít
 > nhất một port trong danh sách trên còn trống và được publish.
 
+### 4.1. Login SSO khi đã deploy lên VPS (browser không cùng máy server)
+
+Flow mặc định (`redirect_uri=http://localhost:<port>`) yêu cầu **browser chạy
+trên cùng máy với server**. Deploy lên VPS thì `localhost` trong browser trỏ về
+máy bạn, không phải VPS → callback không tới được listener. Hai cách xử lý:
+
+**Cách 1 — SSH tunnel (nhanh, không cần cấu hình gì):**
+
+```bash
+ssh -L 3128:127.0.0.1:3128 user@vps
+```
+
+Giữ tunnel mở, để **trống** `publicBaseURL` trong panel, login như bình thường.
+Response của Start Login có trả `loopbackPort` — nếu khác 3128 thì tunnel theo
+port đó.
+
+**Cách 2 — callback qua domain (bền vững):**
+
+1. Panel → Settings → set `publicBaseURL` = domain API công khai
+   (ví dụ `https://xapi.your-domain.com`). Redirect URL của flow sẽ dùng domain
+   này thay vì localhost. **Không dùng subdomain admin** — mọi path của nó bị
+   rewrite về `ADMIN_PATH` nên callback không bao giờ tới listener.
+2. Nginx: route `/signin/callback` và `/oauth/callback` của domain API về
+   `127.0.0.1:3128` (xem `deploy/nginx-kiro-admin.conf` — hai location đặt
+   trước `location /`, KHÔNG trỏ vào port app chính).
+3. Redirect URI `https://<domain>/oauth/callback` phải được đăng ký trong app
+   Entra của tenant. Nếu tenant chỉ đăng ký `http://localhost/oauth/callback`,
+   Microsoft chặn với lỗi `AADSTS50011` — khi đó chỉ dùng được Cách 1.
+
+Session SSO sống 10 phút; hết hạn thì Cancel rồi Start lại (flow mới tự dọn
+session cũ, port được giải phóng ngay).
+
 ---
 
 ## 5. Biến môi trường
