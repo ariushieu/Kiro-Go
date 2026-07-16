@@ -128,6 +128,8 @@ compose chỉ map 5 port thấp.
 | `ADMIN_PASSWORD` | (dùng giá trị trong config, mặc định `changeme`) | Ghi đè mật khẩu admin lúc khởi động |
 | `ADMIN_PATH` | `/admin` | Prefix URL của panel & API admin (ví dụ `/panel-x7k9`). Khi đặt, `/admin` cũ trả 404 trơn — scanner không định vị được panel. Không ghi vào config. |
 | `LOG_LEVEL` | `info` | Mức log (`debug`/`info`/`warn`/`error`) |
+| `KIRO_TRUST_PROXY` | `false` | Tin `X-Forwarded-For`/`X-Forwarded-Proto` từ reverse proxy. **Bắt buộc `true` khi sau nginx/Cloudflare** — xem §5.2. |
+| `KIRO_TRUSTED_PROXY_HOPS` | `1` | Số proxy hop trước app (nginx: 1; Cloudflare→nginx→app: 2). IP client lấy từ phải sang trong `X-Forwarded-For` theo số hop này. |
 
 Ví dụ đổi mật khẩu admin: copy `.env.example` thành `.env` cạnh `docker-compose.yml`
 rồi điền giá trị — compose tự đọc file này (`.env` đã nằm trong `.gitignore`):
@@ -144,7 +146,8 @@ ADMIN_PATH=/panel-x7k9   # tùy chọn: giấu panel khỏi đường dẫn /adm
 ### 5.1. Trỏ subdomain riêng cho admin panel (nginx)
 
 Muốn vào panel qua `admin.domain.com/` thay vì `domain.com/panel-x7k9/` thì
-**chỉ cần nginx rewrite prefix — không cần đổi code**. Hai điều kiện đã có sẵn
+**chỉ cần nginx rewrite prefix — không cần đổi code**. (Đứng sau nginx thì nhớ
+set `KIRO_TRUST_PROXY` — xem §5.2.) Hai điều kiện đã có sẵn
 trong codebase làm điều này hoạt động:
 
 - Frontend gọi API bằng đường dẫn **tương đối** (`web/app.js` — `fetch('api' + path)`,
@@ -182,6 +185,43 @@ Lưu ý:
   biệt Host header.
 - `publicBaseURL` (callback SSO Microsoft qua domain) là cấu hình độc lập, không
   liên quan admin path.
+
+### 5.2. Đặt sau Cloudflare
+
+Thêm Cloudflare (proxy bật — đám mây cam) trước nginx/app chạy được **không cần
+đổi code**, nhưng phải chỉnh cấu hình:
+
+**Bắt buộc — trust proxy + số hop.** DoS guard giới hạn request theo IP
+(`KIRO_IP_RPM`, mặc định 120/phút/IP). Mặc định app lấy IP từ `RemoteAddr` —
+sau Cloudflare đó là IP edge của Cloudflare, mọi client dồn chung vài IP →
+một client spam là tất cả bị chặn chung. Set trong `.env`:
+
+```dotenv
+KIRO_TRUST_PROXY=true
+KIRO_TRUSTED_PROXY_HOPS=2   # client → Cloudflare → nginx → app = 2 hop
+                            # Cloudflare trỏ thẳng app (không nginx) = 1
+```
+
+App lấy IP client bằng cách đếm **từ phải sang** trong `X-Forwarded-For` theo số
+hop (chống spoof — xem `proxy/dos_guard.go`), nên số hop phải khớp thực tế.
+Biến này cũng bật nhận diện HTTPS qua `X-Forwarded-Proto` để cookie session
+admin mang flag `Secure`.
+
+**Bắt buộc — chặn traffic không qua Cloudflare.** Khi trust proxy bật, client
+gọi thẳng IP gốc VPS tự forge được `X-Forwarded-For` → bypass rate limit.
+Firewall/nginx chỉ cho phép [dải IP Cloudflare](https://www.cloudflare.com/ips/)
+vào port 80/443.
+
+**SSL mode: Full (strict).** Đừng dùng "Flexible" (Cloudflare→origin chạy HTTP
+trần, cookie Secure cũng hỏng).
+
+**SSE / streaming.** Cloudflare cắt kết nối idle ~100 giây (lỗi 524). Chat
+streaming hiếm khi idle lâu vậy, nhưng admin log stream lúc vắng log có thể
+dính. Nếu gặp: cho subdomain đó về DNS-only (đám mây xám).
+
+**Không ảnh hưởng:** giới hạn body 100MB của Cloudflare (payload app cap ~2MB);
+flow SSO Microsoft (browser trên máy host, callback `localhost:3128` không đi
+qua Cloudflare).
 
 ---
 

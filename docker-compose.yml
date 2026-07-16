@@ -18,4 +18,8 @@ services:
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
       - ADMIN_PATH=${ADMIN_PATH:-}
       - LOG_LEVEL=${LOG_LEVEL:-}
+      # BẮT BUỘC khi đứng sau reverse proxy / Cloudflare — xem DEPLOYMENT.md §5.2.
+      # Để trống = mặc định (không trust proxy, lấy IP từ RemoteAddr).
+      - KIRO_TRUST_PROXY=${KIRO_TRUST_PROXY:-}
+      - KIRO_TRUSTED_PROXY_HOPS=${KIRO_TRUSTED_PROXY_HOPS:-}
     restart: unless-stopped
