@@ -511,11 +511,12 @@ func (s *KiroSsoSession) handleLoopback(w http.ResponseWriter, r *http.Request) 
 		reqState := query.Get("state")
 		logger.Infof("[KiroSSO] Leg-1 hit path=%s state_match=%t", path, reqState == s.State)
 
-		// State phải khớp Leg-1 — chặn stray hit / CSRF.
-		if reqState == "" || reqState != s.State {
-			writeSSOErrorPage(w, "Trạng thái không khớp — có thể là tấn công CSRF.")
-			s.pushError(fmt.Errorf("state mismatch on external IdP descriptor"))
-			return
+		// KHÔNG fail khi state Leg-1 không khớp: Kiro portal tự sinh state riêng thay vì
+		// echo lại state đã gửi (spec Req 3, khớp zsec social.go). CSRF vẫn được chặn ở
+		// Leg-2 — handleOAuthCallback check nghiêm ngặt s.IdPState — cùng với allow-list
+		// Microsoft và authorize URL idempotent (một PKCE pair duy nhất cho mọi hit).
+		if reqState != s.State {
+			logger.Debugf("[KiroSSO] Leg-1 state khác state đã gửi (portal có thể tự sinh state); tiếp tục")
 		}
 
 		// Idempotent: tính Microsoft authorize URL đúng MỘT lần (dưới mutex), cache lại.
@@ -541,9 +542,10 @@ func (s *KiroSsoSession) handleLoopback(w http.ResponseWriter, r *http.Request) 
 }
 
 // resolveIdpAuthorizeURL xử lý descriptor từ Kiro portal và trả về Microsoft Entra
-// authorize URL (Leg-2). Idempotent: tính đúng MỘT lần rồi cache; các lần gọi sau với
-// cùng state trả lại URL đã cache (chung PKCE pair) — cho phép user copy URL mở ở
-// trình duyệt/profile khác mà vẫn hoàn tất được login. Caller đã verify state khớp Leg-1.
+// authorize URL (Leg-2). Idempotent: tính đúng MỘT lần rồi cache; mọi lần gọi sau trả
+// lại URL đã cache (chung PKCE pair) — cho phép user copy URL mở ở trình duyệt/profile
+// khác mà vẫn hoàn tất được login. State Leg-1 không được dùng làm điều kiện (portal
+// tự sinh state riêng); descriptor giả mạo bị chặn bởi allow-list Microsoft bên dưới.
 //
 // Query params từ portal: login_option=external_idp, issuer_url, client_id, scopes, login_hint.
 func (s *KiroSsoSession) resolveIdpAuthorizeURL(query url.Values) (string, error) {
@@ -704,15 +706,15 @@ func (s *KiroSsoSession) handleOAuthCallback(w http.ResponseWriter, r *http.Requ
 	// Push kết quả
 	select {
 	case s.ResultCh <- KiroSsoResult{
-		AccessToken:  tokenResult.AccessToken,
-		RefreshToken: tokenResult.RefreshToken,
-		ExpiresIn:    tokenResult.ExpiresIn,
-		IssuerURL:    s.IssuerURL,
-		IdPClientID:  s.IdPClientID,
-		Scopes:       s.IdPScopes,
-		LoginHint:    s.LoginHint,
-		UserEmail:    email,
-				IdPTokenEndpoint: s.IdPTokenEndpoint,
+		AccessToken:      tokenResult.AccessToken,
+		RefreshToken:     tokenResult.RefreshToken,
+		ExpiresIn:        tokenResult.ExpiresIn,
+		IssuerURL:        s.IssuerURL,
+		IdPClientID:      s.IdPClientID,
+		Scopes:           s.IdPScopes,
+		LoginHint:        s.LoginHint,
+		UserEmail:        email,
+		IdPTokenEndpoint: s.IdPTokenEndpoint,
 	}:
 	default:
 	}

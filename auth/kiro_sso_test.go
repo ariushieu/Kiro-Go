@@ -164,6 +164,40 @@ func TestKiroSsoSessionNotFound(t *testing.T) {
 	}
 }
 
+func TestHandleLoopback_Leg1StateMismatchDoesNotFail(t *testing.T) {
+	// Kiro portal tự sinh state riêng thay vì echo lại state đã gửi (spec Req 3),
+	// nên descriptor với state lạ — hoặc thiếu state — vẫn phải được redirect sang
+	// IdP thay vì fail flow. idpAuthorizeURL được cache sẵn để không cần OIDC
+	// discovery thật trong test.
+	s := &KiroSsoSession{
+		ID:              "test-leg1-state",
+		State:           "expected-state",
+		LoopbackPort:    3128,
+		ResultCh:        make(chan KiroSsoResult, 1),
+		ExpiresAt:       time.Now().Add(10 * time.Minute),
+		idpAuthorizeURL: "https://login.microsoftonline.com/tid/oauth2/v2.0/authorize?client_id=abc",
+	}
+
+	for _, state := range []string{"portal-generated-state", ""} {
+		req := httptest.NewRequest("GET",
+			"/?login_option=external_idp&issuer_url=https%3A%2F%2Flogin.microsoftonline.com%2Ftid%2Fv2.0&client_id=abc&state="+state, nil)
+		w := httptest.NewRecorder()
+		s.handleLoopback(w, req)
+
+		if w.Code != http.StatusFound {
+			t.Errorf("state=%q: expected 302 redirect to IdP, got %d", state, w.Code)
+		}
+		if loc := w.Header().Get("Location"); loc != s.idpAuthorizeURL {
+			t.Errorf("state=%q: expected redirect to cached authorize URL, got %q", state, loc)
+		}
+		select {
+		case res := <-s.ResultCh:
+			t.Errorf("state=%q: Leg-1 state mismatch must not push a result, got %+v", state, res)
+		default:
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Token refresh tests (with mock IdP)
 // ---------------------------------------------------------------------------
