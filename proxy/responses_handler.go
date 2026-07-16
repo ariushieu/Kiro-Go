@@ -116,7 +116,7 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 	}
 
 	thinkingCfg := config.GetThinkingConfig()
-	actualModel, thinking := ParseModelAndThinking(req.Model, thinkingCfg.Suffix)
+	actualModel, thinking := ParseClientModelAndThinking(req.Model, thinkingCfg.Suffix)
 	// Apply global/per-key model override (ForceModel > per-key Model > client model).
 	actualModel = applyModelOverride(actualModel, apiKeyID, thinkingCfg.Suffix)
 	openaiReq.Model = actualModel
@@ -166,7 +166,7 @@ func (h *Handler) handleResponsesNonStream(
 		var content, reasoningContent string
 		var toolUses []KiroToolUse
 		var inputTokens, outputTokens int
-		var credits float64
+		var credits, sourceCost float64
 		var realInputTokens int
 
 		callback := &KiroStreamCallback{
@@ -177,15 +177,16 @@ func (h *Handler) handleResponsesNonStream(
 					content += text
 				}
 			},
-			OnToolUse:  func(tu KiroToolUse) { toolUses = append(toolUses, tu) },
-			OnComplete: func(inTok, outTok int) { inputTokens = inTok; outputTokens = outTok },
-			OnCredits:  func(c float64) { credits = c },
+			OnToolUse:    func(tu KiroToolUse) { toolUses = append(toolUses, tu) },
+			OnComplete:   func(inTok, outTok int) { inputTokens = inTok; outputTokens = outTok },
+			OnCredits:    func(c float64) { credits = c },
+			OnSourceCost: func(c float64) { sourceCost = c },
 			OnContextUsage: func(pct float64) {
 				realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
 			},
 		}
 
-		err := CallKiroAPI(account, payload, callback)
+		err := CallUpstreamAPI(account, model, payload, callback)
 		if err != nil {
 			lastErr = err
 			excluded[account.ID] = true
@@ -205,9 +206,10 @@ func (h *Handler) handleResponsesNonStream(
 		}
 		outputTokens = estimateOpenAIOutputTokens(finalContent, reasoningContent, toolUses)
 
-		h.recordSuccessForApiKey(apiKeyID, inputTokens, outputTokens, credits, model, account, "openai", startedAt)
+		sourceCost = effectiveSourceCost(sourceCost, credits)
+		h.recordSuccessForApiKeyWithCost(apiKeyID, inputTokens, outputTokens, credits, sourceCost, model, account, "openai", startedAt)
 		h.pool.RecordSuccess(account.ID)
-		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
+		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, sourceCost)
 
 		respObj := buildResponsesObject(respID, model, finalContent, toolUses, inputTokens, outputTokens, req)
 		respObj.StoredInput = storedInput
@@ -453,6 +455,7 @@ func (h *Handler) handleResponsesStream(
 			inputTokens     int
 			outputTokens    int
 			credits         float64
+			sourceCost      float64
 			realInputTokens int
 		)
 
@@ -575,14 +578,15 @@ func (h *Handler) handleResponsesStream(
 				outputIndex++
 				responseStarted = true
 			},
-			OnComplete: func(inTok, outTok int) { inputTokens = inTok; outputTokens = outTok },
-			OnCredits:  func(c float64) { credits = c },
+			OnComplete:   func(inTok, outTok int) { inputTokens = inTok; outputTokens = outTok },
+			OnCredits:    func(c float64) { credits = c },
+			OnSourceCost: func(c float64) { sourceCost = c },
 			OnContextUsage: func(pct float64) {
 				realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
 			},
 		}
 
-		err := CallKiroAPI(account, payload, callback)
+		err := CallUpstreamAPI(account, model, payload, callback)
 		if err != nil {
 			if !responseStarted {
 				lastErr = err
@@ -645,9 +649,10 @@ func (h *Handler) handleResponsesStream(
 		}
 		outputTokens = estimateOpenAIOutputTokens(finalContent, reasoning, toolUses)
 
-		h.recordSuccessForApiKey(apiKeyID, inputTokens, outputTokens, credits, model, account, "openai", startedAt)
+		sourceCost = effectiveSourceCost(sourceCost, credits)
+		h.recordSuccessForApiKeyWithCost(apiKeyID, inputTokens, outputTokens, credits, sourceCost, model, account, "openai", startedAt)
 		h.pool.RecordSuccess(account.ID)
-		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
+		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, sourceCost)
 
 		respObj := buildResponsesObject(respID, model, finalContent, toolUses, inputTokens, outputTokens, req)
 		respObj.CreatedAt = createdAt

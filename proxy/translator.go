@@ -105,8 +105,35 @@ func ParseModelAndThinking(model string, thinkingSuffix string) (string, bool) {
 	return model, thinking
 }
 
+// ParseClientModelAndThinking normalizes a client-facing model without applying
+// cross-provider aliases. In particular, gpt-* must stay gpt-* until the pool has
+// selected a backend; the Kiro adapter applies MapModel later if it wins routing.
+func ParseClientModelAndThinking(model string, thinkingSuffix string) (string, bool) {
+	lower := strings.ToLower(model)
+	thinking := false
+	suffixLower := strings.ToLower(thinkingSuffix)
+	if suffixLower != "" && strings.HasSuffix(lower, suffixLower) {
+		thinking = true
+		model = model[:len(model)-len(thinkingSuffix)]
+		lower = strings.ToLower(model)
+	}
+
+	for _, m := range modelAliases {
+		if strings.HasPrefix(m.key, "gpt-") {
+			continue
+		}
+		if strings.Contains(lower, m.key) {
+			return m.value, thinking
+		}
+	}
+	if claudeVersionPattern.MatchString(lower) {
+		return claudeVersionPattern.ReplaceAllString(lower, "claude-$1-$2.$3"), thinking
+	}
+	return model, thinking
+}
+
 func resolveClaudeThinkingMode(model string, thinkingCfg *ClaudeThinkingConfig, thinkingSuffix string) (string, bool) {
-	actualModel, suffixThinking := ParseModelAndThinking(model, thinkingSuffix)
+	actualModel, suffixThinking := ParseClientModelAndThinking(model, thinkingSuffix)
 	return actualModel, suffixThinking || isClaudeThinkingRequested(thinkingCfg)
 }
 
@@ -122,7 +149,7 @@ func resolveClaudeThinkingMode(model string, thinkingCfg *ClaudeThinkingConfig, 
 // "force this one model" behavior exactly.
 func applyModelOverride(resolved, apiKeyID, thinkingSuffix string) string {
 	if forced := config.GetForceModel(); forced != "" {
-		norm, _ := ParseModelAndThinking(forced, thinkingSuffix)
+		norm, _ := ParseClientModelAndThinking(forced, thinkingSuffix)
 		return norm
 	}
 	if apiKeyID != "" {
@@ -133,7 +160,7 @@ func applyModelOverride(resolved, apiKeyID, thinkingSuffix string) string {
 					if strings.TrimSpace(m) == "" {
 						continue
 					}
-					norm, _ := ParseModelAndThinking(m, thinkingSuffix)
+					norm, _ := ParseClientModelAndThinking(m, thinkingSuffix)
 					if first == "" {
 						first = norm
 					}
@@ -1153,9 +1180,12 @@ type OpenAIChoice struct {
 }
 
 type OpenAIUsage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens        int `json:"prompt_tokens"`
+	CompletionTokens    int `json:"completion_tokens"`
+	TotalTokens         int `json:"total_tokens"`
+	PromptTokensDetails *struct {
+		CachedTokens int `json:"cached_tokens"`
+	} `json:"prompt_tokens_details,omitempty"`
 }
 
 // ==================== OpenAI -> Kiro 转换 ====================

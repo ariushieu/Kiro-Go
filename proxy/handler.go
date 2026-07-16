@@ -791,6 +791,12 @@ func (h *Handler) refreshModelsCache() {
 	aggregated := make([]ModelInfo, 0)
 	for i := range accounts {
 		account := &accounts[i]
+		if account.EffectiveBackend() != config.BackendKiro {
+			models := configuredAccountModels(account)
+			h.pool.SetModelList(account.ID, account.Models)
+			aggregated = mergeUniqueModels(aggregated, models)
+			continue
+		}
 		if err := h.ensureValidToken(account); err != nil {
 			logger.Warnf("[ModelsCache] Skip %s token refresh failed: %v", account.Email, err)
 			h.handleAccountFailure(account, err)
@@ -824,6 +830,15 @@ func (h *Handler) refreshModelsCache() {
 // fetchAndCacheAccountModels 为单个账号拉取并写入模型缓存。
 // 同时更新 pool 的路由缓存与全局聚合模型列表。
 func (h *Handler) fetchAndCacheAccountModels(account *config.Account) error {
+	if account.EffectiveBackend() != config.BackendKiro {
+		models := configuredAccountModels(account)
+		h.pool.SetModelList(account.ID, account.Models)
+		h.modelsCacheMu.Lock()
+		h.cachedModels = mergeUniqueModels(h.cachedModels, models)
+		h.modelsCacheTime = time.Now().Unix()
+		h.modelsCacheMu.Unlock()
+		return nil
+	}
 	if err := h.ensureValidToken(account); err != nil {
 		return fmt.Errorf("token refresh failed: %w", err)
 	}
@@ -845,6 +860,21 @@ func (h *Handler) fetchAndCacheAccountModels(account *config.Account) error {
 
 	logger.Infof("[ModelsCache] Refreshed %d models for account %s", len(models), account.Email)
 	return nil
+}
+
+func configuredAccountModels(account *config.Account) []ModelInfo {
+	if account == nil {
+		return nil
+	}
+	models := make([]ModelInfo, 0, len(account.Models))
+	for _, id := range account.Models {
+		models = append(models, ModelInfo{
+			ModelId: id, ModelName: id,
+			Description: "Configured OpenAI-compatible upstream model",
+			InputTypes:  []string{"TEXT", "IMAGE"}, RateMultiplier: 1,
+		})
+	}
+	return models
 }
 
 // apiRefreshAccountModels POST /admin/api/accounts/{id}/models/refresh
@@ -1220,7 +1250,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		messageStartUsage = cacheUsage
 
 		var inputTokens, outputTokens int
-		var credits float64
+		var credits, sourceCost float64
 		var realInputTokens int
 		var toolUses []KiroToolUse
 		var nextContentIndex int
@@ -1529,12 +1559,13 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			OnCredits: func(c float64) {
 				credits = c
 			},
+			OnSourceCost: func(c float64) { sourceCost = c },
 			OnContextUsage: func(pct float64) {
 				realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
 			},
 		}
 
-		err := CallKiroAPI(account, payload, callback)
+		err := CallUpstreamAPI(account, model, payload, callback)
 		if err != nil {
 			lastErr = err
 			excluded[account.ID] = true
@@ -1571,9 +1602,10 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		}
 		outputTokens = estimateClaudeOutputTokens(outputContent, thinkingOutput, toolUses)
 
-		h.recordSuccessForApiKey(apiKeyID, inputTokens, outputTokens, credits, model, account, "claude", startedAt)
+		sourceCost = effectiveSourceCost(sourceCost, credits)
+		h.recordSuccessForApiKeyWithCost(apiKeyID, inputTokens, outputTokens, credits, sourceCost, model, account, "claude", startedAt)
 		h.pool.RecordSuccess(account.ID)
-		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
+		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, sourceCost)
 		h.promptCache.Update(account.ID, cacheProfile)
 		logSuspiciousReq("claude", model, inputTokens, outputTokens, len(toolUses) > 0)
 
@@ -1675,6 +1707,12 @@ func (h *Handler) recordSuccess(inputTokens, outputTokens int, credits float64) 
 // global counters are updated. Persistence errors are logged but do not propagate.
 // model is recorded in the per-request log for the admin API Log view.
 func (h *Handler) recordSuccessForApiKey(apiKeyID string, inputTokens, outputTokens int, credits float64, model string, account *config.Account, endpoint string, startedAt time.Time) {
+	h.recordSuccessForApiKeyWithCost(apiKeyID, inputTokens, outputTokens, credits, credits, model, account, endpoint, startedAt)
+}
+
+// recordSuccessForApiKeyWithCost keeps customer charge separate from the actual
+// custom-upstream cost. Legacy Kiro callers use the same value for both.
+func (h *Handler) recordSuccessForApiKeyWithCost(apiKeyID string, inputTokens, outputTokens int, credits, sourceCost float64, model string, account *config.Account, endpoint string, startedAt time.Time) {
 	h.recordSuccess(inputTokens, outputTokens, credits)
 
 	keyName, keyMasked := apiKeyLabels(apiKeyID)
@@ -1706,8 +1744,17 @@ func (h *Handler) recordSuccessForApiKey(apiKeyID string, inputTokens, outputTok
 		InputTokens:  inputTokens,
 		OutputTokens: outputTokens,
 		Credits:      credits,
+		SourceCost:   sourceCost,
+		Profit:       credits - sourceCost,
 		DurationMs:   durationMs(startedAt),
 	})
+}
+
+func effectiveSourceCost(sourceCost, customerCharge float64) float64 {
+	if sourceCost == 0 && customerCharge > 0 {
+		return customerCharge
+	}
+	return sourceCost
 }
 
 // apiKeyLabels resolves the display name + masked value for a key id (both empty when unknown).
@@ -1777,7 +1824,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		var thinkingContent string
 		var toolUses []KiroToolUse
 		var inputTokens, outputTokens int
-		var credits float64
+		var credits, sourceCost float64
 		var realInputTokens int
 
 		callback := &KiroStreamCallback{
@@ -1798,12 +1845,13 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 			OnCredits: func(c float64) {
 				credits = c
 			},
+			OnSourceCost: func(c float64) { sourceCost = c },
 			OnContextUsage: func(pct float64) {
 				realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
 			},
 		}
 
-		err := CallKiroAPI(account, payload, callback)
+		err := CallUpstreamAPI(account, model, payload, callback)
 		if err != nil {
 			lastErr = err
 			excluded[account.ID] = true
@@ -1828,9 +1876,10 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		}
 		outputTokens = estimateClaudeOutputTokens(finalContent, rawThinkingContent, toolUses)
 
-		h.recordSuccessForApiKey(apiKeyID, inputTokens, outputTokens, credits, model, account, "claude", startedAt)
+		sourceCost = effectiveSourceCost(sourceCost, credits)
+		h.recordSuccessForApiKeyWithCost(apiKeyID, inputTokens, outputTokens, credits, sourceCost, model, account, "claude", startedAt)
 		h.pool.RecordSuccess(account.ID)
-		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
+		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, sourceCost)
 		h.promptCache.Update(account.ID, cacheProfile)
 		logSuspiciousReq("claude", model, inputTokens, outputTokens, len(toolUses) > 0)
 
@@ -1986,7 +2035,7 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 
 	// 解析模型和 thinking 模式
 	thinkingCfg := config.GetThinkingConfig()
-	actualModel, thinking := ParseModelAndThinking(req.Model, thinkingCfg.Suffix)
+	actualModel, thinking := ParseClientModelAndThinking(req.Model, thinkingCfg.Suffix)
 	// Apply global/per-key model override (ForceModel > per-key Model > client model).
 	req.Model = applyModelOverride(actualModel, apiKeyID, thinkingCfg.Suffix)
 	estimatedInputTokens := estimateOpenAIRequestInputTokens(&req)
@@ -2035,7 +2084,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 		var toolCalls []ToolCall
 		var toolCallIndex int
 		var inputTokens, outputTokens int
-		var credits float64
+		var credits, sourceCost float64
 		var realInputTokens int
 		var rawContentBuilder strings.Builder
 		var rawReasoningBuilder strings.Builder
@@ -2308,12 +2357,13 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 			OnCredits: func(c float64) {
 				credits = c
 			},
+			OnSourceCost: func(c float64) { sourceCost = c },
 			OnContextUsage: func(pct float64) {
 				realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
 			},
 		}
 
-		err := CallKiroAPI(account, payload, callback)
+		err := CallUpstreamAPI(account, model, payload, callback)
 		if err != nil {
 			lastErr = err
 			excluded[account.ID] = true
@@ -2349,9 +2399,10 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 			outputTokens += estimateApproxTokens(tc.Function.Arguments)
 		}
 
-		h.recordSuccessForApiKey(apiKeyID, inputTokens, outputTokens, credits, model, account, "openai", startedAt)
+		sourceCost = effectiveSourceCost(sourceCost, credits)
+		h.recordSuccessForApiKeyWithCost(apiKeyID, inputTokens, outputTokens, credits, sourceCost, model, account, "openai", startedAt)
 		h.pool.RecordSuccess(account.ID)
-		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
+		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, sourceCost)
 		logSuspiciousReq("openai", model, inputTokens, outputTokens, len(toolCalls) > 0)
 
 		finishReason := "stop"
@@ -2415,7 +2466,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 		var reasoningContent string
 		var toolUses []KiroToolUse
 		var inputTokens, outputTokens int
-		var credits float64
+		var credits, sourceCost float64
 		var realInputTokens int
 
 		callback := &KiroStreamCallback{
@@ -2426,15 +2477,16 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 					content += text
 				}
 			},
-			OnToolUse:  func(tu KiroToolUse) { toolUses = append(toolUses, tu) },
-			OnComplete: func(inTok, outTok int) { inputTokens = inTok; outputTokens = outTok },
-			OnCredits:  func(c float64) { credits = c },
+			OnToolUse:    func(tu KiroToolUse) { toolUses = append(toolUses, tu) },
+			OnComplete:   func(inTok, outTok int) { inputTokens = inTok; outputTokens = outTok },
+			OnCredits:    func(c float64) { credits = c },
+			OnSourceCost: func(c float64) { sourceCost = c },
 			OnContextUsage: func(pct float64) {
 				realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
 			},
 		}
 
-		err := CallKiroAPI(account, payload, callback)
+		err := CallUpstreamAPI(account, model, payload, callback)
 		if err != nil {
 			lastErr = err
 			excluded[account.ID] = true
@@ -2456,9 +2508,10 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 		}
 		outputTokens = estimateOpenAIOutputTokens(finalContent, reasoningContent, toolUses)
 
-		h.recordSuccessForApiKey(apiKeyID, inputTokens, outputTokens, credits, model, account, "openai", startedAt)
+		sourceCost = effectiveSourceCost(sourceCost, credits)
+		h.recordSuccessForApiKeyWithCost(apiKeyID, inputTokens, outputTokens, credits, sourceCost, model, account, "openai", startedAt)
 		h.pool.RecordSuccess(account.ID)
-		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
+		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, sourceCost)
 		logSuspiciousReq("openai", model, inputTokens, outputTokens, len(toolUses) > 0)
 
 		thinkingFormat := config.GetThinkingConfig().OpenAIFormat
@@ -2493,6 +2546,9 @@ func (h *Handler) sendOpenAIError(w http.ResponseWriter, status int, errType, me
 
 // ensureValidToken 确保 token 有效
 func (h *Handler) ensureValidToken(account *config.Account) error {
+	if account == nil || account.EffectiveBackend() != config.BackendKiro {
+		return nil
+	}
 	if account.ExpiresAt == 0 || time.Now().Unix() < account.ExpiresAt-tokenRefreshSkewSeconds {
 		return nil
 	}
@@ -2835,13 +2891,18 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 			"nickname":          a.Nickname,
 			"authMethod":        a.AuthMethod,
 			"provider":          a.Provider,
+			"backend":           a.EffectiveBackend(),
+			"apiFormat":         a.EffectiveAPIFormat(),
+			"baseURL":           a.BaseURL,
+			"models":            a.Models,
+			"pricing":           a.Pricing,
 			"region":            a.Region,
 			"enabled":           a.Enabled,
 			"banStatus":         a.BanStatus,
 			"banReason":         a.BanReason,
 			"banTime":           a.BanTime,
 			"expiresAt":         a.ExpiresAt,
-			"hasToken":          a.AccessToken != "",
+			"hasToken":          a.AccessToken != "" || a.ApiKey != "",
 			"machineId":         a.MachineId,
 			"weight":            a.Weight,
 			"overageStatus":     a.OverageStatus,
@@ -2885,7 +2946,7 @@ func (h *Handler) apiAddAccount(w http.ResponseWriter, r *http.Request) {
 	if account.ID == "" {
 		account.ID = auth.GenerateAccountID()
 	}
-	if account.Region == "" {
+	if account.Region == "" && account.EffectiveBackend() == config.BackendKiro {
 		account.Region = "us-east-1"
 	}
 
@@ -2905,14 +2966,14 @@ func (h *Handler) apiAddAccount(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := config.AddAccount(account); err != nil {
-		w.WriteHeader(500)
+		w.WriteHeader(400)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
 
 	h.pool.Reload()
 	// 新账号若已启用且有 token（或是 API-key 账号），立即拉取并缓存模型列表
-	if account.Enabled && (account.AccessToken != "" || account.IsApiKeyCredential()) {
+	if account.Enabled && (account.AccessToken != "" || account.IsApiKeyCredential() || account.EffectiveBackend() != config.BackendKiro) {
 		acc := account
 		safeGo(func() {
 			if err := h.fetchAndCacheAccountModels(&acc); err != nil {
@@ -2973,16 +3034,48 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 	if v, ok := updates["proxyURL"].(string); ok {
 		existing.ProxyURL = v
 	}
+	if v, ok := updates["baseURL"].(string); ok {
+		existing.BaseURL = v
+	}
+	if v, ok := updates["apiFormat"].(string); ok {
+		existing.APIFormat = v
+	}
+	if v, ok := updates["apiKey"].(string); ok && strings.TrimSpace(v) != "" {
+		existing.ApiKey = v
+	}
+	if v, ok := updates["models"].([]interface{}); ok {
+		existing.Models = existing.Models[:0]
+		for _, item := range v {
+			if model, ok := item.(string); ok {
+				existing.Models = append(existing.Models, model)
+			}
+		}
+	}
+	if v, ok := updates["pricing"]; ok {
+		encoded, err := json.Marshal(v)
+		if err != nil {
+			w.WriteHeader(400)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Invalid pricing"})
+			return
+		}
+		var pricing config.UpstreamPricing
+		if err := json.Unmarshal(encoded, &pricing); err != nil {
+			w.WriteHeader(400)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Invalid pricing"})
+			return
+		}
+		existing.Pricing = &pricing
+	}
 
 	if err := config.UpdateAccount(id, *existing); err != nil {
-		w.WriteHeader(500)
+		w.WriteHeader(400)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
 
 	h.pool.Reload()
 	// 账号从禁用→启用时，自动拉取并缓存模型列表
-	if !oldEnabled && existing.Enabled && existing.AccessToken != "" {
+	if !oldEnabled && existing.Enabled && (existing.AccessToken != "" || existing.EffectiveBackend() != config.BackendKiro) {
 		acc := *existing
 		safeGo(func() {
 			if err := h.fetchAndCacheAccountModels(&acc); err != nil {
@@ -3989,16 +4082,16 @@ func (h *Handler) apiGetStatus(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) apiGetSettings(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"apiKey":          config.GetApiKey(),
-		"requireApiKey":   config.IsApiKeyRequired(),
-		"port":            config.GetPort(),
-		"host":            config.GetHost(),
-		"allowOverUsage":  config.GetAllowOverUsage(),
-		"maxPayloadBytes": config.GetMaxPayloadBytes(),
-		"publicBaseURL":   config.GetPublicBaseURL(),
+		"apiKey":             config.GetApiKey(),
+		"requireApiKey":      config.IsApiKeyRequired(),
+		"port":               config.GetPort(),
+		"host":               config.GetHost(),
+		"allowOverUsage":     config.GetAllowOverUsage(),
+		"maxPayloadBytes":    config.GetMaxPayloadBytes(),
+		"publicBaseURL":      config.GetPublicBaseURL(),
 		"limitNoticeMessage": config.GetLimitNoticeMessage(),
-		"forceModel":      config.GetForceModel(),
-		"identityModel":   config.GetIdentityModel(),
+		"forceModel":         config.GetForceModel(),
+		"identityModel":      config.GetIdentityModel(),
 	})
 }
 
@@ -4047,15 +4140,15 @@ func (h *Handler) apiUpdatePromptFilter(w http.ResponseWriter, r *http.Request) 
 
 func (h *Handler) apiUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ApiKey          *string `json:"apiKey,omitempty"`
-		RequireApiKey   *bool   `json:"requireApiKey,omitempty"`
-		Password        string  `json:"password,omitempty"`
-		AllowOverUsage  *bool   `json:"allowOverUsage,omitempty"`
-		MaxPayloadBytes *int    `json:"maxPayloadBytes,omitempty"`
-		PublicBaseURL   *string `json:"publicBaseURL,omitempty"`
+		ApiKey             *string `json:"apiKey,omitempty"`
+		RequireApiKey      *bool   `json:"requireApiKey,omitempty"`
+		Password           string  `json:"password,omitempty"`
+		AllowOverUsage     *bool   `json:"allowOverUsage,omitempty"`
+		MaxPayloadBytes    *int    `json:"maxPayloadBytes,omitempty"`
+		PublicBaseURL      *string `json:"publicBaseURL,omitempty"`
 		LimitNoticeMessage *string `json:"limitNoticeMessage,omitempty"`
-		ForceModel      *string `json:"forceModel,omitempty"`
-		IdentityModel   *string `json:"identityModel,omitempty"`
+		ForceModel         *string `json:"forceModel,omitempty"`
+		IdentityModel      *string `json:"identityModel,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
@@ -4182,12 +4275,16 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 	}
 	json.NewDecoder(r.Body).Decode(&req)
 	if req.Model == "" {
-		req.Model = "claude-sonnet-4"
+		if account.EffectiveBackend() != config.BackendKiro && len(account.Models) > 0 {
+			req.Model = account.Models[0]
+		} else {
+			req.Model = "claude-sonnet-4"
+		}
 	}
 
 	// Build a minimal chat payload
 	thinkingCfg := config.GetThinkingConfig()
-	actualModel, thinking := ParseModelAndThinking(req.Model, thinkingCfg.Suffix)
+	actualModel, thinking := ParseClientModelAndThinking(req.Model, thinkingCfg.Suffix)
 
 	openaiReq := &OpenAIRequest{
 		Model:     actualModel,
@@ -4207,7 +4304,7 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 		OnContextUsage: func(pct float64) {},
 	}
 
-	err := CallKiroAPI(account, kiroPayload, callback)
+	err := CallUpstreamAPI(account, actualModel, kiroPayload, callback)
 	if err != nil {
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
@@ -4235,6 +4332,18 @@ func (h *Handler) apiRefreshAccount(w http.ResponseWriter, r *http.Request, id s
 	if account == nil {
 		w.WriteHeader(404)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Account not found"})
+		return
+	}
+	if account.EffectiveBackend() != config.BackendKiro {
+		if err := h.fetchAndCacheAccountModels(account); err != nil {
+			w.WriteHeader(500)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true, "models": account.Models,
+			"message": "OpenAI-compatible account configuration refreshed",
+		})
 		return
 	}
 
@@ -4364,6 +4473,12 @@ func (h *Handler) apiGetAccountFull(w http.ResponseWriter, r *http.Request, id s
 		"clientSecret":      account.ClientSecret,
 		"authMethod":        account.AuthMethod,
 		"provider":          account.Provider,
+		"backend":           account.EffectiveBackend(),
+		"apiFormat":         account.EffectiveAPIFormat(),
+		"apiKey":            account.ApiKey,
+		"baseURL":           account.BaseURL,
+		"models":            account.Models,
+		"pricing":           account.Pricing,
 		"issuerUrl":         account.IssuerURL,
 		"idpClientId":       account.IdPClientID,
 		"scopes":            account.Scopes,
@@ -4422,6 +4537,12 @@ func (h *Handler) apiGetAccountModels(w http.ResponseWriter, r *http.Request, id
 		json.NewEncoder(w).Encode(map[string]string{"error": "Account not found"})
 		return
 	}
+	if account.EffectiveBackend() != config.BackendKiro {
+		models := configuredAccountModels(account)
+		h.pool.SetModelList(id, account.Models)
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "models": models})
+		return
+	}
 
 	models, err := ListAvailableModels(account)
 	if err != nil {
@@ -4449,6 +4570,15 @@ func (h *Handler) apiGetAccountModels(w http.ResponseWriter, r *http.Request, id
 
 // apiGetAccountModelsCached 返回账号已缓存的模型列表（不实时拉取）
 func (h *Handler) apiGetAccountModelsCached(w http.ResponseWriter, r *http.Request, id string) {
+	for _, account := range config.GetAccounts() {
+		if account.ID == id && account.EffectiveBackend() != config.BackendKiro {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": true,
+				"models":  account.Models,
+			})
+			return
+		}
+	}
 	models := h.pool.GetModelList(id)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,

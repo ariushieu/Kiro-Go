@@ -14,6 +14,9 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"math"
+	"net"
+	"net/url"
 	"os"
 	"runtime"
 	"strings"
@@ -50,10 +53,20 @@ type Account struct {
 	KiroApiKey   string `json:"kiroApiKey,omitempty"`   // API key credential for headless auth (used directly as bearer token)
 	AuthMethod   string `json:"authMethod"`             // Authentication method: "idc" (AWS IdC), "social" (GitHub/Google), or "api_key"
 	Provider     string `json:"provider,omitempty"`     // Identity provider name (e.g., "BuilderId", "GitHub")
-	Region       string `json:"region"`                 // AWS region (fallback for both auth and API region)
-	AuthRegion   string `json:"authRegion,omitempty"`   // Region for token refresh endpoints; falls back to region
-	ApiRegion    string `json:"apiRegion,omitempty"`    // Region for API request hosts; falls back to region
-	StartUrl     string `json:"startUrl,omitempty"`     // AWS SSO start URL
+
+	// Upstream backend. Backend is deliberately separate from Provider: Provider
+	// identifies the login/identity provider for Kiro accounts, while Backend
+	// selects the API implementation used to serve requests from the pool.
+	Backend    string           `json:"backend,omitempty"`    // "kiro" (default) | "openai_compatible"
+	APIFormat  string           `json:"apiFormat,omitempty"`  // "openai" (default) | "anthropic"
+	ApiKey     string           `json:"apiKey,omitempty"`     // Secret used by non-Kiro upstreams
+	BaseURL    string           `json:"baseURL,omitempty"`    // Custom upstream API root or full messages/completions URL
+	Models     []string         `json:"models,omitempty"`     // Models served by this upstream; empty only for Kiro
+	Pricing    *UpstreamPricing `json:"pricing,omitempty"`    // USD-denominated token pricing for custom upstream billing
+	Region     string           `json:"region"`               // AWS region (fallback for both auth and API region)
+	AuthRegion string           `json:"authRegion,omitempty"` // Region for token refresh endpoints; falls back to region
+	ApiRegion  string           `json:"apiRegion,omitempty"`  // Region for API request hosts; falls back to region
+	StartUrl   string           `json:"startUrl,omitempty"`   // AWS SSO start URL
 
 	// External IdP authentication fields (for "Your organization" Kiro SSO flow)
 	IssuerURL   string `json:"issuerUrl,omitempty"`   // IdP OIDC issuer (e.g. https://login.microsoftonline.com/<tenant>/v2.0)
@@ -121,6 +134,143 @@ type Account struct {
 	LastUsed     int64   `json:"lastUsed,omitempty"`     // Last request timestamp
 	TotalTokens  int     `json:"totalTokens,omitempty"`  // Cumulative tokens processed
 	TotalCredits float64 `json:"totalCredits,omitempty"` // Cumulative credits consumed
+}
+
+// UpstreamPricing is applied to every model configured on a custom upstream
+// account. Prices are USD per million tokens. Markup is a multiplier over
+// source cost (for example 1.4), and MinChargeUSD is the minimum customer debit
+// per successful request.
+type UpstreamPricing struct {
+	InputPerMillion        float64 `json:"inputPerMillion,omitempty"`
+	OutputPerMillion       float64 `json:"outputPerMillion,omitempty"`
+	CacheReadPerMillion    float64 `json:"cacheReadPerMillion,omitempty"`
+	CacheWrite5mPerMillion float64 `json:"cacheWrite5mPerMillion,omitempty"`
+	CacheWrite1hPerMillion float64 `json:"cacheWrite1hPerMillion,omitempty"`
+	Markup                 float64 `json:"markup,omitempty"`
+	MinChargeUSD           float64 `json:"minChargeUSD,omitempty"`
+}
+
+const (
+	BackendKiro             = "kiro"
+	BackendOpenAICompatible = "openai_compatible"
+	APIFormatOpenAI         = "openai"
+	APIFormatAnthropic      = "anthropic"
+)
+
+// EffectiveBackend preserves backward compatibility with configs created before
+// the backend field existed.
+func (a *Account) EffectiveBackend() string {
+	if a == nil || strings.TrimSpace(a.Backend) == "" {
+		return BackendKiro
+	}
+	return strings.ToLower(strings.TrimSpace(a.Backend))
+}
+
+// EffectiveAPIFormat preserves compatibility with custom upstream accounts
+// created before the protocol selector was introduced.
+func (a *Account) EffectiveAPIFormat() string {
+	if a == nil || strings.TrimSpace(a.APIFormat) == "" {
+		return APIFormatOpenAI
+	}
+	return strings.ToLower(strings.TrimSpace(a.APIFormat))
+}
+
+// normalizeAccount validates persistent upstream settings and returns a
+// normalized copy suitable for storing in config.json.
+func normalizeAccount(account Account) (Account, error) {
+	account.Backend = account.EffectiveBackend()
+	switch account.Backend {
+	case BackendKiro:
+		return account, nil
+	case BackendOpenAICompatible:
+		account.APIFormat = account.EffectiveAPIFormat()
+		if account.APIFormat != APIFormatOpenAI && account.APIFormat != APIFormatAnthropic {
+			return account, fmt.Errorf("unsupported custom upstream apiFormat %q", account.APIFormat)
+		}
+		if strings.TrimSpace(account.ApiKey) == "" {
+			return account, fmt.Errorf("apiKey is required for custom upstream accounts")
+		}
+		baseURL, err := normalizeOpenAIBaseURL(account.BaseURL)
+		if err != nil {
+			return account, err
+		}
+		account.BaseURL = baseURL
+		account.Models = normalizeAccountModels(account.Models)
+		if len(account.Models) == 0 {
+			return account, fmt.Errorf("at least one model is required for custom upstream accounts")
+		}
+		account.ExpiresAt = 0
+		if err := normalizeUpstreamPricing(&account); err != nil {
+			return account, err
+		}
+		return account, nil
+	default:
+		return account, fmt.Errorf("unsupported account backend %q", account.Backend)
+	}
+}
+
+func normalizeUpstreamPricing(account *Account) error {
+	if account == nil || account.Pricing == nil {
+		return nil
+	}
+	p := account.Pricing
+	prices := []float64{
+		p.InputPerMillion, p.OutputPerMillion, p.CacheReadPerMillion,
+		p.CacheWrite5mPerMillion, p.CacheWrite1hPerMillion, p.MinChargeUSD,
+	}
+	for _, value := range prices {
+		if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
+			return fmt.Errorf("custom upstream pricing values must be finite and non-negative")
+		}
+	}
+	if p.Markup == 0 {
+		p.Markup = 1.4
+	}
+	if math.IsNaN(p.Markup) || math.IsInf(p.Markup, 0) || p.Markup < 1 {
+		return fmt.Errorf("custom upstream pricing markup must be at least 1")
+	}
+	if p.MinChargeUSD == 0 && (p.InputPerMillion > 0 || p.OutputPerMillion > 0) {
+		p.MinChargeUSD = 0.001
+	}
+	return nil
+}
+
+func normalizeAccountModels(models []string) []string {
+	seen := make(map[string]bool, len(models))
+	out := make([]string, 0, len(models))
+	for _, model := range models {
+		model = strings.TrimSpace(model)
+		key := strings.ToLower(model)
+		if model == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, model)
+	}
+	return out
+}
+
+func normalizeOpenAIBaseURL(raw string) (string, error) {
+	raw = strings.TrimRight(strings.TrimSpace(raw), "/")
+	if raw == "" {
+		return "", fmt.Errorf("baseURL is required for OpenAI-compatible accounts")
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "", fmt.Errorf("invalid baseURL %q", raw)
+	}
+	if u.Scheme != "https" {
+		host := u.Hostname()
+		ip := net.ParseIP(host)
+		loopback := strings.EqualFold(host, "localhost") || (ip != nil && ip.IsLoopback())
+		if u.Scheme != "http" || !loopback {
+			return "", fmt.Errorf("baseURL must use https (http is allowed only for loopback hosts)")
+		}
+	}
+	if u.RawQuery != "" || u.Fragment != "" {
+		return "", fmt.Errorf("baseURL must not contain a query or fragment")
+	}
+	return strings.TrimRight(u.String(), "/"), nil
 }
 
 // IsApiKeyCredential returns true if this account is authenticated via API key.
@@ -407,7 +557,7 @@ type AccountInfo struct {
 }
 
 // Version current version
-const Version = "1.2.8"
+const Version = "1.4.0"
 
 var (
 	cfg     *Config
@@ -484,6 +634,20 @@ func Load() error {
 			Migrated:  true,
 			CreatedAt: time.Now().Unix(),
 		})
+		if err := saveLocked(); err != nil {
+			return err
+		}
+	}
+
+	// Migration: accounts created before multi-backend support are Kiro accounts.
+	backendMigrated := false
+	for i := range cfg.Accounts {
+		if strings.TrimSpace(cfg.Accounts[i].Backend) == "" {
+			cfg.Accounts[i].Backend = BackendKiro
+			backendMigrated = true
+		}
+	}
+	if backendMigrated {
 		if err := saveLocked(); err != nil {
 			return err
 		}
@@ -777,6 +941,11 @@ func GetEnabledAccounts() []Account {
 func AddAccount(account Account) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
+	var err error
+	account, err = normalizeAccount(account)
+	if err != nil {
+		return err
+	}
 	cfg.Accounts = append(cfg.Accounts, account)
 	return Save()
 }
@@ -784,6 +953,11 @@ func AddAccount(account Account) error {
 func UpdateAccount(id string, account Account) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
+	var err error
+	account, err = normalizeAccount(account)
+	if err != nil {
+		return err
+	}
 	for i, a := range cfg.Accounts {
 		if a.ID == id {
 			cfg.Accounts[i] = account

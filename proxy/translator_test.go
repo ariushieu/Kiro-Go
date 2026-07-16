@@ -471,6 +471,16 @@ func TestParseModelAndThinkingDoesNotRewriteDatedSnapshotMinor(t *testing.T) {
 	}
 }
 
+func TestParseClientModelPreservesCrossProviderModel(t *testing.T) {
+	got, thinking := ParseClientModelAndThinking("gpt-4o-thinking", "-thinking")
+	if got != "gpt-4o" || !thinking {
+		t.Fatalf("got model=%q thinking=%v", got, thinking)
+	}
+	if mapped := MapModel(got); mapped != "claude-sonnet-4.5" {
+		t.Fatalf("Kiro adapter should still map the fallback, got %q", mapped)
+	}
+}
+
 func TestClaudeToolResultImageAttachedToCurrentMessage(t *testing.T) {
 	const imgData = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
 	req := &ClaudeRequest{

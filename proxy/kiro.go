@@ -397,6 +397,7 @@ type KiroStreamCallback struct {
 	OnComplete     func(inputTokens, outputTokens int)
 	OnError        func(err error)
 	OnCredits      func(credits float64)
+	OnSourceCost   func(costUSD float64)
 	OnContextUsage func(percentage float64)
 }
 

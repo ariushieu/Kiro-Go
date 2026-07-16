@@ -865,7 +865,7 @@
       const isSelected = selectedAccounts.has(a.id);
       const weight = a.weight || 0;
       const weightBadge = weight >= 2 ? '<span class="badge badge-warning">' + escapeHtml(t('accounts.weightShort')) + ':' + weight + '</span>' : '';
-      const overageBadge = renderOverageBadge(a);
+      const overageBadge = a.backend === 'openai_compatible' ? '' : renderOverageBadge(a);
       let proxyBadge = '';
       const maskedProxy = maskProxyForDisplay(a.proxyURL);
       if (maskedProxy) {
@@ -879,7 +879,7 @@
       }
       const banned = a.banStatus && a.banStatus !== 'ACTIVE';
       const idAttr = escapeAttr(a.id);
-      const displayEmail = getDisplayEmail(a.email, a.id);
+      const displayEmail = a.nickname || getDisplayEmail(a.email, a.id);
       const selectLabel = t('accounts.selectAccount', displayEmail);
 
       const refreshSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>';
@@ -899,7 +899,9 @@
         weightBadge +
         overageBadge +
         proxyBadge +
-        '<span class="badge badge-info">' + escapeHtml(formatAuthMethod(a.provider || a.authMethod)) + '</span>' +
+        '<span class="badge badge-info">' + escapeHtml(a.backend === 'openai_compatible'
+          ? ((a.apiFormat || 'openai') === 'anthropic' ? 'Anthropic-compatible' : 'OpenAI-compatible')
+          : formatAuthMethod(a.provider || a.authMethod)) + '</span>' +
         getStatusBadge(a) +
         '</div>' +
         '</div>' +
@@ -1116,6 +1118,33 @@
   function detailItem(label, value) {
     return '<div class="detail-item"><div class="detail-label">' + escapeHtml(label) + '</div><div class="detail-value">' + escapeHtml(value) + '</div></div>';
   }
+  function renderCustomUpstreamDetail(a, idAttr) {
+    if (a.backend !== 'openai_compatible') return '';
+    const format = a.apiFormat || 'openai';
+    const p = a.pricing || {};
+    return '<div class="detail-section"><h4>' + escapeHtml(t('openaiCompat.apiFormat')) + '</h4>' +
+      '<div class="form-group"><select id="apiFormatInput">' +
+      '<option value="openai"' + (format === 'openai' ? ' selected' : '') + '>' + escapeHtml(t('openaiCompat.formatOpenAI')) + '</option>' +
+      '<option value="anthropic"' + (format === 'anthropic' ? ' selected' : '') + '>' + escapeHtml(t('openaiCompat.formatAnthropic')) + '</option>' +
+      '</select><small>' + escapeHtml(t('openaiCompat.formatHint')) + '</small></div>' +
+      '<button class="btn btn-sm btn-primary" data-detail-action="saveAPIFormat" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.save')) + '</button>' +
+      '<div class="detail-grid mt-3">' + detailItem(t('openaiCompat.baseURL'), a.baseURL || '-') +
+      detailItem(t('openaiCompat.models'), (a.models || []).join(', ') || '-') + '</div></div>' +
+      '<div class="detail-section"><h4>' + escapeHtml(t('billing.title')) + '</h4>' +
+      '<p class="help-block">' + escapeHtml(t('billing.desc')) + '</p><div class="detail-grid">' +
+      billingNumberField('pricingInput', t('billing.inputPrice'), p.inputPerMillion || 0, '0.01') +
+      billingNumberField('pricingOutput', t('billing.outputPrice'), p.outputPerMillion || 0, '0.01') +
+      billingNumberField('pricingCacheRead', t('billing.cacheReadPrice'), p.cacheReadPerMillion || 0, '0.01') +
+      billingNumberField('pricingCacheWrite5m', t('billing.cacheWrite5mPrice'), p.cacheWrite5mPerMillion || 0, '0.01') +
+      billingNumberField('pricingCacheWrite1h', t('billing.cacheWrite1hPrice'), p.cacheWrite1hPerMillion || 0, '0.01') +
+      billingNumberField('pricingMarkup', t('billing.markup'), p.markup || 1.4, '0.01') +
+      billingNumberField('pricingMinCharge', t('billing.minCharge'), p.minChargeUSD == null ? 0.001 : p.minChargeUSD, '0.001') +
+      '</div><button class="btn btn-sm btn-primary" data-detail-action="savePricing" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.save')) + '</button></div>';
+  }
+  function billingNumberField(id, label, value, step) {
+    return '<div class="form-group"><label for="' + id + '">' + escapeHtml(label) + '</label>' +
+      '<input type="number" id="' + id + '" value="' + escapeAttr(String(value)) + '" min="0" step="' + step + '" /></div>';
+  }
   function showDetail(id) {
     const a = accountsData.find(x => x.id === id);
     if (!a) return;
@@ -1127,6 +1156,8 @@
       detailItem(t('detail.authMethod'), formatAuthMethod(a.provider || a.authMethod)) +
       detailItem(t('detail.region'), a.region || 'us-east-1') +
       '</div></div>' +
+
+      renderCustomUpstreamDetail(a, idAttr) +
 
       '<div class="detail-section"><h4>' + escapeHtml(t('detail.machineId')) + '</h4><div class="machine-id-row">' +
       '<input type="text" id="machineIdInput" value="' + escapeAttr(a.machineId || '') + '" placeholder="UUID" />' +
@@ -2597,7 +2628,8 @@
     local: 'fa-solid fa-folder-open',
     credentials: 'fa-solid fa-code',
     cookie: 'fa-solid fa-cookie-bite',
-    kiro: 'fa-solid fa-building'
+    kiro: 'fa-solid fa-building',
+    openai: 'fa-solid fa-cloud'
   };
   function methodCard(type, title, desc) {
     var icon = METHOD_ICONS[type] || 'fa-solid fa-circle-plus';
@@ -2625,6 +2657,7 @@
     else if (type === 'apikey') modalApiKey(title, body);
     else if (type === 'apikeybatch') modalApiKeyBatch(title, body);
     else if (type === 'kiro') modalKiro(title, body);
+    else if (type === 'openai') modalOpenAICompatible(title, body);
     if (!modal.classList.contains('active')) openDialog('addModal');
     enhanceCustomSelects(body);
   }
@@ -2650,6 +2683,7 @@
       methodCard('cookie', t('modal.cookieTitle'), t('modal.cookieDesc')) +
       methodCard('apikey', t('modal.apikeyTitle'), t('modal.apikeyDesc')) +
       methodCard('apikeybatch', t('modal.apikeyBatchTitle'), t('modal.apikeyBatchDesc')) +
+      methodCard('openai', t('openaiCompat.title'), t('openaiCompat.desc')) +
       '</div>' +
       '<div class="modal-footer"><button class="btn btn-secondary" data-close-add="1" type="button">' + escapeHtml(t('common.cancel')) + '</button></div>';
   }
@@ -2913,6 +2947,61 @@
       '</div>' +
       '<div id="apikeyBatchResults" class="mt-3"></div>';
     $('importApikeyBatchBtn').addEventListener('click', importApiKeysBatch);
+  }
+  async function saveAPIFormat(id) {
+    const el = $('apiFormatInput');
+    await putAccount(id, { apiFormat: el ? el.value : 'openai' }, t('detail.saved'));
+  }
+  function readPricing(prefix) {
+    const number = id => Math.max(0, parseFloat($(prefix + id).value) || 0);
+    return {
+      inputPerMillion: number('Input'),
+      outputPerMillion: number('Output'),
+      cacheReadPerMillion: number('CacheRead'),
+      cacheWrite5mPerMillion: number('CacheWrite5m'),
+      cacheWrite1hPerMillion: number('CacheWrite1h'),
+      markup: Math.max(1, number('Markup') || 1.4),
+      minChargeUSD: number('MinCharge')
+    };
+  }
+  async function savePricing(id) {
+    await putAccount(id, { pricing: readPricing('pricing') }, t('detail.saved'));
+  }
+  function modalOpenAICompatible(title, body) {
+    title.textContent = t('openaiCompat.title');
+    body.innerHTML =
+      '<p class="help-block">' + escapeHtml(t('openaiCompat.desc')) + '</p>' +
+      '<div class="form-group"><label>' + escapeHtml(t('openaiCompat.nickname')) + '</label>' +
+      '<input type="text" id="openaiNickname" placeholder="OpenRouter / Internal Gateway" /></div>' +
+      '<div class="form-group"><label>' + escapeHtml(t('openaiCompat.apiFormat')) + '</label>' +
+      '<select id="openaiAPIFormat"><option value="openai">' + escapeHtml(t('openaiCompat.formatOpenAI')) + '</option>' +
+      '<option value="anthropic">' + escapeHtml(t('openaiCompat.formatAnthropic')) + '</option></select>' +
+      '<small>' + escapeHtml(t('openaiCompat.formatHint')) + '</small></div>' +
+      '<div class="form-group"><label>' + escapeHtml(t('openaiCompat.baseURL')) + '</label>' +
+      '<input type="url" id="openaiBaseURL" placeholder="https://api.openai.com/v1" /></div>' +
+      '<div class="form-group"><label>' + escapeHtml(t('openaiCompat.apiKey')) + '</label>' +
+      '<input type="password" id="openaiApiKey" autocomplete="new-password" placeholder="sk-..." /></div>' +
+      '<div class="form-group"><label>' + escapeHtml(t('openaiCompat.models')) + '</label>' +
+      '<textarea id="openaiModels" class="font-mono" rows="4" placeholder="gpt-4.1\ngpt-4.1-mini"></textarea>' +
+      '<small>' + escapeHtml(t('openaiCompat.modelsHint')) + '</small></div>' +
+      '<div class="detail-section"><h4>' + escapeHtml(t('billing.title')) + '</h4><p class="help-block">' + escapeHtml(t('billing.desc')) + '</p>' +
+      '<div class="detail-grid">' +
+      billingNumberField('openaiPricingInput', t('billing.inputPrice'), 0, '0.01') +
+      billingNumberField('openaiPricingOutput', t('billing.outputPrice'), 0, '0.01') +
+      billingNumberField('openaiPricingCacheRead', t('billing.cacheReadPrice'), 0, '0.01') +
+      billingNumberField('openaiPricingCacheWrite5m', t('billing.cacheWrite5mPrice'), 0, '0.01') +
+      billingNumberField('openaiPricingCacheWrite1h', t('billing.cacheWrite1hPrice'), 0, '0.01') +
+      billingNumberField('openaiPricingMarkup', t('billing.markup'), 1.4, '0.01') +
+      billingNumberField('openaiPricingMinCharge', t('billing.minCharge'), 0.001, '0.001') + '</div></div>' +
+      '<div class="form-group"><label>' + escapeHtml(t('detail.weight')) + '</label>' +
+      '<input type="number" id="openaiWeight" value="1" min="1" max="10" /></div>' +
+      '<div class="form-group"><label>' + escapeHtml(t('detail.proxyURL')) + '</label>' +
+      '<input type="text" id="openaiProxyURL" placeholder="socks5://host:port" /></div>' +
+      '<div class="modal-footer">' +
+      '<button class="btn btn-secondary" data-modal-goto="add" type="button">' + escapeHtml(t('common.back')) + '</button>' +
+      '<button class="btn btn-primary" id="addOpenAICompatBtn" type="button">' + escapeHtml(t('common.add')) + '</button>' +
+      '</div>';
+    $('addOpenAICompatBtn').addEventListener('click', addOpenAICompatible);
   }
   function modalKiro(title, body) {
     title.textContent = t('modal.kiroTitle');
@@ -3211,6 +3300,37 @@
       toastPrimary(t('apikey.success') + ': ' + (d.account?.email || d.account?.id));
       autoRefreshNewAccount(d.account?.id);
     } else toastError(t('common.failed') + ': ' + (d.error || ''));
+  }
+  async function addOpenAICompatible() {
+    const baseURL = $('openaiBaseURL').value.trim();
+    const apiKey = $('openaiApiKey').value.trim();
+    const apiFormat = $('openaiAPIFormat').value;
+    const models = $('openaiModels').value.split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+    if (!baseURL) return toastWarning(t('openaiCompat.baseURLRequired'));
+    if (!apiKey) return toastWarning(t('openaiCompat.apiKeyRequired'));
+    if (!models.length) return toastWarning(t('openaiCompat.modelsRequired'));
+    const payload = {
+      backend: 'openai_compatible',
+      apiFormat,
+      authMethod: 'upstream_api_key',
+      nickname: $('openaiNickname').value.trim() || (apiFormat === 'anthropic' ? 'Anthropic-compatible' : 'OpenAI-compatible'),
+      baseURL,
+      apiKey,
+      models,
+      pricing: readPricing('openaiPricing'),
+      weight: Math.max(1, Math.min(10, parseInt($('openaiWeight').value, 10) || 1)),
+      proxyURL: $('openaiProxyURL').value.trim(),
+      enabled: true
+    };
+    try {
+      const res = await api('/accounts', { method: 'POST', body: JSON.stringify(payload) });
+      const d = await res.json();
+      if (!res.ok || !d.success) return toastError(t('common.failed') + ': ' + (d.error || ''));
+      closeModal(); loadAccounts(); loadStats();
+      toastPrimary(t('openaiCompat.added'));
+    } catch (e) {
+      toastError(t('login.connectError'));
+    }
   }
   async function importApiKeysBatch() {
     const raw = $('apikeyBatchList').value.trim();
@@ -3998,11 +4118,13 @@
     }
     if (empty) empty.classList.add('hidden');
 
-    let sumInput = 0, sumOutput = 0, sumCredits = 0, errorCount = 0;
+    let sumInput = 0, sumOutput = 0, sumCredits = 0, sumSourceCost = 0, sumProfit = 0, errorCount = 0;
     const rows = entries.map(e => {
       sumInput += e.inputTokens || 0;
       sumOutput += e.outputTokens || 0;
       sumCredits += e.credits || 0;
+      sumSourceCost += e.sourceCost || 0;
+      sumProfit += e.profit || 0;
       const isError = e.status === 'error';
       if (isError) errorCount++;
       const keyLabel = e.apiKeyMasked
@@ -4030,6 +4152,8 @@
         '<td class="num text-xs"><span style="color:#22c55e;">&#9660; ' + numOrDash(e.inputTokens) + '</span> / <span style="color:#f59e0b;">&#9650; ' + numOrDash(e.outputTokens) + '</span></td>' +
         '<td class="num">' + numOrDash(e.totalTokens) + '</td>' +
         '<td class="num">' + numOrDash(e.credits) + '</td>' +
+        '<td class="num">' + numOrDash(e.sourceCost) + '</td>' +
+        '<td class="num" style="color:' + ((e.profit || 0) >= 0 ? '#22c55e' : '#ef4444') + '">' + numOrDash(e.profit) + '</td>' +
         '<td class="num text-xs">' + durationCell + '</td>' +
         '<td>' + detailCell + '</td>' +
         '</tr>';
@@ -4044,7 +4168,9 @@
         '<span class="apilog-chip">' + escapeHtml(t('apilog.totalRequests', entries.length)) + '</span>' +
         errChip +
         '<span class="apilog-chip">' + escapeHtml(t('apilog.totalTokens', formatNumber(sumInput + sumOutput))) + '</span>' +
-        '<span class="apilog-chip">' + escapeHtml(t('apilog.totalCredits', formatNumber(sumCredits))) + '</span>';
+        '<span class="apilog-chip">' + escapeHtml(t('billing.charged')) + ': $' + escapeHtml(formatNumber(sumCredits)) + '</span>' +
+        '<span class="apilog-chip">' + escapeHtml(t('billing.cost')) + ': $' + escapeHtml(formatNumber(sumSourceCost)) + '</span>' +
+        '<span class="apilog-chip" style="color:#22c55e">' + escapeHtml(t('billing.profit')) + ': $' + escapeHtml(formatNumber(sumProfit)) + '</span>';
     }
   }
 
@@ -4063,7 +4189,7 @@
     if (!entries.length) { toast(t('logs.exportFailed'), 'error'); return; }
     let blob;
     if (format === 'csv') {
-      const cols = ['time', 'status', 'endpoint', 'apiKeyName', 'apiKeyMasked', 'model', 'accountEmail', 'inputTokens', 'outputTokens', 'totalTokens', 'credits', 'durationMs', 'statusCode', 'error'];
+      const cols = ['time', 'status', 'endpoint', 'apiKeyName', 'apiKeyMasked', 'model', 'accountEmail', 'inputTokens', 'outputTokens', 'totalTokens', 'credits', 'sourceCost', 'profit', 'durationMs', 'statusCode', 'error'];
       const esc = v => {
         const s = String(v == null ? '' : v);
         return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
@@ -4334,6 +4460,8 @@
       const a = b.dataset.detailAction;
       if (a === 'saveMachineId') saveMachineId(id);
       else if (a === 'saveWeight') saveWeight(id);
+      else if (a === 'saveAPIFormat') saveAPIFormat(id);
+      else if (a === 'savePricing') savePricing(id);
       else if (a === 'toggleOverage') toggleOverageSwitch(id, b);
       else if (a === 'refreshOverage') refreshAccountOverage(id);
       else if (a === 'saveProxyURL') saveProxyURL(id);

@@ -7,6 +7,71 @@ import (
 	"testing"
 )
 
+func TestOpenAICompatibleAccountValidationAndNormalization(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	account := Account{
+		ID: "openai-1", Backend: BackendOpenAICompatible,
+		ApiKey: "secret", BaseURL: "http://127.0.0.1:8081/v1/",
+		Models: []string{" gpt-4.1 ", "gpt-4.1", "gpt-*"}, Enabled: true,
+	}
+	if err := AddAccount(account); err != nil {
+		t.Fatalf("add account: %v", err)
+	}
+	got := GetAccounts()[0]
+	if got.BaseURL != "http://127.0.0.1:8081/v1" {
+		t.Fatalf("unexpected normalized baseURL %q", got.BaseURL)
+	}
+	if len(got.Models) != 2 || got.Models[0] != "gpt-4.1" || got.Models[1] != "gpt-*" {
+		t.Fatalf("unexpected normalized models: %#v", got.Models)
+	}
+	if got.EffectiveAPIFormat() != APIFormatOpenAI {
+		t.Fatalf("unexpected default api format %q", got.EffectiveAPIFormat())
+	}
+}
+
+func TestOpenAICompatibleAccountRejectsUnsafeOrIncompleteConfig(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	cases := []Account{
+		{ID: "missing-key", Backend: BackendOpenAICompatible, BaseURL: "https://example.com/v1", Models: []string{"gpt-4.1"}},
+		{ID: "unsafe-http", Backend: BackendOpenAICompatible, ApiKey: "secret", BaseURL: "http://example.com/v1", Models: []string{"gpt-4.1"}},
+		{ID: "missing-model", Backend: BackendOpenAICompatible, ApiKey: "secret", BaseURL: "https://example.com/v1"},
+		{ID: "bad-format", Backend: BackendOpenAICompatible, APIFormat: "other", ApiKey: "secret", BaseURL: "https://example.com/v1", Models: []string{"gpt-4.1"}},
+	}
+	for _, account := range cases {
+		if err := AddAccount(account); err == nil {
+			t.Fatalf("expected account %q to be rejected", account.ID)
+		}
+	}
+}
+
+func TestCustomUpstreamPricingNormalization(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	account := Account{
+		ID: "priced", Backend: BackendOpenAICompatible, ApiKey: "secret",
+		BaseURL: "https://example.com/v1", Models: []string{"model"},
+		Pricing: &UpstreamPricing{InputPerMillion: 10, OutputPerMillion: 50},
+	}
+	if err := AddAccount(account); err != nil {
+		t.Fatalf("add priced account: %v", err)
+	}
+	got := GetAccounts()[0].Pricing
+	if got == nil || got.Markup != 1.4 || got.MinChargeUSD != 0.001 {
+		t.Fatalf("unexpected normalized pricing: %#v", got)
+	}
+
+	account.ID = "bad-price"
+	account.Pricing = &UpstreamPricing{InputPerMillion: -1, Markup: 0.5}
+	if err := AddAccount(account); err == nil {
+		t.Fatal("expected invalid pricing to be rejected")
+	}
+}
+
 func TestUpdateSettingsPatchPreservesOmittedAPIKeyFields(t *testing.T) {
 	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)
@@ -279,11 +344,11 @@ func TestAdminPathOverrideNormalization(t *testing.T) {
 		t.Fatalf("default: want %q, got %q", DefaultAdminPath, got)
 	}
 	for in, want := range map[string]string{
-		"panel":             "/panel",
-		"/panel":            "/panel",
-		"/panel/":           "/panel",
-		"  /ops/panel/  ":   "/ops/panel",
-		"my-secret-9f2a":    "/my-secret-9f2a",
+		"panel":           "/panel",
+		"/panel":          "/panel",
+		"/panel/":         "/panel",
+		"  /ops/panel/  ": "/ops/panel",
+		"my-secret-9f2a":  "/my-secret-9f2a",
 	} {
 		SetAdminPath(in)
 		if got := GetAdminPath(); got != want {

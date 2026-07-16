@@ -168,6 +168,20 @@ func (h *Handler) handleAccountFailure(account *config.Account, err error) {
 	}
 
 	errMsg := err.Error()
+	if account.EffectiveBackend() != config.BackendKiro {
+		switch {
+		case isProxyErrorMessage(errMsg):
+			logger.Warnf("[AccountFailover] Proxy/dial failure for %s: %v", account.Email, err)
+			h.pool.RecordError(account.ID, false)
+		case isQuotaErrorMessage(errMsg):
+			h.pool.RecordError(account.ID, true)
+		case isAuthErrorMessage(errMsg):
+			h.disableAccount(account, "BANNED", "OpenAI-compatible upstream authentication failed")
+		default:
+			h.pool.RecordError(account.ID, false)
+		}
+		return
+	}
 	switch {
 	case isProxyErrorMessage(errMsg):
 		// Proxy/dial failure — cool down and rotate; never disable the account

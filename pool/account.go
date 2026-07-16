@@ -161,7 +161,7 @@ func (p *AccountPool) GetNextExcluding(excluded map[string]bool) *config.Account
 		return copyAccount(acc)
 	}
 
-		// 无可用账号，返回冷却时间最短的（排除额度用尽的，除非允许超额）
+	// 无可用账号，返回冷却时间最短的（排除额度用尽的，除非允许超额）
 	var best *config.Account
 	var earliest time.Time
 	for i := range p.accounts {
@@ -211,14 +211,87 @@ func (p *AccountPool) GetModelList(accountID string) []string {
 	return ids
 }
 
-// accountHasModel 检查账号是否支持指定模型。
-// 若该账号尚无模型列表（冷启动），视为支持所有模型。
-func (p *AccountPool) accountHasModel(accountID, model string) bool {
-	list, ok := p.modelLists[accountID]
-	if !ok || len(list) == 0 {
-		return true // 冷启动：列表未就绪，乐观放行
+// accountHasModel checks model support according to the upstream backend.
+// Kiro keeps its discovered model cache; OpenAI-compatible accounts use the
+// explicit patterns persisted on the account (exact IDs, "*", or a suffix
+// wildcard such as "gpt-*").
+func (p *AccountPool) accountHasModel(account *config.Account, model string) bool {
+	if account == nil {
+		return false
 	}
-	return list[strings.ToLower(strings.TrimSpace(model))]
+	requested := strings.ToLower(strings.TrimSpace(model))
+	if account.EffectiveBackend() == config.BackendOpenAICompatible {
+		for _, pattern := range account.Models {
+			if modelPatternMatches(pattern, requested) {
+				return true
+			}
+		}
+		return false
+	}
+
+	kiroModel := normalizeKiroRoutingModel(requested)
+	if !strings.HasPrefix(kiroModel, "claude-") {
+		return false
+	}
+	// A cross-family alias is only a fallback. If a real OpenAI-compatible
+	// account explicitly serves the requested model, route there instead of
+	// aliasing it to Claude on Kiro.
+	if kiroModel != requested && p.hasOpenAICompatibleModel(requested) {
+		return false
+	}
+	list, ok := p.modelLists[account.ID]
+	if !ok || len(list) == 0 {
+		return true // cold start: preserve optimistic Kiro routing
+	}
+	return list[kiroModel]
+}
+
+func (p *AccountPool) hasOpenAICompatibleModel(model string) bool {
+	for i := range p.accounts {
+		account := &p.accounts[i]
+		if account.EffectiveBackend() != config.BackendOpenAICompatible || !account.Enabled {
+			continue
+		}
+		for _, pattern := range account.Models {
+			if modelPatternMatches(pattern, model) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func modelPatternMatches(pattern, model string) bool {
+	pattern = strings.ToLower(strings.TrimSpace(pattern))
+	if pattern == "*" {
+		return true
+	}
+	if strings.HasSuffix(pattern, "*") {
+		return strings.HasPrefix(model, strings.TrimSuffix(pattern, "*"))
+	}
+	return pattern == model
+}
+
+// normalizeKiroRoutingModel mirrors the cross-family aliases in
+// proxy/translator.go without introducing a package import cycle. It is used
+// only as a Kiro fallback; an OpenAI-compatible account with an exact model
+// match remains eligible for the original model name.
+func normalizeKiroRoutingModel(model string) string {
+	switch {
+	case strings.Contains(model, "gpt-4-turbo"), strings.Contains(model, "gpt-4o"),
+		strings.Contains(model, "gpt-4"), strings.Contains(model, "gpt-3.5-turbo"):
+		return "claude-sonnet-4.5"
+	case strings.Contains(model, "claude-sonnet-4-20250514"):
+		return "claude-sonnet-4"
+	case strings.Contains(model, "claude-3-5-sonnet"), strings.Contains(model, "claude-3-opus"):
+		return "claude-sonnet-4.5"
+	case strings.Contains(model, "claude-3-sonnet"):
+		return "claude-sonnet-4"
+	case strings.Contains(model, "claude-3-haiku"):
+		return "claude-haiku-4.5"
+	default:
+		return model
+	}
 }
 
 // GetNextForModel 获取下一个支持指定模型的可用账号。
@@ -253,7 +326,7 @@ func (p *AccountPool) GetNextForModelExcluding(model string, excluded map[string
 		if seen[acc.ID] {
 			continue
 		}
-		if !p.accountHasModel(acc.ID, model) {
+		if !p.accountHasModel(acc, model) {
 			seen[acc.ID] = true
 			continue
 		}
@@ -280,7 +353,7 @@ func (p *AccountPool) GetNextForModelExcluding(model string, excluded map[string
 		if excluded != nil && excluded[acc.ID] {
 			continue
 		}
-		if !p.accountHasModel(acc.ID, model) {
+		if !p.accountHasModel(acc, model) {
 			continue
 		}
 		if isQuotaBlocked(*acc, allowOverUsage) {
@@ -331,7 +404,7 @@ func (p *AccountPool) GetNextForModelBoundExcluding(model string, allowed, exclu
 		if seen[acc.ID] {
 			continue
 		}
-		if !p.accountHasModel(acc.ID, model) {
+		if !p.accountHasModel(acc, model) {
 			seen[acc.ID] = true
 			continue
 		}

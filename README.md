@@ -117,6 +117,20 @@ Append a suffix (default `-thinking`) to the model name, e.g. `claude-sonnet-4.5
 
 Configure in Settings → Outbound Proxy. Supports SOCKS5 and HTTP. This fork adds a **shared proxy pool** with health tracking and failover, and a **Require-proxy** toggle that blocks outbound Kiro requests if no proxy is available (prevents leaking the server's real IP). Changes take effect immediately without a restart.
 
+### Custom API upstreams
+
+Choose **Add Account → Custom API upstream** and select either **OpenAI — Chat Completions** or
+**Anthropic — Messages / Claude Code**. Then provide a base URL, upstream API key, model IDs
+(one per line, with optional patterns such as `gpt-*`), weight, and an optional outbound proxy.
+Use Anthropic for URLs copied from `ANTHROPIC_BASE_URL` in Claude Code `settings.json`. The source
+joins the existing routing, retry/cooldown, streaming, tool-call, and token-accounting paths.
+Remote URLs must use HTTPS; loopback HTTP is allowed for local gateways.
+
+Custom upstream accounts can also define USD-per-million prices for input, output, cache reads,
+and 5-minute/1-hour cache writes. Successful requests calculate the source cost in integer
+micro-USD, debit the customer using the configured safety multiplier, and expose source cost,
+customer charge, and estimated profit separately in the API Log.
+
 ## Environment variables
 
 | Variable | Description | Default |

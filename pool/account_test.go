@@ -81,6 +81,39 @@ func TestGetNextKeepsFiveMinuteTokenAvailable(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatibleAccountUsesConfiguredModelPatterns(t *testing.T) {
+	p := &AccountPool{modelLists: make(map[string]map[string]bool)}
+	account := &config.Account{
+		ID: "openai", Backend: config.BackendOpenAICompatible,
+		Models: []string{"gpt-4.1", "o3-*"},
+	}
+	if !p.accountHasModel(account, "gpt-4.1") {
+		t.Fatal("expected exact configured model to match")
+	}
+	if !p.accountHasModel(account, "o3-mini") {
+		t.Fatal("expected wildcard model to match")
+	}
+	if p.accountHasModel(account, "claude-sonnet-4.5") {
+		t.Fatal("unexpected unconfigured model match")
+	}
+}
+
+func TestOpenAICompatibleModelWinsOverKiroAlias(t *testing.T) {
+	p := &AccountPool{
+		modelLists: map[string]map[string]bool{"kiro": {"claude-sonnet-4.5": true}},
+		accounts: []config.Account{
+			{ID: "kiro", Backend: config.BackendKiro, Enabled: true},
+			{ID: "openai", Backend: config.BackendOpenAICompatible, Models: []string{"gpt-4o"}, Enabled: true},
+		},
+	}
+	for i := 0; i < 4; i++ {
+		got := p.GetNextForModel("gpt-4o")
+		if got == nil || got.ID != "openai" {
+			t.Fatalf("expected native OpenAI account, got %#v", got)
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // IsAuthFailure
 // ---------------------------------------------------------------------------
