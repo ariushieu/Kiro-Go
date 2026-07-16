@@ -6,20 +6,23 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Kiro-Go</title>
   <link rel="icon" type="image/x-icon" href="favicon.ico" />
-  <script src="vendor/tailwindcss-browser/index.global.js"></script>
-  <link rel="stylesheet" href="vendor/fontawesome/css/all.min.css" />
-  <link rel="stylesheet" href="styles.css" id="__cssAsset" />
-  <link rel="stylesheet" href="toast.css" id="__toastCss" />
   <script>
+    // Resolve the saved theme before the first paint to avoid a light/dark flash.
     (function () {
-      var v = Date.now();
-      window.__v = v;
-      var css = document.getElementById('__cssAsset');
-      if (css) css.href = 'styles.css?v=' + v;
-      var tcss = document.getElementById('__toastCss');
-      if (tcss) tcss.href = 'toast.css?v=' + v;
+      try {
+        var pref = localStorage.getItem('kiro_theme') || 'system';
+        var dark = pref === 'dark' ||
+          (pref === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+        if (dark) document.documentElement.classList.add('dark');
+        document.documentElement.dataset.themePref = pref;
+      } catch (e) { }
     })();
   </script>
+  <link rel="stylesheet" href="vendor/fontawesome/css/all.min.css" />
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="toast.css" />
+  <script src="toast.js" defer></script>
+  <script src="app.js" defer></script>
 </head>
 
 <body>
@@ -979,19 +982,6 @@
     </div>
   </div>
 
-  <!-- Script loader -->
-  <script>
-    (function () {
-      var v = window.__v || Date.now();
-      var t = document.createElement('script');
-      t.src = 'toast.js?v=' + v;
-      document.body.appendChild(t);
-      var s = document.createElement('script');
-      s.src = 'app.js?v=' + v;
-      s.defer = true;
-      document.body.appendChild(s);
-    })();
-  </script>
 </body>
 
 </html>
