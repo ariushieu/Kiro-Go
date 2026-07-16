@@ -141,6 +141,48 @@ ADMIN_PASSWORD=my-strong-password
 ADMIN_PATH=/panel-x7k9   # tùy chọn: giấu panel khỏi đường dẫn /admin mặc định
 ```
 
+### 5.1. Trỏ subdomain riêng cho admin panel (nginx)
+
+Muốn vào panel qua `admin.domain.com/` thay vì `domain.com/panel-x7k9/` thì
+**chỉ cần nginx rewrite prefix — không cần đổi code**. Hai điều kiện đã có sẵn
+trong codebase làm điều này hoạt động:
+
+- Frontend gọi API bằng đường dẫn **tương đối** (`web/app.js` — `fetch('api' + path)`,
+  tương đối với URL trang), nên panel chạy được dưới bất kỳ prefix nào mà không
+  cần biết `ADMIN_PATH`.
+- Cookie session admin set `Path: "/"` (`proxy/admin_session.go`), nên vẫn đi kèm
+  bình thường khi mọi thứ nằm ở root của subdomain.
+
+```nginx
+server {
+    server_name admin.domain.com;
+
+    location / {
+        # Dấu "/" cuối ở proxy_pass là QUAN TRỌNG: nginx rewrite
+        # /xyz → /panel-x7k9/xyz trước khi đẩy vào backend.
+        proxy_pass http://127.0.0.1:8080/panel-x7k9/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # SSE log stream của panel (EventSource) — tránh nginx buffer/cắt kết nối
+        proxy_buffering off;
+        proxy_read_timeout 1h;
+    }
+}
+```
+
+Lưu ý:
+
+- **Trỏ thẳng vào `/panel-x7k9/` (có dấu `/` cuối)**, đừng trỏ bare path. Backend
+  nhận bare `ADMIN_PATH` sẽ trả redirect `Location: /panel-x7k9/` — redirect này
+  lộ secret path ra browser và đưa user về đường dẫn sai trên subdomain.
+- Với config trên, mọi path của subdomain đều bị prefix admin path nên API `/v1/*`
+  không lộ qua subdomain admin.
+- Đường cũ `domain.com/panel-x7k9/` vẫn hoạt động song song — backend không phân
+  biệt Host header.
+- `publicBaseURL` (callback SSO Microsoft qua domain) là cấu hình độc lập, không
+  liên quan admin path.
+
 ---
 
 ## 6. Lỗi thường gặp & cách khắc phục
