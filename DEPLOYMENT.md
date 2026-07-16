@@ -147,7 +147,8 @@ ADMIN_PATH=/panel-x7k9   # tùy chọn: giấu panel khỏi đường dẫn /adm
 
 Muốn vào panel qua `admin.domain.com/` thay vì `domain.com/panel-x7k9/` thì
 **chỉ cần nginx rewrite prefix — không cần đổi code**. (Đứng sau nginx thì nhớ
-set `KIRO_TRUST_PROXY` — xem §5.2.) Hai điều kiện đã có sẵn
+set `KIRO_TRUST_PROXY` — xem §5.2.) Template đầy đủ sẵn dùng (API + subdomain
+admin + redirect HTTP→HTTPS, style certbot): **`deploy/nginx-kiro-admin.conf`**. Hai điều kiện đã có sẵn
 trong codebase làm điều này hoạt động:
 
 - Frontend gọi API bằng đường dẫn **tương đối** (`web/app.js` — `fetch('api' + path)`,
