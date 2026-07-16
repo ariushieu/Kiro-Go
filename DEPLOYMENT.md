@@ -182,8 +182,17 @@ Lưu ý:
   lộ secret path ra browser và đưa user về đường dẫn sai trên subdomain.
 - Với config trên, mọi path của subdomain đều bị prefix admin path nên API `/v1/*`
   không lộ qua subdomain admin.
-- Đường cũ `domain.com/panel-x7k9/` vẫn hoạt động song song — backend không phân
-  biệt Host header.
+- **Chặn chiều ngược lại**: backend không phân biệt Host header nên
+  `domain.com/panel-x7k9/` mặc định vẫn vào được panel. Đã có subdomain riêng thì
+  chặn đường này ở server block API để thu hẹp bề mặt tấn công:
+
+  ```nginx
+  # trong server block của domain API công khai
+  location ^~ /panel-x7k9 {
+      access_log off;
+      return 444;
+  }
+  ```
 - `publicBaseURL` (callback SSO Microsoft qua domain) là cấu hình độc lập, không
   liên quan admin path.
 
