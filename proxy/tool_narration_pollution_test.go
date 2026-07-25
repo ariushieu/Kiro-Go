@@ -11,8 +11,9 @@ import (
 // "[Called tool X with input ...]" inside assistant turns, the model learned to
 // emit that literal text instead of issuing real structured tool calls.
 //
-// After the fix, assistant history turns must never contain tool-invocation
-// syntax. Tool identity is attributed only on the user "Tool results" side.
+// Assistant turns must never contain tool-invocation SYNTAX as prose. Structured
+// toolUses are a different matter — those are the native protocol and are
+// expected to survive (see TestIntactToolCyclesStayStructured).
 func TestNoToolInvocationTextInAssistantHistory(t *testing.T) {
 	// Build a long OpenAI conversation with many completed tool cycles.
 	msgs := []OpenAIMessage{{Role: "user", Content: "start a multi-step task"}}
@@ -40,31 +41,45 @@ func TestNoToolInvocationTextInAssistantHistory(t *testing.T) {
 				t.Fatalf("history[%d] assistant content contains mimicable tool text %q: %q", i, bad, a.Content)
 			}
 		}
-		// No assistant turn may carry structured tool calls (rejected upstream).
-		if len(a.ToolUses) > 0 {
-			t.Fatalf("history[%d] assistant retains %d structured toolUses", i, len(a.ToolUses))
-		}
 	}
 
-	// Tool outputs must still be preserved (on the user side) for context.
-	var allText strings.Builder
-	for _, h := range payload.ConversationState.History {
-		if h.UserInputMessage != nil {
-			allText.WriteString(h.UserInputMessage.Content)
-			allText.WriteString("\n")
-		}
-	}
-	combined := allText.String()
+	// Tool outputs must still be preserved for context, structurally or as text.
+	combined := allHistoryText(payload)
 	for i := 0; i < 8; i++ {
 		marker := fmt.Sprintf("OUTPUT_%d", i)
 		if !strings.Contains(combined, marker) {
 			t.Fatalf("tool output %q lost from history", marker)
 		}
 	}
-	// Tool identity should be attributed on the user side.
-	if !strings.Contains(combined, "[exec_command]") {
-		t.Fatalf("expected tool results attributed to exec_command on the user side")
+}
+
+// allHistoryText flattens every text-bearing field of history (assistant
+// content, user content, and structured tool-result bodies) into one string.
+func allHistoryText(payload *KiroPayload) string {
+	var b strings.Builder
+	for _, h := range payload.ConversationState.History {
+		if a := h.AssistantResponseMessage; a != nil {
+			b.WriteString(a.Content)
+			b.WriteString("\n")
+			for _, tu := range a.ToolUses {
+				b.WriteString(tu.Name)
+				b.WriteString("\n")
+			}
+		}
+		if u := h.UserInputMessage; u != nil {
+			b.WriteString(u.Content)
+			b.WriteString("\n")
+			if u.UserInputMessageContext != nil {
+				for _, tr := range u.UserInputMessageContext.ToolResults {
+					for _, c := range tr.Content {
+						b.WriteString(c.Text)
+						b.WriteString("\n")
+					}
+				}
+			}
+		}
 	}
+	return b.String()
 }
 
 func newPollToolCall(id, name, args string) ToolCall {
@@ -74,33 +89,215 @@ func newPollToolCall(id, name, args string) ToolCall {
 	return tc
 }
 
-// TestCollapsesConsecutiveIdenticalToolResults covers a client retry loop that
-// sends the same failing tool result many times. After hollow assistant turns
-// are dropped, those identical user "Tool results" turns become adjacent
-// duplicates; the proxy collapses each run to a single copy.
-func TestCollapsesConsecutiveIdenticalToolResults(t *testing.T) {
-	msgs := []OpenAIMessage{{Role: "user", Content: "start"}}
-	// 5 identical failing cycles in a row (model retrying the same tool).
-	for i := 0; i < 5; i++ {
+// TestIntactToolCyclesStayStructured is the regression guard for the
+// "agent stops after every step" bug.
+//
+// Flattening history tool calls left assistant turns as bare statements of
+// intent ("I'll read file A to find the cause") with no evidence that anything
+// was done. Replayed across a long session that is a few-shot demonstration of
+// "announce intent, end turn, wait for the user to say continue" — which the
+// model faithfully reproduced.
+//
+// Every completed tool cycle in history must therefore keep its structured
+// call/result pair, and no assistant turn may be left announcing an action it
+// has no attached tool call for.
+func TestIntactToolCyclesStayStructured(t *testing.T) {
+	msgs := []ClaudeMessage{{Role: "user", Content: "find the bug and fix it"}}
+	steps := []struct{ say, tool, out string }{
+		{"I'll read file A to find the cause.", "read_file", "package a"},
+		{"Now let me check file B.", "read_file", "package b"},
+		{"Let me run the tests.", "run_tests", "FAIL: TestX"},
+	}
+	for i, s := range steps {
+		id := fmt.Sprintf("t%d", i)
 		msgs = append(msgs,
-			OpenAIMessage{Role: "assistant", Content: "", ToolCalls: []ToolCall{
-				newPollToolCall(fmt.Sprintf("c%d", i), "exec_command", `{"cmd":"x"}`),
+			ClaudeMessage{Role: "assistant", Content: []interface{}{
+				map[string]interface{}{"type": "text", "text": s.say},
+				map[string]interface{}{"type": "tool_use", "id": id, "name": s.tool, "input": map[string]interface{}{"p": "x"}},
 			}},
-			OpenAIMessage{Role: "tool", ToolCallID: fmt.Sprintf("c%d", i), Content: "SAME_ERROR_OUTPUT"},
+			ClaudeMessage{Role: "user", Content: []interface{}{
+				map[string]interface{}{"type": "tool_result", "tool_use_id": id, "content": s.out},
+			}},
 		)
 	}
-	msgs = append(msgs, OpenAIMessage{Role: "user", Content: "final"})
+	msgs = append(msgs, ClaudeMessage{Role: "user", Content: "continue"})
 
-	payload := OpenAIToKiro(&OpenAIRequest{Model: "claude-opus-4.8", Messages: msgs}, false)
+	payload := ClaudeToKiro(&ClaudeRequest{Model: "claude-opus-4.8", Messages: msgs}, false)
+
+	structuredCalls := 0
+	for i, h := range payload.ConversationState.History {
+		a := h.AssistantResponseMessage
+		if a == nil {
+			continue
+		}
+		structuredCalls += len(a.ToolUses)
+		if len(a.ToolUses) > 0 {
+			continue
+		}
+		// An assistant turn with no tool call must not be a bare announcement of
+		// an action — that is the pattern the model was copying.
+		for _, s := range steps {
+			if strings.Contains(a.Content, s.say) {
+				t.Fatalf("history[%d] announces %q with no tool call attached — this is the pattern that trains the model to stop and wait", i, s.say)
+			}
+		}
+	}
+
+	if structuredCalls != len(steps) {
+		t.Fatalf("expected all %d completed tool cycles to stay structured, got %d", len(steps), structuredCalls)
+	}
+
+	// Each structured call must be answered by a structured result on the very
+	// next turn, or the upstream rejects the pair as malformed.
+	hist := payload.ConversationState.History
+	for i := range hist {
+		a := hist[i].AssistantResponseMessage
+		if a == nil || len(a.ToolUses) == 0 {
+			continue
+		}
+		if i+1 >= len(hist) {
+			t.Fatalf("history[%d] tool call has no following turn to answer it", i)
+		}
+		u := hist[i+1].UserInputMessage
+		if u == nil || u.UserInputMessageContext == nil {
+			t.Fatalf("history[%d] tool call is not answered by a tool-result turn", i)
+		}
+		got := collectToolResultIDs(u.UserInputMessageContext.ToolResults)
+		for _, tu := range a.ToolUses {
+			if !got[tu.ToolUseID] {
+				t.Fatalf("history[%d] call %q is unanswered by history[%d]", i, tu.ToolUseID, i+1)
+			}
+		}
+	}
+}
+
+// TestOrphanedToolResultsAreFlattened covers client-side context compaction: the
+// tool_result survives in the transcript but the assistant tool_use that it
+// answers has been dropped. A half-pair is what the upstream rejects, so the
+// orphan must be narrated as text — with its output and tool identity intact.
+func TestOrphanedToolResultsAreFlattened(t *testing.T) {
+	req := &ClaudeRequest{
+		Model: "claude-opus-4.8",
+		Messages: []ClaudeMessage{
+			{Role: "user", Content: "do the task"},
+			// No assistant tool_use for "gone" — compaction removed it.
+			{Role: "user", Content: []interface{}{
+				map[string]interface{}{"type": "tool_result", "tool_use_id": "gone", "content": "ORPHAN_OUTPUT"},
+			}},
+			{Role: "assistant", Content: "Understood."},
+			{Role: "user", Content: "carry on"},
+		},
+	}
+
+	payload := ClaudeToKiro(req, false)
+
+	for i, h := range payload.ConversationState.History {
+		if u := h.UserInputMessage; u != nil && u.UserInputMessageContext != nil {
+			if len(u.UserInputMessageContext.ToolResults) > 0 {
+				t.Fatalf("history[%d] kept an orphaned structured tool result; upstream rejects unpaired results", i)
+			}
+		}
+	}
+	if !strings.Contains(allHistoryText(payload), "ORPHAN_OUTPUT") {
+		t.Fatalf("orphaned tool output must survive as text, got:\n%s", allHistoryText(payload))
+	}
+}
+
+// TestUnansweredToolCallIsDropped is the mirror case: an assistant tool_use whose
+// result never arrived (the client compacted it away, or the run was interrupted).
+// Keeping it would send a call with no answer, which upstream rejects.
+func TestUnansweredToolCallIsDropped(t *testing.T) {
+	req := &ClaudeRequest{
+		Model: "claude-opus-4.8",
+		Messages: []ClaudeMessage{
+			{Role: "user", Content: "start"},
+			{Role: "assistant", Content: []interface{}{
+				map[string]interface{}{"type": "text", "text": "Checking that now."},
+				map[string]interface{}{"type": "tool_use", "id": "never_answered", "name": "read_file", "input": map[string]interface{}{}},
+			}},
+			// No tool_result follows; a plain user turn does.
+			{Role: "user", Content: "actually, do something else"},
+		},
+	}
+
+	payload := ClaudeToKiro(req, false)
+
+	for i, h := range payload.ConversationState.History {
+		if a := h.AssistantResponseMessage; a != nil {
+			for _, tu := range a.ToolUses {
+				if tu.ToolUseID == "never_answered" {
+					t.Fatalf("history[%d] kept an unanswered tool call; upstream rejects unpaired calls", i)
+				}
+			}
+		}
+	}
+}
+
+// TestCollapsesConsecutiveIdenticalUserTurns covers a client retry loop that
+// resends the same plain user turn many times. Those adjacent duplicates are
+// collapsed to a single copy.
+//
+// Turns carrying structured tool results are deliberately NOT collapsed: each is
+// one half of an intact cycle, so dropping one would orphan its tool call. That
+// case is covered by TestIdenticalToolResultsNotCollapsed.
+func TestCollapsesConsecutiveIdenticalUserTurns(t *testing.T) {
+	msgs := []ClaudeMessage{{Role: "user", Content: "start"}}
+	for i := 0; i < 5; i++ {
+		msgs = append(msgs, ClaudeMessage{Role: "user", Content: "SAME_PROMPT_TEXT"})
+	}
+	msgs = append(msgs, ClaudeMessage{Role: "user", Content: "final"})
+
+	payload := ClaudeToKiro(&ClaudeRequest{Model: "claude-opus-4.8", Messages: msgs}, false)
 
 	count := 0
 	for _, h := range payload.ConversationState.History {
-		if h.UserInputMessage != nil && strings.Contains(h.UserInputMessage.Content, "SAME_ERROR_OUTPUT") {
+		if h.UserInputMessage != nil && strings.TrimSpace(h.UserInputMessage.Content) == "SAME_PROMPT_TEXT" {
 			count++
 		}
 	}
 	if count != 1 {
-		t.Fatalf("expected 5 identical tool-result turns collapsed to 1, got %d", count)
+		t.Fatalf("expected 5 identical user turns collapsed to 1, got %d", count)
+	}
+}
+
+// TestIdenticalToolResultsNotCollapsed guards the pairing invariant against the
+// dedup pass: a model retrying the same failing tool produces identical result
+// bodies, but each answers a distinct tool call. Collapsing them would leave
+// calls unanswered and the request malformed.
+func TestIdenticalToolResultsNotCollapsed(t *testing.T) {
+	msgs := []ClaudeMessage{{Role: "user", Content: "start"}}
+	const n = 4
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("retry%d", i)
+		msgs = append(msgs,
+			ClaudeMessage{Role: "assistant", Content: []interface{}{
+				map[string]interface{}{"type": "tool_use", "id": id, "name": "exec_command", "input": map[string]interface{}{"cmd": "x"}},
+			}},
+			ClaudeMessage{Role: "user", Content: []interface{}{
+				map[string]interface{}{"type": "tool_result", "tool_use_id": id, "content": "SAME_ERROR_OUTPUT"},
+			}},
+		)
+	}
+	msgs = append(msgs, ClaudeMessage{Role: "user", Content: "why does it keep failing?"})
+
+	payload := ClaudeToKiro(&ClaudeRequest{Model: "claude-opus-4.8", Messages: msgs}, false)
+
+	hist := payload.ConversationState.History
+	for i := range hist {
+		a := hist[i].AssistantResponseMessage
+		if a == nil || len(a.ToolUses) == 0 {
+			continue
+		}
+		if i+1 >= len(hist) || hist[i+1].UserInputMessage == nil ||
+			hist[i+1].UserInputMessage.UserInputMessageContext == nil {
+			t.Fatalf("history[%d] tool call lost its answering result to dedup", i)
+		}
+		got := collectToolResultIDs(hist[i+1].UserInputMessage.UserInputMessageContext.ToolResults)
+		for _, tu := range a.ToolUses {
+			if !got[tu.ToolUseID] {
+				t.Fatalf("history[%d] call %q was orphaned by dedup", i, tu.ToolUseID)
+			}
+		}
 	}
 }
 

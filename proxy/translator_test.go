@@ -302,13 +302,22 @@ func TestToolResultsContinuationIncludesInstructionPrefix(t *testing.T) {
 	}
 
 	payload := OpenAIToKiro(req, false)
-	content := payload.ConversationState.CurrentMessage.UserInputMessage.Content
+	cur := payload.ConversationState.CurrentMessage.UserInputMessage
 
-	if !strings.Contains(content, toolResultsContinuationPrefix) {
-		t.Fatalf("expected tool continuation prefix, got %q", content)
+	if !strings.Contains(cur.Content, toolResultsContinuationPrefix) {
+		t.Fatalf("expected tool continuation prefix, got %q", cur.Content)
 	}
-	if !strings.Contains(content, "result-1") {
-		t.Fatalf("expected tool result text in continuation content, got %q", content)
+
+	// The result answers the preceding tool call, so it travels structurally and
+	// must NOT also be inlined as text — that would bill the same output twice.
+	if strings.Contains(cur.Content, "result-1") {
+		t.Fatalf("paired tool output must not be duplicated as text, got %q", cur.Content)
+	}
+	if cur.UserInputMessageContext == nil || len(cur.UserInputMessageContext.ToolResults) != 1 {
+		t.Fatalf("expected the paired tool result to be carried structurally")
+	}
+	if got := cur.UserInputMessageContext.ToolResults[0].Content[0].Text; got != "result-1" {
+		t.Fatalf("expected structured tool result output %q, got %q", "result-1", got)
 	}
 }
 
@@ -564,12 +573,17 @@ func TestClaudeToolResultMixedTextAndImage(t *testing.T) {
 	if len(cur.Images) != 1 {
 		t.Fatalf("expected one image extracted, got %d", len(cur.Images))
 	}
-	if cur.UserInputMessageContext == nil || len(cur.UserInputMessageContext.ToolResults) != 1 {
-		t.Fatalf("expected one tool result")
+
+	// This tool result is ORPHANED: no assistant turn ever issued a matching
+	// tool_use (the conversation starts with the result). A toolResult with no
+	// toolUse to answer is the half-pair the upstream rejects, so it is flattened
+	// into the message text instead of being sent structurally. Both the text and
+	// the image must survive that conversion.
+	if cur.UserInputMessageContext != nil && len(cur.UserInputMessageContext.ToolResults) > 0 {
+		t.Fatalf("orphaned tool result should not be sent structurally")
 	}
-	gotText := cur.UserInputMessageContext.ToolResults[0].Content[0].Text
-	if gotText != "here is the screenshot" {
-		t.Fatalf("expected original tool text preserved, got %q", gotText)
+	if !strings.Contains(cur.Content, "here is the screenshot") {
+		t.Fatalf("expected orphaned tool output preserved as text, got %q", cur.Content)
 	}
 }
 

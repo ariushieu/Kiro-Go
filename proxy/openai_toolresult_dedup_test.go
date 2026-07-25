@@ -9,7 +9,8 @@ import (
 // non-final tool-result history entry was pre-filled with the
 // "Tool results:" continuation text AND kept the structured ToolResults, which
 // sanitizeKiroHistory then narrated again, producing the same output twice.
-// Each tool result's output must appear exactly once in history.
+// Each tool result's output must appear exactly once in history — whether it is
+// carried structurally (intact cycle) or narrated as text (orphaned result).
 func TestOpenAIToKiroDoesNotDuplicateToolResultText(t *testing.T) {
 	req := &OpenAIRequest{
 		Model: "claude-opus-4.8",
@@ -25,8 +26,15 @@ func TestOpenAIToKiroDoesNotDuplicateToolResultText(t *testing.T) {
 
 	count := 0
 	for _, h := range payload.ConversationState.History {
-		if h.UserInputMessage != nil {
-			count += strings.Count(h.UserInputMessage.Content, "UNIQUE_OUTPUT_MARKER_12345")
+		if u := h.UserInputMessage; u != nil {
+			count += strings.Count(u.Content, "UNIQUE_OUTPUT_MARKER_12345")
+			if u.UserInputMessageContext != nil {
+				for _, tr := range u.UserInputMessageContext.ToolResults {
+					for _, c := range tr.Content {
+						count += strings.Count(c.Text, "UNIQUE_OUTPUT_MARKER_12345")
+					}
+				}
+			}
 		}
 		if h.AssistantResponseMessage != nil {
 			count += strings.Count(h.AssistantResponseMessage.Content, "UNIQUE_OUTPUT_MARKER_12345")

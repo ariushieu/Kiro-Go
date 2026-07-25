@@ -665,9 +665,42 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 	}
 
 	if lastErr != nil {
+		// Safety net for structured tool history. Intact tool cycles are sent to
+		// the upstream in their native structured form (see sanitizeKiroHistory),
+		// which is what keeps an agent from reading its own past turns as "state
+		// intent, then stop". If some endpoint or account nevertheless rejects
+		// that shape as malformed, fall back to the older all-text representation
+		// and retry once rather than failing the user's request.
+		//
+		// flattenPayloadToolHistory reports false when there was nothing left to
+		// flatten, so the retried call cannot flatten again — that bounds this to
+		// a single extra attempt. Only pre-stream HTTP errors reach here; once
+		// parseEventStream has started, bytes are already on the wire and the
+		// request returns directly instead.
+		if isMalformedRequestError(lastErr) && flattenPayloadToolHistory(payload) {
+			logger.Warnf("[KiroAPI] Upstream rejected structured tool history (%v); retrying with flattened history", lastErr)
+			return CallKiroAPI(account, payload, callback)
+		}
 		return lastErr
 	}
 	return fmt.Errorf("all endpoints failed")
+}
+
+// isMalformedRequestError matches the upstream's complaint about request shape
+// (HTTP 400 "Improperly formed request" / ValidationException). It deliberately
+// does NOT match size rejections like CONTENT_LENGTH_EXCEEDS_THRESHOLD, which
+// truncation handles and which flattening would not fix.
+func isMalformedRequestError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if !strings.Contains(msg, "http 400") {
+		return false
+	}
+	return strings.Contains(msg, "improperly formed") ||
+		strings.Contains(msg, "validationexception") ||
+		strings.Contains(msg, "malformed")
 }
 
 // ==================== Event Stream Parsing ====================
