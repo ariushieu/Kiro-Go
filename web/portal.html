@@ -148,6 +148,20 @@
       margin: 0 0 1rem;
     }
     .p-key-row { display: flex; gap: 0.5rem; align-items: stretch; }
+    /* Status line for errors like "invalid API key". These used to be written into
+       the check button's own label, which is sized to the word "Check" — a longer
+       message overflowed the button and covered it. Keep messages out here. */
+    .p-notice {
+      margin: 0.6rem 0 0;
+      min-height: 1.15rem;
+      font-size: 0.8125rem;
+      line-height: 1.15rem;
+      color: var(--destructive);
+      opacity: 0;
+      transition: opacity 0.15s;
+    }
+    .p-notice.show { opacity: 1; }
+    .p-notice.ok { color: var(--success); }
     .p-key-row .btn { flex: 0 0 auto; }
     .p-key-field { position: relative; flex: 1; min-width: 0; }
     .p-key-field .p-eye {
@@ -567,6 +581,7 @@
           <span data-t="check"></span>
         </button>
       </div>
+      <p class="p-notice" id="notice" role="status" aria-live="polite"></p>
     </div>
 
     <div class="p-receipt" id="resultCard" style="display:none;">
@@ -1021,12 +1036,20 @@
         return escapeHtml(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
       }
 
-      function flash(msg) {
-        var btn = $('checkBtn');
-        var span = btn.querySelector('span');
-        var old = span.textContent;
-        span.textContent = msg;
-        setTimeout(function () { span.textContent = old; }, 1800);
+      var flashTimer = null;
+      // Show a status message below the key field. This used to overwrite the check
+      // button's label, which is only as wide as the word "Check", so anything
+      // longer spilled out over the button itself.
+      function flash(msg, ok) {
+        var el = $('notice');
+        if (!el) return;
+        el.textContent = msg;
+        el.className = 'p-notice show' + (ok ? ' ok' : '');
+        if (flashTimer) clearTimeout(flashTimer);
+        flashTimer = setTimeout(function () {
+          el.className = 'p-notice';
+          el.textContent = '';
+        }, 4000);
       }
 
       function currentKey() { return $('keyInput').value.trim(); }
