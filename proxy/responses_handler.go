@@ -228,6 +228,11 @@ func (h *Handler) handleResponsesNonStream(
 	}
 
 	if lastErr == nil {
+		if !h.pool.AnySupportsModel(model) {
+			h.recordFailureForApiKey(apiKeyID, "openai", model, 404, "model not found: "+model, startedAt)
+			h.sendOpenAIError(w, 404, "invalid_request_error", openAIModelNotFoundMessage(model))
+			return
+		}
 		h.recordFailureForApiKey(apiKeyID, "openai", model, 503, "No available accounts", startedAt)
 		h.sendOpenAIError(w, 503, "server_error", noAccountsClientMessage)
 		return
@@ -676,6 +681,21 @@ func (h *Handler) handleResponsesStream(
 	}
 
 	if lastErr == nil {
+		if !h.pool.AnySupportsModel(model) {
+			h.recordFailureForApiKey(apiKeyID, "openai", model, 404, "model not found: "+model, startedAt)
+			send("response.failed", map[string]interface{}{
+				"type": "response.failed",
+				"response": map[string]interface{}{
+					"id":     respID,
+					"status": "failed",
+					"error": map[string]string{
+						"type":    "invalid_request_error",
+						"message": openAIModelNotFoundMessage(model),
+					},
+				},
+			})
+			return
+		}
 		h.recordFailureForApiKey(apiKeyID, "openai", model, 503, "No available accounts", startedAt)
 		send("response.failed", map[string]interface{}{
 			"type": "response.failed",

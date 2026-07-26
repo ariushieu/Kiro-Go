@@ -301,6 +301,24 @@ func (p *AccountPool) GetNextForModel(model string) *config.Account {
 	return p.GetNextForModelExcluding(model, nil)
 }
 
+// AnySupportsModel 报告池中是否有任一账号能路由该模型（只看模型匹配，忽略
+// 冷却/配额/临期）。调用方用它区分"客户请求了不存在的模型"（应答 404）和
+// "模型有效但池子暂时无可用账号"（应答 503 维护文案）。空池返回 true ——
+// 那是容量问题而不是模型问题，应走 503 分支。
+func (p *AccountPool) AnySupportsModel(model string) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if len(p.accounts) == 0 {
+		return true
+	}
+	for i := range p.accounts {
+		if p.accountHasModel(&p.accounts[i], model) {
+			return true
+		}
+	}
+	return false
+}
+
 // GetNextForModelExcluding 获取下一个支持指定模型的可用账号，并跳过指定账号。
 func (p *AccountPool) GetNextForModelExcluding(model string, excluded map[string]bool) *config.Account {
 	p.mu.RLock()

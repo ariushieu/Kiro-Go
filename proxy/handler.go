@@ -30,6 +30,16 @@ const noAccountsClientMessage = "Server đang bảo trì, vui lòng thử lại 
 // rateLimitedClientMessage 是全部账号配额耗尽（上游 429/throttle）时给客户的 429 文案。
 const rateLimitedClientMessage = "Hệ thống đang bận, vui lòng thử lại sau ít phút."
 
+// claudeModelNotFoundMessage / openAIModelNotFoundMessage 仿照各家 API 对未知
+// 模型的原生 404 文案，让客户端 SDK 按原样呈现。
+func claudeModelNotFoundMessage(model string) string {
+	return "model: " + model
+}
+
+func openAIModelNotFoundMessage(model string) string {
+	return "The model `" + model + "` does not exist or you do not have access to it."
+}
+
 // Handler HTTP 处理器
 type Handler struct {
 	pool *pool.AccountPool
@@ -1637,6 +1647,11 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 	}
 
 	if lastErr == nil {
+		if !h.pool.AnySupportsModel(model) {
+			h.recordFailureForApiKey(apiKeyID, "claude", model, 404, "model not found: "+model, startedAt)
+			h.sendClaudeError(w, 404, "not_found_error", claudeModelNotFoundMessage(model))
+			return
+		}
 		h.recordFailureForApiKey(apiKeyID, "claude", model, 503, "No available accounts", startedAt)
 		h.sendClaudeError(w, 503, "api_error", noAccountsClientMessage)
 		return
@@ -1924,6 +1939,11 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 	}
 
 	if lastErr == nil {
+		if !h.pool.AnySupportsModel(model) {
+			h.recordFailureForApiKey(apiKeyID, "claude", model, 404, "model not found: "+model, startedAt)
+			h.sendClaudeError(w, 404, "not_found_error", claudeModelNotFoundMessage(model))
+			return
+		}
 		h.recordFailureForApiKey(apiKeyID, "claude", model, 503, "No available accounts", startedAt)
 		h.sendClaudeError(w, 503, "api_error", noAccountsClientMessage)
 		return
@@ -2441,6 +2461,10 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 	}
 
 	if lastErr == nil {
+		if !h.pool.AnySupportsModel(model) {
+			h.sendOpenAIError(w, 404, "invalid_request_error", openAIModelNotFoundMessage(model))
+			return
+		}
 		h.sendOpenAIError(w, 503, "server_error", noAccountsClientMessage)
 		return
 	}
@@ -2529,6 +2553,11 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 	}
 
 	if lastErr == nil {
+		if !h.pool.AnySupportsModel(model) {
+			h.recordFailureForApiKey(apiKeyID, "openai", model, 404, "model not found: "+model, startedAt)
+			h.sendOpenAIError(w, 404, "invalid_request_error", openAIModelNotFoundMessage(model))
+			return
+		}
 		h.recordFailureForApiKey(apiKeyID, "openai", model, 503, "No available accounts", startedAt)
 		h.sendOpenAIError(w, 503, "server_error", noAccountsClientMessage)
 		return

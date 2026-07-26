@@ -209,6 +209,24 @@ func newTestPool(accounts ...config.Account) *AccountPool {
 	return p
 }
 
+func TestAnySupportsModel(t *testing.T) {
+	p := newTestPool(config.Account{ID: "a"})
+	if !p.AnySupportsModel("claude-sonnet-4.5") {
+		t.Fatal("expected claude model to be routable on cold start")
+	}
+	if !p.AnySupportsModel("gpt-4o") {
+		t.Fatal("expected gpt alias to route to claude on cold start")
+	}
+	if p.AnySupportsModel("llama-3-70b") {
+		t.Fatal("did not expect non-claude model with no openai-compatible account")
+	}
+
+	empty := newTestPool()
+	if !empty.AnySupportsModel("llama-3-70b") {
+		t.Fatal("empty pool must report true so callers answer 503, not 404")
+	}
+}
+
 func TestGetNextForModelExcludingSkipsExcludedAccounts(t *testing.T) {
 	p := newTestPool(
 		config.Account{ID: "a"},
