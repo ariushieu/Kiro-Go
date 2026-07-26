@@ -1944,10 +1944,72 @@ func truncatePayloadToLimit(payload *KiroPayload, hasPriming bool, model string)
 	rebuilt = append(rebuilt, tail...)
 	payload.ConversationState.History = rebuilt
 
+	// The cut above is made at a SIZE boundary, which can fall in the middle of a
+	// tool cycle. Re-establish pairing before the request goes out.
+	repairToolPairingAfterTruncation(payload)
+
 	// If still too large (current message or retained tail alone exceeds the
 	// limit), shrink the current message content as a last resort.
 	if payloadByteSize(payload) > limit {
 		truncateCurrentMessage(payload)
+	}
+}
+
+// repairToolPairingAfterTruncation re-pairs tool cycles after history has been
+// trimmed for size.
+//
+// sanitizeKiroHistory pairs an assistant turn's toolUses with the toolResults
+// that answer them on the following turn (or, for the last assistant turn, in
+// the current message). truncatePayloadToLimit then drops the oldest history
+// entries to fit the byte/token budget — and that cut is computed purely from
+// sizes, so it can land BETWEEN a paired assistant turn and its results. The
+// surviving half is what the upstream rejects:
+//
+//	HTTP 400 TOOL_USE_RESULT_MISMATCH — "unexpected tool_use_id found in
+//	tool_result blocks: ... Each tool_result block must have a corresponding
+//	tool_use block in the previous message."
+//
+// dropLeadingAssistant handles only the mirror case (a leading assistant whose
+// results were kept); an orphaned tool_result needs this pass. Re-running the
+// pairing plan over the trimmed history flattens whatever the cut broke, in both
+// directions. It is idempotent: cycles still intact stay structured.
+func repairToolPairingAfterTruncation(payload *KiroPayload) {
+	if payload == nil {
+		return
+	}
+
+	cur := &payload.ConversationState.CurrentMessage.UserInputMessage
+	var currentIDs map[string]bool
+	if cur.UserInputMessageContext != nil {
+		currentIDs = collectToolResultIDs(cur.UserInputMessageContext.ToolResults)
+	}
+
+	payload.ConversationState.History = sanitizeKiroHistory(payload.ConversationState.History, currentIDs)
+
+	// The current message's results are orphaned when the assistant turn that
+	// called them did not survive the cut. Inline them as text so their output
+	// still reaches the model, then drop the structured form.
+	if cur.UserInputMessageContext == nil || len(cur.UserInputMessageContext.ToolResults) == 0 {
+		return
+	}
+	if currentToolResultsMatchLastAssistant(payload.ConversationState.History, currentIDs) {
+		return
+	}
+
+	orphaned := cur.UserInputMessageContext.ToolResults
+	cur.UserInputMessageContext.ToolResults = nil
+	if len(cur.UserInputMessageContext.Tools) == 0 {
+		cur.UserInputMessageContext = nil
+	}
+
+	narrated := buildToolResultsContinuation(orphaned)
+	switch strings.TrimSpace(cur.Content) {
+	case "", toolResultsContinuationPrefix, minimalFallbackUserContent:
+		// Only a bare prefix/placeholder: the output travelled structurally and
+		// would otherwise be lost outright.
+		cur.Content = narrated
+	default:
+		cur.Content = joinHistoryText(cur.Content, narrated)
 	}
 }
 

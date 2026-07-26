@@ -178,3 +178,110 @@ func newContinuationToolCall(id, name, args string) ToolCall {
 	tc.Function.Arguments = args
 	return tc
 }
+
+// TestTruncationNeverOrphansToolResults is the regression guard for the
+// TOOL_USE_RESULT_MISMATCH production failure:
+//
+//	HTTP 400 from AmazonQ: messages.2.content.1: unexpected `tool_use_id` found
+//	in `tool_result` blocks: toolu_... Each `tool_result` block must have a
+//	corresponding `tool_use` block in the previous message.
+//
+// sanitizeKiroHistory pairs each assistant turn's toolUses with the toolResults
+// that answer them. truncatePayloadToLimit then drops the oldest history entries
+// to fit the size budget — and that cut is computed from BYTES, so it can land
+// between a paired assistant turn and its results, leaving an orphaned half that
+// the upstream rejects. Long agent sessions hit this constantly because they are
+// exactly the ones large enough to be truncated.
+//
+// Every surviving tool_result must have its tool_use in the immediately
+// preceding turn, and vice versa.
+func TestTruncationNeverOrphansToolResults(t *testing.T) {
+	// Each tool result is large enough that a long run forces truncation.
+	bulk := strings.Repeat("output line with plenty of filler text\n", 900)
+
+	msgs := []ClaudeMessage{{Role: "user", Content: "audit the whole repository"}}
+	for i := 0; i < 90; i++ {
+		id := fmt.Sprintf("toolu_trunc_%02d", i)
+		msgs = append(msgs,
+			ClaudeMessage{Role: "assistant", Content: []interface{}{
+				map[string]interface{}{"type": "text", "text": fmt.Sprintf("Reading file %d.", i)},
+				map[string]interface{}{"type": "tool_use", "id": id, "name": "read_file",
+					"input": map[string]interface{}{"path": fmt.Sprintf("f%d.go", i)}},
+			}},
+			ClaudeMessage{Role: "user", Content: []interface{}{
+				map[string]interface{}{"type": "tool_result", "tool_use_id": id,
+					"content": fmt.Sprintf("FILE_%d\n%s", i, bulk)},
+			}},
+		)
+	}
+	msgs = append(msgs, ClaudeMessage{Role: "user", Content: "now summarize the findings"})
+
+	payload := ClaudeToKiro(&ClaudeRequest{
+		Model:    "claude-opus-4.8",
+		System:   "You are a coding agent.",
+		Messages: msgs,
+	}, false)
+
+	assertToolPairingIntact(t, payload)
+}
+
+// TestTruncationNeverOrphansCurrentMessageToolResults covers the same cut, but
+// for the tool results carried by the CURRENT outgoing message: the assistant
+// turn that called them lives in history and may not survive truncation. The
+// upstream rejects the leftover results the same way, so their output has to be
+// folded into the message text instead of being sent structurally.
+func TestTruncationNeverOrphansCurrentMessageToolResults(t *testing.T) {
+	bulk := strings.Repeat("more filler output for size pressure\n", 900)
+
+	msgs := []ClaudeMessage{{Role: "user", Content: "run the full build"}}
+	for i := 0; i < 90; i++ {
+		id := fmt.Sprintf("toolu_cur_%02d", i)
+		msgs = append(msgs,
+			ClaudeMessage{Role: "assistant", Content: []interface{}{
+				map[string]interface{}{"type": "tool_use", "id": id, "name": "exec",
+					"input": map[string]interface{}{"cmd": fmt.Sprintf("step %d", i)}},
+			}},
+			ClaudeMessage{Role: "user", Content: []interface{}{
+				map[string]interface{}{"type": "tool_result", "tool_use_id": id,
+					"content": fmt.Sprintf("STEP_%d\n%s", i, bulk)},
+			}},
+		)
+	}
+	// Final turn: an in-flight tool call whose result is the current message.
+	msgs = append(msgs,
+		ClaudeMessage{Role: "assistant", Content: []interface{}{
+			map[string]interface{}{"type": "tool_use", "id": "toolu_final", "name": "exec",
+				"input": map[string]interface{}{"cmd": "final"}},
+		}},
+		ClaudeMessage{Role: "user", Content: []interface{}{
+			map[string]interface{}{"type": "tool_result", "tool_use_id": "toolu_final",
+				"content": "FINAL_TOOL_OUTPUT_MARKER"},
+		}},
+	)
+
+	payload := ClaudeToKiro(&ClaudeRequest{
+		Model:    "claude-opus-4.8",
+		System:   "You are a coding agent.",
+		Messages: msgs,
+	}, false)
+
+	assertToolPairingIntact(t, payload)
+
+	// The final tool output must survive somewhere — structurally if its call was
+	// kept, inlined as text if the cut orphaned it. Losing it outright would
+	// leave the model without the data it just asked for.
+	cur := payload.ConversationState.CurrentMessage.UserInputMessage
+	found := strings.Contains(cur.Content, "FINAL_TOOL_OUTPUT_MARKER")
+	if !found && cur.UserInputMessageContext != nil {
+		for _, tr := range cur.UserInputMessageContext.ToolResults {
+			for _, c := range tr.Content {
+				if strings.Contains(c.Text, "FINAL_TOOL_OUTPUT_MARKER") {
+					found = true
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("final tool output lost from the request entirely")
+	}
+}
