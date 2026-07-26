@@ -175,6 +175,21 @@ Mỗi custom upstream có thể cấu hình đơn giá input, output, cache read
 USD/triệu token. Sau request thành công, hệ thống tính chi phí nguồn bằng micro-USD, trừ user
 theo hệ số an toàn và hiển thị riêng **Chi phí / Đã trừ / Lợi nhuận** trong API Log.
 
+**Hạn chế đã biết (audit 2026-07, sẽ xử lý sau):**
+
+- Lỗi từ upstream không thuộc nhóm nhận diện được (quota/auth/…) sẽ trả nguyên văn cho
+  khách — có thể lộ tên hoặc URL của nhà cung cấp upstream.
+- Upstream trả lỗi chứa `403`/`forbidden` (ví dụ không có quyền model) bị coi là hỏng key
+  và **tự động disable account** — cần vào trang admin bật lại tay.
+- **Chưa điền Pricing thì mọi request tính 0 credit**, quota credit của khách không bị trừ —
+  luôn cấu hình đơn giá cho account custom upstream.
+- Số output token trong *thống kê* là ước lượng theo ký tự; phần tính tiền dùng usage thật
+  từ upstream nên hai con số có thể lệch nhau.
+- System prompt được gửi dưới dạng cặp hội thoại mồi thay vì field `system` chuẩn;
+  `stop_reason`/`finish_reason` không được truyền lại (bị cắt ở `max_tokens` của upstream
+  trông như kết thúc bình thường); thinking không được forward cho upstream dạng Anthropic.
+- UI chưa sửa được Base URL / models / API key của account custom đã tạo — phải xóa tạo lại.
+
 ---
 
 ## Biến môi trường

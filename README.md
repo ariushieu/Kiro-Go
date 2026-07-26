@@ -131,6 +131,22 @@ and 5-minute/1-hour cache writes. Successful requests calculate the source cost 
 micro-USD, debit the customer using the configured safety multiplier, and expose source cost,
 customer charge, and estimated profit separately in the API Log.
 
+**Known limitations (audited 2026-07, fixes planned):**
+
+- Upstream errors that don't match a known category (quota/auth/…) are relayed to the caller
+  as-is, which can reveal the upstream provider's name or URL.
+- An upstream response containing `403`/`forbidden` (e.g. a model-permission error) is treated
+  as an auth failure and **auto-disables the account** — re-enable it in the admin panel.
+- If **Pricing is left empty, requests charge 0 credits** and credit limits never decrement —
+  always configure pricing for custom upstream accounts.
+- Output-token *stats* use a character-based estimate; billing uses the upstream-reported
+  usage, so the two can disagree.
+- System prompts are sent as conversation priming rather than a native `system` field,
+  `stop_reason`/`finish_reason` is not propagated (truncation at the upstream's `max_tokens`
+  looks like a normal stop), and extended thinking is not forwarded to Anthropic-format upstreams.
+- The UI cannot edit base URL / models / API key of an existing custom account yet — delete
+  and re-create it instead.
+
 ## Environment variables
 
 | Variable | Description | Default |
