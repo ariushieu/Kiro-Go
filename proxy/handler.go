@@ -23,6 +23,10 @@ import (
 
 const tokenRefreshSkewSeconds int64 = 120
 
+// noAccountsClientMessage 是账号池无可用账号时返回给客户的 503 文案（客户视角是
+// "服务器维护中"）；管理端请求日志仍记录真实原因 "No available accounts"。
+const noAccountsClientMessage = "Server đang bảo trì, vui lòng thử lại sau."
+
 // Handler HTTP 处理器
 type Handler struct {
 	pool *pool.AccountPool
@@ -1631,7 +1635,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 
 	if lastErr == nil {
 		h.recordFailureForApiKey(apiKeyID, "claude", model, 503, "No available accounts", startedAt)
-		h.sendClaudeError(w, 503, "api_error", "No available accounts")
+		h.sendClaudeError(w, 503, "api_error", noAccountsClientMessage)
 		return
 	}
 
@@ -1918,7 +1922,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 
 	if lastErr == nil {
 		h.recordFailureForApiKey(apiKeyID, "claude", model, 503, "No available accounts", startedAt)
-		h.sendClaudeError(w, 503, "api_error", "No available accounts")
+		h.sendClaudeError(w, 503, "api_error", noAccountsClientMessage)
 		return
 	}
 
@@ -2434,7 +2438,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 	}
 
 	if lastErr == nil {
-		h.sendOpenAIError(w, 503, "server_error", "No available accounts")
+		h.sendOpenAIError(w, 503, "server_error", noAccountsClientMessage)
 		return
 	}
 
@@ -2523,7 +2527,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 
 	if lastErr == nil {
 		h.recordFailureForApiKey(apiKeyID, "openai", model, 503, "No available accounts", startedAt)
-		h.sendOpenAIError(w, 503, "server_error", "No available accounts")
+		h.sendOpenAIError(w, 503, "server_error", noAccountsClientMessage)
 		return
 	}
 

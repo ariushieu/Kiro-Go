@@ -229,7 +229,7 @@ func (h *Handler) handleResponsesNonStream(
 
 	if lastErr == nil {
 		h.recordFailureForApiKey(apiKeyID, "openai", model, 503, "No available accounts", startedAt)
-		h.sendOpenAIError(w, 503, "server_error", "No available accounts")
+		h.sendOpenAIError(w, 503, "server_error", noAccountsClientMessage)
 		return
 	}
 	status := statusForUpstreamError(lastErr)
@@ -684,7 +684,7 @@ func (h *Handler) handleResponsesStream(
 				"status": "failed",
 				"error": map[string]string{
 					"type":    "server_error",
-					"message": "No available accounts",
+					"message": noAccountsClientMessage,
 				},
 			},
 		})
