@@ -45,6 +45,12 @@
       margin: 0 auto;
       padding: clamp(1.75rem, 4vw, 3.25rem) 1.25rem 4rem;
     }
+    /* On a wide screen the single 34rem column forced the whole receipt — balance,
+       gauges, meta, both ledgers, connect block — into one tall scroll. Widen the
+       shell and lay the receipt out side by side instead; see .p-receipt-body. */
+    @media (min-width: 62rem) {
+      .portal { max-width: 76rem; }
+    }
 
     /* Masthead — quiet, lets the ledger carry the personality. */
     .p-top {
@@ -184,6 +190,35 @@
       border-bottom: 1px dashed var(--p-line);
     }
     .p-receipt-body { padding: 1.25rem 1.25rem 1.5rem; }
+
+    /* Wide layout: balance/gauges/meta on the left, the ledgers and connect
+       details on the right, so nothing below the fold on a desktop screen.
+       Below 62rem both columns collapse back to the original single stack. */
+    @media (min-width: 62rem) {
+      .p-receipt-body {
+        display: grid;
+        grid-template-columns: minmax(0, 22rem) minmax(0, 1fr);
+        grid-template-areas: "status status" "left right";
+        column-gap: 2.5rem;
+        align-items: start;
+        padding: 1.5rem 1.75rem 1.75rem;
+      }
+      .p-status-row { grid-area: status; }
+      .p-col-left { grid-area: left; }
+      .p-col-right { grid-area: right; min-width: 0; }
+      /* These lead their column, so drop the stacked-layout top spacing. */
+      .p-col-right > .p-ledger:first-child { margin-top: 0; }
+      .p-col-right > .p-ledger:first-child .p-ledger-head {
+        padding-top: 0;
+        border-top: 0;
+      }
+      /* Two ledgers share the right column: cap each so both stay in view. */
+      .p-col-right .p-ledger-scroll { max-height: 13rem; }
+      /* The connect block moves under the balance — the left column is short
+         (hero + two gauges + three meta rows) and would otherwise sit empty
+         while the right column overflowed. */
+      .p-col-left > .p-connect { margin-top: 1.25rem; }
+    }
 
     .p-status-row {
       display: flex;
@@ -542,6 +577,7 @@
           <span class="p-pill" id="statusPill"></span>
         </div>
 
+        <div class="p-col-left">
         <div class="p-hero">
           <span class="p-hero-num" id="heroNum">—</span>
           <span class="p-hero-unit" id="heroUnit"></span>
@@ -582,6 +618,39 @@
             <span class="v" id="expiryVal"></span>
           </div>
         </div>
+        <div class="p-connect" id="connectBlock" style="display:none;">
+          <h3 class="p-connect-head" data-t="connectTitle"></h3>
+          <div class="p-conn-row">
+            <span class="k" data-t="connBaseUrl"></span>
+            <span class="v" id="connBaseUrl"></span>
+            <button class="p-copy" type="button" data-copy-target="connBaseUrl" aria-label="copy">
+              <i class="fa-regular fa-copy"></i>
+            </button>
+          </div>
+          <div class="p-conn-row">
+            <span class="k" data-t="connClaude"></span>
+            <span class="v" id="connClaudeUrl"></span>
+            <button class="p-copy" type="button" data-copy-target="connClaudeUrl" aria-label="copy">
+              <i class="fa-regular fa-copy"></i>
+            </button>
+          </div>
+          <div class="p-conn-row">
+            <span class="k" data-t="connOpenai"></span>
+            <span class="v" id="connOpenaiUrl"></span>
+            <button class="p-copy" type="button" data-copy-target="connOpenaiUrl" aria-label="copy">
+              <i class="fa-regular fa-copy"></i>
+            </button>
+          </div>
+          <div class="p-snippet">
+            <pre id="connSnippet"></pre>
+            <button class="p-copy" type="button" data-copy-target="connSnippet" aria-label="copy">
+              <i class="fa-regular fa-copy"></i>
+            </button>
+          </div>
+        </div>
+        </div><!-- /.p-col-left -->
+
+        <div class="p-col-right">
 
         <div class="p-ledger" id="byModelBlock" style="display:none;">
           <div class="p-ledger-head">
@@ -630,36 +699,7 @@
           </div>
         </div>
 
-        <div class="p-connect" id="connectBlock" style="display:none;">
-          <h3 class="p-connect-head" data-t="connectTitle"></h3>
-          <div class="p-conn-row">
-            <span class="k" data-t="connBaseUrl"></span>
-            <span class="v" id="connBaseUrl"></span>
-            <button class="p-copy" type="button" data-copy-target="connBaseUrl" aria-label="copy">
-              <i class="fa-regular fa-copy"></i>
-            </button>
-          </div>
-          <div class="p-conn-row">
-            <span class="k" data-t="connClaude"></span>
-            <span class="v" id="connClaudeUrl"></span>
-            <button class="p-copy" type="button" data-copy-target="connClaudeUrl" aria-label="copy">
-              <i class="fa-regular fa-copy"></i>
-            </button>
-          </div>
-          <div class="p-conn-row">
-            <span class="k" data-t="connOpenai"></span>
-            <span class="v" id="connOpenaiUrl"></span>
-            <button class="p-copy" type="button" data-copy-target="connOpenaiUrl" aria-label="copy">
-              <i class="fa-regular fa-copy"></i>
-            </button>
-          </div>
-          <div class="p-snippet">
-            <pre id="connSnippet"></pre>
-            <button class="p-copy" type="button" data-copy-target="connSnippet" aria-label="copy">
-              <i class="fa-regular fa-copy"></i>
-            </button>
-          </div>
-        </div>
+        </div><!-- /.p-col-right -->
       </div>
     </div>
 
