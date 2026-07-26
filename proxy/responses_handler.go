@@ -232,10 +232,10 @@ func (h *Handler) handleResponsesNonStream(
 		h.sendOpenAIError(w, 503, "server_error", noAccountsClientMessage)
 		return
 	}
-	status := statusForUpstreamError(lastErr)
+	status, clientMsg := clientFacingUpstreamError(lastErr)
 	applyRetryAfterHeader(w, lastErr)
 	h.recordFailureForApiKey(apiKeyID, "openai", model, status, lastErr.Error(), startedAt)
-	h.sendOpenAIError(w, status, errorTypeForOpenAIStatus(status), lastErr.Error())
+	h.sendOpenAIError(w, status, errorTypeForOpenAIStatus(status), clientMsg)
 }
 
 func buildResponsesObject(
@@ -690,7 +690,7 @@ func (h *Handler) handleResponsesStream(
 		})
 		return
 	}
-	status := statusForUpstreamError(lastErr)
+	status, clientMsg := clientFacingUpstreamError(lastErr)
 	h.recordFailureForApiKey(apiKeyID, "openai", model, status, lastErr.Error(), startedAt)
 	send("response.failed", map[string]interface{}{
 		"type": "response.failed",
@@ -699,7 +699,7 @@ func (h *Handler) handleResponsesStream(
 			"status": "failed",
 			"error": map[string]string{
 				"type":    errorTypeForOpenAIStatus(status),
-				"message": lastErr.Error(),
+				"message": clientMsg,
 			},
 		},
 	})

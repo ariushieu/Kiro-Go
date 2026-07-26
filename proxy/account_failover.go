@@ -83,6 +83,30 @@ func statusForUpstreamError(err error) int {
 	}
 }
 
+// clientFacingUpstreamError 决定重试耗尽后返回给【客户】的状态码和文案。
+// 账号池内部故障（账号 token/鉴权、overage、封号、profile ARN、出站代理）与客户无关 —
+// 原样返回 401/402 会被客户误读成"自己的 key/账单坏了"，所以统一伪装成 503 维护文案。
+// 配额耗尽保留 429（调用方仍会带 Retry-After）让客户端 SDK 正常退避，但替换上游原文。
+// 其余错误原样透传。真实原因始终记录在管理端请求日志里。
+func clientFacingUpstreamError(err error) (status int, message string) {
+	if err == nil {
+		return http.StatusServiceUnavailable, noAccountsClientMessage
+	}
+	msg := err.Error()
+	switch {
+	case isQuotaErrorMessage(msg):
+		return http.StatusTooManyRequests, rateLimitedClientMessage
+	case isOverageErrorMessage(msg),
+		isSuspensionErrorMessage(msg),
+		isProfileUnavailableErrorMessage(msg),
+		isProxyErrorMessage(msg),
+		isAuthErrorMessage(msg):
+		return http.StatusServiceUnavailable, noAccountsClientMessage
+	default:
+		return statusForUpstreamError(err), msg
+	}
+}
+
 func errorTypeForOpenAIStatus(status int) string {
 	switch status {
 	case http.StatusTooManyRequests:

@@ -27,6 +27,9 @@ const tokenRefreshSkewSeconds int64 = 120
 // "服务器维护中"）；管理端请求日志仍记录真实原因 "No available accounts"。
 const noAccountsClientMessage = "Server đang bảo trì, vui lòng thử lại sau."
 
+// rateLimitedClientMessage 是全部账号配额耗尽（上游 429/throttle）时给客户的 429 文案。
+const rateLimitedClientMessage = "Hệ thống đang bận, vui lòng thử lại sau ít phút."
+
 // Handler HTTP 处理器
 type Handler struct {
 	pool *pool.AccountPool
@@ -1639,10 +1642,10 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		return
 	}
 
-	status := statusForUpstreamError(lastErr)
+	status, clientMsg := clientFacingUpstreamError(lastErr)
 	applyRetryAfterHeader(w, lastErr)
 	h.recordFailureForApiKey(apiKeyID, "claude", model, status, lastErr.Error(), startedAt)
-	h.sendClaudeError(w, status, "api_error", lastErr.Error())
+	h.sendClaudeError(w, status, "api_error", clientMsg)
 }
 
 func (h *Handler) sendSSE(w http.ResponseWriter, flusher http.Flusher, event string, data interface{}) {
@@ -1926,10 +1929,10 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		return
 	}
 
-	status := statusForUpstreamError(lastErr)
+	status, clientMsg := clientFacingUpstreamError(lastErr)
 	applyRetryAfterHeader(w, lastErr)
 	h.recordFailureForApiKey(apiKeyID, "claude", model, status, lastErr.Error(), startedAt)
-	h.sendClaudeError(w, status, "api_error", lastErr.Error())
+	h.sendClaudeError(w, status, "api_error", clientMsg)
 }
 
 func (h *Handler) sendClaudeError(w http.ResponseWriter, status int, errType, message string) {
@@ -2443,9 +2446,9 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 	}
 
 	h.recordFailure()
-	status := statusForUpstreamError(lastErr)
+	status, clientMsg := clientFacingUpstreamError(lastErr)
 	applyRetryAfterHeader(w, lastErr)
-	h.sendOpenAIError(w, status, errorTypeForOpenAIStatus(status), lastErr.Error())
+	h.sendOpenAIError(w, status, errorTypeForOpenAIStatus(status), clientMsg)
 }
 
 // handleOpenAINonStream OpenAI 非流式响应
@@ -2531,10 +2534,10 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 		return
 	}
 
-	status := statusForUpstreamError(lastErr)
+	status, clientMsg := clientFacingUpstreamError(lastErr)
 	applyRetryAfterHeader(w, lastErr)
 	h.recordFailureForApiKey(apiKeyID, "openai", model, status, lastErr.Error(), startedAt)
-	h.sendOpenAIError(w, status, errorTypeForOpenAIStatus(status), lastErr.Error())
+	h.sendOpenAIError(w, status, errorTypeForOpenAIStatus(status), clientMsg)
 }
 
 func (h *Handler) sendOpenAIError(w http.ResponseWriter, status int, errType, message string) {

@@ -1,6 +1,10 @@
 package proxy
 
-import "testing"
+import (
+	"errors"
+	"net/http"
+	"testing"
+)
 
 func TestAccountFailureClassifiers(t *testing.T) {
 	tests := []struct {
@@ -18,6 +22,31 @@ func TestAccountFailureClassifiers(t *testing.T) {
 	for _, tc := range tests {
 		if !tc.fn(tc.msg) {
 			t.Fatalf("%s classifier did not match %q", tc.name, tc.msg)
+		}
+	}
+}
+
+func TestClientFacingUpstreamError(t *testing.T) {
+	tests := []struct {
+		name       string
+		err        error
+		wantStatus int
+		wantMsg    string
+	}{
+		{name: "nil", err: nil, wantStatus: http.StatusServiceUnavailable, wantMsg: noAccountsClientMessage},
+		{name: "quota", err: errors.New("HTTP 429: quota exhausted"), wantStatus: http.StatusTooManyRequests, wantMsg: rateLimitedClientMessage},
+		{name: "overage", err: errors.New("HTTP 402 from Kiro IDE: OVERAGE limit exceeded"), wantStatus: http.StatusServiceUnavailable, wantMsg: noAccountsClientMessage},
+		{name: "suspension", err: errors.New("Your User ID temporarily is suspended"), wantStatus: http.StatusServiceUnavailable, wantMsg: noAccountsClientMessage},
+		{name: "profile", err: errors.New("no available Kiro profile"), wantStatus: http.StatusServiceUnavailable, wantMsg: noAccountsClientMessage},
+		{name: "proxy", err: errors.New("proxyconnect tcp: dial tcp 1.2.3.4:1080: connect: connection refused"), wantStatus: http.StatusServiceUnavailable, wantMsg: noAccountsClientMessage},
+		{name: "auth", err: errors.New("Authentication failed - token invalid or expired"), wantStatus: http.StatusServiceUnavailable, wantMsg: noAccountsClientMessage},
+		{name: "passthrough", err: errors.New("Improperly formed request"), wantStatus: http.StatusInternalServerError, wantMsg: "Improperly formed request"},
+	}
+
+	for _, tc := range tests {
+		status, msg := clientFacingUpstreamError(tc.err)
+		if status != tc.wantStatus || msg != tc.wantMsg {
+			t.Fatalf("%s: clientFacingUpstreamError() = (%d, %q), want (%d, %q)", tc.name, status, msg, tc.wantStatus, tc.wantMsg)
 		}
 	}
 }
