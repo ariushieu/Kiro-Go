@@ -56,8 +56,12 @@ func TestBuildClaudeUsageMapIncludesCacheFields(t *testing.T) {
 
 	m := buildClaudeUsageMap(100, 50, usage, true)
 
-	if got := m["input_tokens"]; got != 50 {
-		t.Fatalf("expected billed input tokens 50, got %#v", got)
+	// input_tokens must report the FULL count, matching what RecordApiKeyUsage
+	// charges against the key's quota. The cache figures are a local simulation
+	// (Kiro has no prompt-caching API), so subtracting them here made the client
+	// display far fewer tokens than were actually deducted.
+	if got := m["input_tokens"]; got != 100 {
+		t.Fatalf("expected billed input tokens to be the full 100, got %#v", got)
 	}
 	if got := m["cache_creation_input_tokens"]; got != 30 {
 		t.Fatalf("expected cache creation tokens 30, got %#v", got)
@@ -260,5 +264,45 @@ func TestPromptCacheImplicitBreakpointAtMessageEnd(t *testing.T) {
 	result := tracker.Compute("acct-1", profile2)
 	if result.CacheReadInputTokens == 0 {
 		t.Fatalf("expected cache read via implicit message-end breakpoint, got %+v", result)
+	}
+}
+
+// TestReportedInputTokensMatchQuotaDeduction guards the billing invariant that
+// matters commercially: the input_tokens a customer sees must equal the number
+// charged against their key's quota.
+//
+// Earlier the reported value had the locally-simulated prompt-cache figures
+// subtracted, while RecordApiKeyUsage deducted the full count. With the cacheable
+// portion capped at 85% of input, a customer on a token plan could see as little
+// as ~15% of what their allowance was actually being drained by — so their own
+// numbers could never be reconciled against their remaining balance.
+func TestReportedInputTokensMatchQuotaDeduction(t *testing.T) {
+	const realInputTokens = 100_000
+
+	// A heavy cache profile: whatever it claims, it must not shrink the report.
+	usage := promptCacheUsage{
+		CacheCreationInputTokens:   20_000,
+		CacheReadInputTokens:       65_000,
+		CacheCreation5mInputTokens: 20_000,
+	}
+
+	// What the quota is charged (handler passes inputTokens straight through).
+	quotaCharged := realInputTokens
+
+	for _, includeCache := range []bool{true, false} {
+		m := buildClaudeUsageMap(realInputTokens, 500, usage, includeCache)
+		reported, ok := m["input_tokens"].(int)
+		if !ok {
+			t.Fatalf("input_tokens missing or not an int: %#v", m["input_tokens"])
+		}
+		if reported != quotaCharged {
+			t.Fatalf("includeCache=%v: reported %d input tokens but quota is charged %d — customer cannot reconcile their balance",
+				includeCache, reported, quotaCharged)
+		}
+	}
+
+	// The non-streaming Claude path uses billedClaudeInputTokens directly.
+	if got := billedClaudeInputTokens(realInputTokens, usage); got != quotaCharged {
+		t.Fatalf("billedClaudeInputTokens returned %d, want %d", got, quotaCharged)
 	}
 }

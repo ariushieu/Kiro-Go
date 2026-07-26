@@ -506,8 +506,27 @@ func computePromptCacheTTLBreakdown(profile *promptCacheProfile, matchedTokens i
 	return cache5m, cache1h
 }
 
+// billedClaudeInputTokens returns the input_tokens value reported to the client.
+//
+// It reports the FULL input token count — the same number that is charged against
+// the API key's quota in RecordApiKeyUsage. Earlier versions subtracted the
+// prompt-cache figures here:
+//
+//	inputTokens - CacheCreationInputTokens - CacheReadInputTokens
+//
+// That was wrong in a way that cost real money to reason about. Kiro/CodeWhisperer
+// has no prompt-caching API (nothing in this proxy ever sends cache_control
+// upstream), so those cache numbers are produced by a LOCAL simulation in this
+// file — fingerprints of request prefixes held in memory. Subtracting them made
+// the client display as little as ~15% of the tokens actually being deducted from
+// the customer's quota, so a customer comparing their own usage against their
+// token allowance saw figures that could not be reconciled, and any token/credit
+// ratio derived from them was meaningless.
+//
+// The cache fields are still reported alongside (see buildClaudeUsageMap) for
+// clients that read them, but they no longer alter the billed count.
 func billedClaudeInputTokens(inputTokens int, usage promptCacheUsage) int {
-	return maxInt(inputTokens-usage.CacheCreationInputTokens-usage.CacheReadInputTokens, 0)
+	return maxInt(inputTokens, 0)
 }
 
 func buildClaudeUsageMap(inputTokens, outputTokens int, usage promptCacheUsage, includeCache bool) map[string]interface{} {
