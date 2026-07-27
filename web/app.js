@@ -1862,6 +1862,9 @@
   }
   // Multi API Key management
   let apiKeysCache = [];
+  // Free-text filter over the key list. Matches name, masked value and bound-account
+  // labels so support can find a customer's key from whatever detail they quote.
+  let apiKeySearch = '';
   let apiKeyEditingId = '';
   let apiKeyModalSubmitting = false;
   const selectedApiKeyIds = new Set();
@@ -1923,27 +1926,55 @@
       '<div class="stat-card"><div class="stat-card-title">' + escapeHtml(t('apiKeys.statDisabled')) + '</div><div class="stat-value">' + escapeHtml(formatNumber(disabled)) + '</div></div>';
   }
 
-  function renderApiKeyBulkBar() {
+  // apiKeyMatchesSearch tests one key against the search box. Searches the fields a
+  // customer might quote in a ticket: the key's label, the masked value (so the tail
+  // digits of their real key work), and the emails of accounts it is bound to.
+  function apiKeyMatchesSearch(item, kw) {
+    if (!kw) return true;
+    const haystack = [item.name || '', item.keyMasked || '', item.id || ''];
+    const boundIds = Array.isArray(item.boundAccountIds) ? item.boundAccountIds : [];
+    if (boundIds.length) {
+      const accts = Array.isArray(accountsData) ? accountsData : [];
+      boundIds.forEach(bid => {
+        const a = accts.find(x => x.id === bid);
+        haystack.push(a ? (a.email || a.nickname || bid) : bid);
+      });
+    }
+    return haystack.join(' ').toLowerCase().includes(kw);
+  }
+
+  // visibleApiKeys is the currently displayed subset. Bulk actions and select-all
+  // operate on this, not the whole cache — selecting hidden keys would be a surprise.
+  function visibleApiKeys() {
+    const kw = apiKeySearch.trim().toLowerCase();
+    if (!kw) return apiKeysCache;
+    return apiKeysCache.filter(k => apiKeyMatchesSearch(k, kw));
+  }
+
+  function renderApiKeyBulkBar(visible) {
     const bar = $('apiKeyBulkBar');
     const count = $('apiKeyBulkCount');
     if (!bar || !count) return;
+    const list = visible || visibleApiKeys();
     const n = selectedApiKeyIds.size;
     bar.classList.toggle('hidden', n === 0);
     count.textContent = t('apiKeys.selected', n);
-    // Keep the select-all checkbox in sync: checked when every key is selected,
-    // indeterminate when only some are.
+    // Keep the select-all checkbox in sync against what's on screen: checked when
+    // every visible key is selected, indeterminate when only some are.
     const cb = $('apiKeySelectAll');
     if (cb) {
-      const total = apiKeysCache.length;
-      cb.checked = total > 0 && n === total;
-      cb.indeterminate = n > 0 && n < total;
+      const total = list.length;
+      const selectedVisible = list.filter(k => selectedApiKeyIds.has(k.id)).length;
+      cb.checked = total > 0 && selectedVisible === total;
+      cb.indeterminate = selectedVisible > 0 && selectedVisible < total;
     }
   }
 
-  // toggleApiKeySelectAll selects or clears every created API key at once.
+  // toggleApiKeySelectAll selects or clears every VISIBLE API key at once. With a
+  // search active this is a scoped select-all, which is the point: filter, then act.
   function toggleApiKeySelectAll(checked) {
     selectedApiKeyIds.clear();
-    if (checked) apiKeysCache.forEach(k => { if (k.id) selectedApiKeyIds.add(k.id); });
+    if (checked) visibleApiKeys().forEach(k => { if (k.id) selectedApiKeyIds.add(k.id); });
     renderApiKeys();
   }
 
@@ -1953,12 +1984,24 @@
     const ids = new Set(apiKeysCache.map(k => k.id));
     selectedApiKeyIds.forEach(id => { if (!ids.has(id)) selectedApiKeyIds.delete(id); });
     renderApiKeyStats();
-    renderApiKeyBulkBar();
+    const shown = visibleApiKeys();
+    renderApiKeyBulkBar(shown);
+    // Match count is only meaningful while filtering; the stat cards already say the total.
+    const countEl = $('apiKeySearchCount');
+    if (countEl) {
+      countEl.textContent = apiKeySearch.trim()
+        ? t('apiKeys.searchCount', shown.length, apiKeysCache.length)
+        : '';
+    }
     if (!apiKeysCache.length) {
       list.innerHTML = '<div class="muted-text" style="padding:0.5rem 0;">' + escapeHtml(t('apiKeys.empty')) + '</div>';
       return;
     }
-    const html = apiKeysCache.map(item => {
+    if (!shown.length) {
+      list.innerHTML = '<div class="muted-text" style="padding:0.5rem 0;">' + escapeHtml(t('apiKeys.searchEmpty')) + '</div>';
+      return;
+    }
+    const html = shown.map(item => {
       const rawId = item.id || '';
       const id = escapeAttr(rawId);
       const checked = selectedApiKeyIds.has(rawId) ? ' checked' : '';
@@ -2480,6 +2523,11 @@
     if (bulkDeleteBtn) bulkDeleteBtn.addEventListener('click', bulkDeleteApiKeys);
     const selectAllApiKeys = $('apiKeySelectAll');
     if (selectAllApiKeys) selectAllApiKeys.addEventListener('change', e => toggleApiKeySelectAll(e.target.checked));
+    const apiKeySearchInput = $('apiKeySearchInput');
+    if (apiKeySearchInput) apiKeySearchInput.addEventListener('input', () => {
+      apiKeySearch = apiKeySearchInput.value;
+      renderApiKeys();
+    });
     const saveBtn = $('apiKeyModalSaveBtn');
     if (saveBtn) saveBtn.addEventListener('click', submitApiKeyModal);
     const cancelBtn = $('apiKeyModalCancelBtn');

@@ -249,6 +249,15 @@
       color: var(--muted-foreground);
       margin: 0;
     }
+    .p-status-id { display: flex; flex-direction: column; gap: 0.2rem; min-width: 0; }
+    /* The key label the operator assigned. Customers quote this in support tickets,
+       so it must be readable and selectable, not a faint caption. */
+    .p-key-name {
+      font-size: 0.95rem;
+      font-weight: 600;
+      color: var(--foreground);
+      overflow-wrap: anywhere;
+    }
     .p-pill {
       display: inline-flex;
       align-items: center;
@@ -588,7 +597,10 @@
       <div class="p-perf"></div>
       <div class="p-receipt-body">
         <div class="p-status-row">
-          <h2 data-t="usageTitle"></h2>
+          <div class="p-status-id">
+            <h2 data-t="usageTitle"></h2>
+            <span class="p-key-name" id="keyName" style="display:none;"></span>
+          </div>
           <span class="p-pill" id="statusPill"></span>
         </div>
 
@@ -902,6 +914,17 @@
       function renderResult(d) {
         lastData = d;
         $('resultCard').style.display = '';
+
+        // Key label — lets the customer confirm which key they pasted, and gives
+        // support a shared name to refer to. Hidden when the operator left it blank.
+        var nameEl = $('keyName');
+        if (d.name) {
+          nameEl.textContent = d.name;
+          nameEl.style.display = '';
+        } else {
+          nameEl.textContent = '';
+          nameEl.style.display = 'none';
+        }
 
         var pill = $('statusPill');
         if (d.valid) {

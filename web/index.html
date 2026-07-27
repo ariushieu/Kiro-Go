@@ -275,6 +275,11 @@
             <small data-i18n="apiKeys.listHint"></small>
           </div>
           <div class="usage-totals" id="apiKeyStats"></div>
+          <div class="flex items-center gap-2" style="margin:0.75rem 0 0;flex-wrap:wrap;">
+            <input id="apiKeySearchInput" class="logs-search" type="search"
+              data-i18n-placeholder="apiKeys.searchPlaceholder" />
+            <span class="text-xs muted-text" id="apiKeySearchCount"></span>
+          </div>
           <div class="flex items-center gap-2" style="margin:0.75rem 0;flex-wrap:wrap;">
             <label class="flex items-center gap-1.5 cursor-pointer select-none shrink-0">
               <input type="checkbox" id="apiKeySelectAll" />

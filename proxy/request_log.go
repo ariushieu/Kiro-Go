@@ -221,9 +221,12 @@ func (h *Handler) apiGetUsageSummary(w http.ResponseWriter, r *http.Request) {
 }
 
 // apiKeySelfInfo is the public self-service payload. It intentionally omits the
-// key ID, name, masked value and internal flags — a customer checking their own
-// key only needs quota/usage/expiry, not admin metadata.
+// key ID, masked value and internal flags — a customer checking their own key
+// only needs quota/usage/expiry, not admin metadata. Name IS included: it is the
+// label the operator gave the key, and both sides need to say the same name out
+// loud when the customer opens a support ticket.
 type apiKeySelfInfo struct {
+	Name          string          `json:"name,omitempty"`
 	Enabled       bool            `json:"enabled"`
 	TokenLimit    int64           `json:"tokenLimit"`
 	CreditLimit   float64         `json:"creditLimit"`
@@ -348,6 +351,7 @@ func (h *Handler) apiKeySelfInfo(w http.ResponseWriter, r *http.Request) {
 	usage := h.usage.snapshot(entry.ID)
 
 	json.NewEncoder(w).Encode(apiKeySelfInfo{
+		Name:          entry.Name,
 		Enabled:       entry.Enabled,
 		TokenLimit:    entry.TokenLimit,
 		CreditLimit:   entry.CreditLimit,
