@@ -11,7 +11,7 @@
 
 # Secrets — bản local của .env.example, chứa ADMIN_PASSWORD/ADMIN_PATH
 .env
-
+nginx.env
 # Editor / OS
 .idea/
 .vscode/
