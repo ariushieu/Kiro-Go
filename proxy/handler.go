@@ -1590,10 +1590,13 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			if !messageStarted {
 				continue
 			}
+			// 流已开始，无法再改状态码，但错误文案仍要走客户视角的伪装：
+			// err.Error() 可能带着上游原文（含第三方 body），只有管理端日志记录原文。
+			_, midStreamMsg := clientFacingUpstreamError(err)
 			h.recordFailureForApiKey(apiKeyID, "claude", model, 0, err.Error(), startedAt)
 			h.sendSSE(w, flusher, "error", map[string]interface{}{
 				"type":  "error",
-				"error": map[string]string{"type": "api_error", "message": err.Error()},
+				"error": map[string]string{"type": "api_error", "message": midStreamMsg},
 			})
 			return
 		}

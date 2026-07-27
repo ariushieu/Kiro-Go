@@ -10,6 +10,84 @@ import (
 	"kiro-go/config"
 )
 
+// TestAnthropicUpstreamDefaultMaxTokens pins the max_tokens sent when the client
+// omits it. The Anthropic Messages API requires the field, so a low default silently
+// truncates long answers mid-sentence — the old 4096 did exactly that. A client that
+// DOES set max_tokens must still win.
+func TestAnthropicUpstreamDefaultMaxTokens(t *testing.T) {
+	t.Run("client omits max_tokens", func(t *testing.T) {
+		payload := OpenAIToKiro(&OpenAIRequest{
+			Model: "claude-fable-5", Messages: []OpenAIMessage{{Role: "user", Content: "hi"}},
+		}, false)
+		req, err := kiroPayloadToAnthropic("claude-fable-5", payload)
+		if err != nil {
+			t.Fatalf("convert: %v", err)
+		}
+		if req.MaxTokens != defaultAnthropicUpstreamMaxTokens {
+			t.Fatalf("max_tokens = %d, want default %d", req.MaxTokens, defaultAnthropicUpstreamMaxTokens)
+		}
+		if req.MaxTokens <= 4096 {
+			t.Fatalf("default max_tokens %d is low enough to truncate long answers", req.MaxTokens)
+		}
+	})
+
+	t.Run("client max_tokens wins", func(t *testing.T) {
+		payload := OpenAIToKiro(&OpenAIRequest{
+			Model: "claude-fable-5", Messages: []OpenAIMessage{{Role: "user", Content: "hi"}}, MaxTokens: 128,
+		}, false)
+		req, err := kiroPayloadToAnthropic("claude-fable-5", payload)
+		if err != nil {
+			t.Fatalf("convert: %v", err)
+		}
+		if req.MaxTokens != 128 {
+			t.Fatalf("max_tokens = %d, want the client's 128", req.MaxTokens)
+		}
+	})
+}
+
+// TestAnthropicUpstreamMaxTokensStopReasonIsParsed covers the truncation signal path:
+// a stream ending with stop_reason "max_tokens" must still deliver everything the
+// upstream sent (no dropped text, usage intact, OnComplete fired). Before stop_reason
+// was parsed at all, a truncated answer was indistinguishable from a complete one.
+func TestAnthropicUpstreamMaxTokensStopReasonIsParsed(t *testing.T) {
+	mustInitConfig(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":7,\"output_tokens\":0}}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"a long answer cut off mid-sen\"}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"},\"usage\":{\"output_tokens\":9}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"message_stop\"}\n\n"))
+	}))
+	defer server.Close()
+
+	account := &config.Account{
+		ID: "anthropic-trunc", Backend: config.BackendOpenAICompatible, APIFormat: config.APIFormatAnthropic,
+		ApiKey: "upstream-secret", BaseURL: server.URL, Models: []string{"claude-fable-5"},
+	}
+	payload := OpenAIToKiro(&OpenAIRequest{
+		Model: "claude-fable-5", Messages: []OpenAIMessage{{Role: "user", Content: "hi"}},
+	}, false)
+
+	var text string
+	outputTokens, completes := 0, 0
+	err := CallUpstreamAPI(account, "claude-fable-5", payload, &KiroStreamCallback{
+		OnText:     func(value string, isThinking bool) { text += value },
+		OnComplete: func(in, out int) { outputTokens = out; completes++ },
+	})
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if text != "a long answer cut off mid-sen" {
+		t.Fatalf("truncated stream lost text: %q", text)
+	}
+	if outputTokens != 9 {
+		t.Fatalf("outputTokens = %d, want 9", outputTokens)
+	}
+	if completes != 1 {
+		t.Fatalf("OnComplete fired %d times, want 1", completes)
+	}
+}
+
 func TestAnthropicCompatibleSSEDispatch(t *testing.T) {
 	mustInitConfig(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

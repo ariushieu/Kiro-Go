@@ -599,6 +599,8 @@ func (h *Handler) handleResponsesStream(
 				h.handleAccountFailure(account, err)
 				continue
 			}
+			// 流已开始后才失败：客户仍只能看到伪装文案（原文进管理端日志）。
+			_, midStreamMsg := clientFacingUpstreamError(err)
 			send("response.failed", map[string]interface{}{
 				"type": "response.failed",
 				"response": map[string]interface{}{
@@ -606,7 +608,7 @@ func (h *Handler) handleResponsesStream(
 					"status": "failed",
 					"error": map[string]string{
 						"type":    "server_error",
-						"message": err.Error(),
+						"message": midStreamMsg,
 					},
 				},
 			})

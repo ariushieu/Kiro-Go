@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"kiro-go/config"
+	"kiro-go/logger"
 	"net/http"
 	"net/url"
 	"sort"
@@ -238,6 +239,7 @@ func consumeOpenAICompatibleSSE(body io.Reader, account *config.Account, payload
 	tools := make(map[int]*openAIToolAccumulator)
 	usage := UpstreamUsage{}
 	reportedInputTokens := 0
+	finishReason := ""
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -262,6 +264,7 @@ func consumeOpenAICompatibleSSE(body io.Reader, account *config.Account, payload
 						} `json:"function"`
 					} `json:"tool_calls"`
 				} `json:"delta"`
+				FinishReason string `json:"finish_reason"`
 			} `json:"choices"`
 			Usage *OpenAIUsage `json:"usage"`
 			Error *struct {
@@ -279,6 +282,9 @@ func consumeOpenAICompatibleSSE(body io.Reader, account *config.Account, payload
 			reportedInputTokens = chunk.Usage.PromptTokens
 		}
 		for _, choice := range chunk.Choices {
+			if choice.FinishReason != "" {
+				finishReason = choice.FinishReason
+			}
 			if choice.Delta.Content != "" && callback != nil && callback.OnText != nil {
 				callback.OnText(choice.Delta.Content, false)
 			}
@@ -307,7 +313,22 @@ func consumeOpenAICompatibleSSE(body io.Reader, account *config.Account, payload
 	if callback != nil && callback.OnComplete != nil {
 		callback.OnComplete(reportedInputTokens, usage.OutputTokens)
 	}
+	warnOpenAIUpstreamTruncation(account, finishReason, usage.OutputTokens)
 	return nil
+}
+
+// warnOpenAIUpstreamTruncation is the OpenAI-format counterpart of
+// warnUpstreamTruncation: finish_reason "length" means the upstream hit its output
+// cap and the answer stops mid-sentence with no other trace in the log.
+func warnOpenAIUpstreamTruncation(account *config.Account, finishReason string, outputTokens int) {
+	if finishReason != "length" {
+		return
+	}
+	email := ""
+	if account != nil {
+		email = account.Email
+	}
+	logger.Warnf("[Upstream] OpenAI-compatible upstream truncated the response at max_tokens (account=%s, outputTokens=%d) — raise the client's max_tokens", email, outputTokens)
 }
 
 func consumeOpenAICompatibleJSON(body io.Reader, account *config.Account, payload *KiroPayload, callback *KiroStreamCallback) error {
@@ -321,6 +342,7 @@ func consumeOpenAICompatibleJSON(body io.Reader, account *config.Account, payloa
 					Function struct{ Name, Arguments string } `json:"function"`
 				} `json:"tool_calls"`
 			} `json:"message"`
+			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
 		Usage OpenAIUsage `json:"usage"`
 		Error *struct {
@@ -334,7 +356,11 @@ func consumeOpenAICompatibleJSON(body io.Reader, account *config.Account, payloa
 		return fmt.Errorf("OpenAI-compatible upstream error: %s", response.Error.Message)
 	}
 	tools := make(map[int]*openAIToolAccumulator)
+	finishReason := ""
 	for _, choice := range response.Choices {
+		if choice.FinishReason != "" {
+			finishReason = choice.FinishReason
+		}
 		if choice.Message.Content != "" && callback != nil && callback.OnText != nil {
 			callback.OnText(choice.Message.Content, false)
 		}
@@ -352,6 +378,7 @@ func consumeOpenAICompatibleJSON(body io.Reader, account *config.Account, payloa
 	if callback != nil && callback.OnComplete != nil {
 		callback.OnComplete(response.Usage.PromptTokens, response.Usage.CompletionTokens)
 	}
+	warnOpenAIUpstreamTruncation(account, finishReason, response.Usage.CompletionTokens)
 	return nil
 }
 

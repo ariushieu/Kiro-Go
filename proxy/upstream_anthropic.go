@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"kiro-go/config"
+	"kiro-go/logger"
 	"net/http"
 	"net/url"
 	"sort"
@@ -16,6 +17,17 @@ import (
 )
 
 const maxAnthropicUpstreamErrorBytes = 4096
+
+// defaultAnthropicUpstreamMaxTokens is the max_tokens sent to an Anthropic-format
+// custom upstream when the client did NOT specify one. The Anthropic Messages API
+// requires the field, so we cannot simply omit it like the OpenAI path does.
+//
+// This used to be 4096, which silently truncated long answers mid-sentence: any
+// client that omits max_tokens (most OpenAI-style SDKs, and Claude clients relying
+// on the API default) got cut off at 4096 output tokens while the response still
+// reported a normal end_turn. 32000 matches what Claude Code itself requests and is
+// within the output ceiling of current Claude models.
+const defaultAnthropicUpstreamMaxTokens = 32000
 
 type anthropicCompatibleRequest struct {
 	Model       string          `json:"model"`
@@ -119,7 +131,11 @@ func kiroPayloadToAnthropic(model string, payload *KiroPayload) (*anthropicCompa
 	if payload == nil {
 		return nil, fmt.Errorf("missing upstream payload")
 	}
-	req := &anthropicCompatibleRequest{Model: strings.TrimSpace(model), MaxTokens: 4096, Stream: true}
+	req := &anthropicCompatibleRequest{
+		Model:     strings.TrimSpace(model),
+		MaxTokens: defaultAnthropicUpstreamMaxTokens,
+		Stream:    true,
+	}
 	if req.Model == "" {
 		req.Model = payload.ConversationState.CurrentMessage.UserInputMessage.ModelID
 	}
@@ -219,6 +235,7 @@ func consumeAnthropicCompatibleSSE(body io.Reader, account *config.Account, payl
 	tools := make(map[int]*anthropicToolAccumulator)
 	usage := UpstreamUsage{}
 	completed := false
+	stopReason := ""
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -239,6 +256,7 @@ func consumeAnthropicCompatibleSSE(body io.Reader, account *config.Account, payl
 				Text        string `json:"text"`
 				Thinking    string `json:"thinking"`
 				PartialJSON string `json:"partial_json"`
+				StopReason  string `json:"stop_reason"`
 			} `json:"delta"`
 			Usage ClaudeUsage `json:"usage"`
 			Error *struct {
@@ -247,6 +265,11 @@ func consumeAnthropicCompatibleSSE(body io.Reader, account *config.Account, payl
 		}
 		if err := json.Unmarshal([]byte(data), &event); err != nil {
 			return fmt.Errorf("invalid Anthropic-compatible SSE event: %w", err)
+		}
+		// delta.stop_reason rides on message_delta; capture it before the type switch
+		// so a truncated answer is at least visible in the admin log.
+		if event.Delta.StopReason != "" {
+			stopReason = event.Delta.StopReason
 		}
 		if event.Error != nil || event.Type == "error" {
 			msg := "unknown upstream error"
@@ -308,7 +331,23 @@ func consumeAnthropicCompatibleSSE(body io.Reader, account *config.Account, payl
 			callback.OnComplete(usage.InputTokens, usage.OutputTokens)
 		}
 	}
+	warnUpstreamTruncation(account, stopReason, usage.OutputTokens)
 	return nil
+}
+
+// warnUpstreamTruncation logs when a custom Anthropic upstream cut the answer short.
+// max_tokens truncation is otherwise invisible: the stream ends normally and the
+// customer just sees a reply that stops mid-sentence, so without this line there is
+// nothing in the admin log to distinguish it from a genuinely short answer.
+func warnUpstreamTruncation(account *config.Account, stopReason string, outputTokens int) {
+	if stopReason != "max_tokens" {
+		return
+	}
+	email := ""
+	if account != nil {
+		email = account.Email
+	}
+	logger.Warnf("[Upstream] Anthropic-compatible upstream truncated the response at max_tokens (account=%s, outputTokens=%d) — raise the client's max_tokens or defaultAnthropicUpstreamMaxTokens", email, outputTokens)
 }
 
 func consumeAnthropicCompatibleJSON(body io.Reader, account *config.Account, payload *KiroPayload, callback *KiroStreamCallback) error {
@@ -335,6 +374,7 @@ func consumeAnthropicCompatibleJSON(body io.Reader, account *config.Account, pay
 	if callback != nil && callback.OnComplete != nil {
 		callback.OnComplete(response.Usage.InputTokens, response.Usage.OutputTokens)
 	}
+	warnUpstreamTruncation(account, response.StopReason, response.Usage.OutputTokens)
 	return nil
 }
 

@@ -10,6 +10,47 @@ import (
 	"kiro-go/config"
 )
 
+// TestOpenAIUpstreamLengthFinishReasonIsParsed is the OpenAI-format counterpart of
+// TestAnthropicUpstreamMaxTokensStopReasonIsParsed: a stream ending with
+// finish_reason "length" must still deliver all text and usage it did send.
+func TestOpenAIUpstreamLengthFinishReasonIsParsed(t *testing.T) {
+	mustInitConfig(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"cut off mid-sen\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":9,\"total_tokens\":16}}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	account := &config.Account{
+		ID: "openai-trunc", Backend: config.BackendOpenAICompatible,
+		ApiKey: "upstream-secret", BaseURL: server.URL + "/v1", Models: []string{"gpt-4.1"},
+	}
+	payload := OpenAIToKiro(&OpenAIRequest{
+		Model: "gpt-4.1", Messages: []OpenAIMessage{{Role: "user", Content: "hi"}},
+	}, false)
+
+	var text string
+	outputTokens, completes := 0, 0
+	err := CallUpstreamAPI(account, "gpt-4.1", payload, &KiroStreamCallback{
+		OnText:     func(value string, isThinking bool) { text += value },
+		OnComplete: func(in, out int) { outputTokens = out; completes++ },
+	})
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if text != "cut off mid-sen" {
+		t.Fatalf("truncated stream lost text: %q", text)
+	}
+	if outputTokens != 9 {
+		t.Fatalf("outputTokens = %d, want 9", outputTokens)
+	}
+	if completes != 1 {
+		t.Fatalf("OnComplete fired %d times, want 1", completes)
+	}
+}
+
 func TestOpenAICompatibleSSEDispatch(t *testing.T) {
 	mustInitConfig(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

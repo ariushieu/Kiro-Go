@@ -46,6 +46,36 @@ func isAuthErrorMessage(msg string) bool {
 		strings.Contains(msg, "refresh token expired")
 }
 
+// isCustomUpstreamErrorMessage matches the error strings produced by the custom
+// (non-Kiro) upstream callers in upstream_openai.go / upstream_anthropic.go /
+// upstream.go. Those strings embed the third-party provider's raw response body
+// (up to 4KB), which must never reach a customer: it leaks that we resell a proxy,
+// names the provider, and its wording ("your credit balance is too low", "invalid
+// api key") gets misread by client SDKs as the CUSTOMER's own key/billing being
+// broken. Keep in sync with the fmt.Errorf strings in those three files.
+func isCustomUpstreamErrorMessage(msg string) bool {
+	msg = strings.ToLower(msg)
+	return strings.Contains(msg, "-compatible upstream") ||
+		strings.Contains(msg, "-compatible baseurl") ||
+		strings.Contains(msg, "-compatible request has no messages") ||
+		strings.Contains(msg, "-compatible sse ") ||
+		strings.Contains(msg, "unsupported custom upstream apiformat") ||
+		strings.Contains(msg, "unsupported upstream backend")
+}
+
+// isCustomUpstreamAuthBanMessage narrowly matches a custom upstream rejecting OUR
+// credential, i.e. only HTTP 401. It deliberately does NOT match 403/"forbidden"/
+// "unauthorized" the way isAuthErrorMessage does: resold providers return 403 for
+// per-model permission, region blocks and plan limits, so matching those would
+// permanently BAN a perfectly healthy account on the first request for a model it
+// isn't entitled to. Everything other than 401 is a soft failure (cooldown+rotate).
+func isCustomUpstreamAuthBanMessage(msg string) bool {
+	msg = strings.ToLower(msg)
+	return strings.Contains(msg, "http 401") ||
+		strings.Contains(msg, "invalid api key") ||
+		strings.Contains(msg, "invalid_api_key")
+}
+
 // isProxyErrorMessage matches outbound-proxy / dial failures: a missing required
 // proxy (require-proxy), a dead or refusing proxy, or a connect timeout on the
 // proxy hop. These are infrastructure failures, not account bans — the account
@@ -100,7 +130,10 @@ func clientFacingUpstreamError(err error) (status int, message string) {
 		isSuspensionErrorMessage(msg),
 		isProfileUnavailableErrorMessage(msg),
 		isProxyErrorMessage(msg),
-		isAuthErrorMessage(msg):
+		isAuthErrorMessage(msg),
+		// 自定义（非 Kiro）上游的错误串里带着第三方原文 body，同样属于内部故障，
+		// 一律伪装成维护文案，绝不透传给客户。
+		isCustomUpstreamErrorMessage(msg):
 		return http.StatusServiceUnavailable, noAccountsClientMessage
 	default:
 		return statusForUpstreamError(err), msg
@@ -199,9 +232,14 @@ func (h *Handler) handleAccountFailure(account *config.Account, err error) {
 			h.pool.RecordError(account.ID, false)
 		case isQuotaErrorMessage(errMsg):
 			h.pool.RecordError(account.ID, true)
-		case isAuthErrorMessage(errMsg):
-			h.disableAccount(account, "BANNED", "OpenAI-compatible upstream authentication failed")
+		case isCustomUpstreamAuthBanMessage(errMsg):
+			// Only a hard 401 (our key is wrong) bans the account. NOTE: do NOT widen
+			// this to isAuthErrorMessage — it also matches 403/"forbidden", which
+			// resold providers return for per-model permission and plan limits, and
+			// that would ban a healthy account on one unentitled model request.
+			h.disableAccount(account, "BANNED", "Custom upstream rejected our API key (HTTP 401)")
 		default:
+			logger.Warnf("[AccountFailover] Custom upstream failure for %s (cooldown, not banned): %v", account.Email, err)
 			h.pool.RecordError(account.ID, false)
 		}
 		return
