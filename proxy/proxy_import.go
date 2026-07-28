@@ -411,7 +411,11 @@ func (h *Handler) testAccountThroughProxy(account *config.Account) error {
 		OnCredits:      func(float64) {},
 		OnContextUsage: func(float64) {},
 	}
-	return CallUpstreamAPI(account, openaiReq.Model, kiroPayload, callback)
+	// Proxy reachability probe with a fixed short budget: a 5-token "say ok" that
+	// takes longer than this means the proxy is unusable regardless of the model.
+	testCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	return CallUpstreamAPI(testCtx, account, openaiReq.Model, kiroPayload, callback)
 }
 
 // apiImportProxies handles POST /admin/api/proxy/import.

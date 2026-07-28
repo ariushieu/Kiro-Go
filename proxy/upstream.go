@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"fmt"
 	"kiro-go/config"
 )
@@ -8,19 +9,22 @@ import (
 // CallUpstreamAPI is the single dispatch point used by request handlers. Kiro
 // remains the default for legacy accounts; additional backends implement the
 // same callback contract so response formatting and accounting stay shared.
-func CallUpstreamAPI(account *config.Account, model string, payload *KiroPayload, callback *KiroStreamCallback) error {
+//
+// ctx carries the inbound request's cancellation so a client that hangs up stops
+// the upstream stream instead of leaving it to run (and bill) unread.
+func CallUpstreamAPI(ctx context.Context, account *config.Account, model string, payload *KiroPayload, callback *KiroStreamCallback) error {
 	if account == nil {
 		return fmt.Errorf("missing upstream account")
 	}
 	switch account.EffectiveBackend() {
 	case config.BackendKiro:
-		return CallKiroAPI(account, payload, callback)
+		return CallKiroAPI(ctx, account, payload, callback)
 	case config.BackendOpenAICompatible:
 		switch account.EffectiveAPIFormat() {
 		case config.APIFormatOpenAI:
-			return CallOpenAICompatibleAPI(account, model, payload, callback)
+			return CallOpenAICompatibleAPI(ctx, account, model, payload, callback)
 		case config.APIFormatAnthropic:
-			return CallAnthropicCompatibleAPI(account, model, payload, callback)
+			return CallAnthropicCompatibleAPI(ctx, account, model, payload, callback)
 		default:
 			return fmt.Errorf("unsupported custom upstream apiFormat %q", account.APIFormat)
 		}

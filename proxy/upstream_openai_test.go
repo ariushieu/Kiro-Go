@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -33,7 +34,7 @@ func TestOpenAIUpstreamLengthFinishReasonIsParsed(t *testing.T) {
 
 	var text string
 	outputTokens, completes := 0, 0
-	err := CallUpstreamAPI(account, "gpt-4.1", payload, &KiroStreamCallback{
+	err := CallUpstreamAPI(context.Background(), account, "gpt-4.1", payload, &KiroStreamCallback{
 		OnText:     func(value string, isThinking bool) { text += value },
 		OnComplete: func(in, out int) { outputTokens = out; completes++ },
 	})
@@ -91,7 +92,7 @@ func TestOpenAICompatibleSSEDispatch(t *testing.T) {
 	var text string
 	var tools []KiroToolUse
 	inputTokens, outputTokens := 0, 0
-	err := CallUpstreamAPI(account, "gpt-4.1", payload, &KiroStreamCallback{
+	err := CallUpstreamAPI(context.Background(), account, "gpt-4.1", payload, &KiroStreamCallback{
 		OnText: func(s string, thinking bool) {
 			if !thinking {
 				text += s
@@ -123,7 +124,7 @@ func TestOpenAICompatibleHTTPErrorDoesNotLeakKey(t *testing.T) {
 	defer server.Close()
 	account := &config.Account{Backend: config.BackendOpenAICompatible, ApiKey: "do-not-leak", BaseURL: server.URL, Models: []string{"gpt-4.1"}}
 	payload := OpenAIToKiro(&OpenAIRequest{Model: "gpt-4.1", Messages: []OpenAIMessage{{Role: "user", Content: "hi"}}}, false)
-	err := CallUpstreamAPI(account, "gpt-4.1", payload, &KiroStreamCallback{})
+	err := CallUpstreamAPI(context.Background(), account, "gpt-4.1", payload, &KiroStreamCallback{})
 	if err == nil || !strings.Contains(err.Error(), "HTTP 401") {
 		t.Fatalf("expected HTTP 401, got %v", err)
 	}

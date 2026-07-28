@@ -1,10 +1,12 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"kiro-go/config"
+	"kiro-go/logger"
 	"net/http"
 	"strings"
 	"time"
@@ -133,16 +135,17 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if req.Stream {
-		h.handleResponsesStream(w, kiroPayload, actualModel, thinking, estimatedInputTokens,
+		h.handleResponsesStream(r.Context(), w, kiroPayload, actualModel, thinking, estimatedInputTokens,
 			apiKeyID, respID, &req, storedInputCopy, storeResponse)
 		return
 	}
 
-	h.handleResponsesNonStream(w, kiroPayload, actualModel, thinking, estimatedInputTokens,
+	h.handleResponsesNonStream(r.Context(), w, kiroPayload, actualModel, thinking, estimatedInputTokens,
 		apiKeyID, respID, &req, storedInputCopy, storeResponse)
 }
 
 func (h *Handler) handleResponsesNonStream(
+	ctx context.Context,
 	w http.ResponseWriter, payload *KiroPayload, model string, thinking bool,
 	estimatedInputTokens int, apiKeyID, respID string,
 	req *ResponsesRequest, storedInput json.RawMessage, storeResponse bool,
@@ -186,11 +189,17 @@ func (h *Handler) handleResponsesNonStream(
 			},
 		}
 
-		err := CallUpstreamAPI(account, model, payload, callback)
+		err := CallUpstreamAPI(ctx, account, model, payload, callback)
 		if err != nil {
 			lastErr = err
 			excluded[account.ID] = true
 			h.handleAccountFailure(account, err)
+			// Client gone / stream stalled: retrying bills another generation nobody reads.
+			if isClientGoneError(err) {
+				logger.Warnf("[Responses] Aborting request for %s: %v", accountEmailForLog(account), err)
+				h.recordFailureForApiKey(apiKeyID, "responses", model, 0, err.Error(), startedAt)
+				return
+			}
 			continue
 		}
 
@@ -391,6 +400,7 @@ func (h *Handler) sendResponsesNotice(w http.ResponseWriter, model string, strea
 }
 
 func (h *Handler) handleResponsesStream(
+	ctx context.Context,
 	w http.ResponseWriter, payload *KiroPayload, model string, thinking bool,
 	estimatedInputTokens int, apiKeyID, respID string,
 	req *ResponsesRequest, storedInput json.RawMessage, storeResponse bool,
@@ -398,12 +408,20 @@ func (h *Handler) handleResponsesStream(
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	// Defeat nginx buffering even when proxy_buffering is on for the location.
+	w.Header().Set("X-Accel-Buffering", "no")
 
-	flusher, ok := w.(http.Flusher)
+	rawFlusher, ok := w.(http.Flusher)
 	if !ok {
 		h.sendOpenAIError(w, 500, "server_error", "Streaming not supported")
 		return
 	}
+	// Serialize writes so the heartbeat goroutine cannot interleave with SSE frames.
+	sw := newStreamWriter(w, rawFlusher)
+	defer sw.stop()
+	sw.startHeartbeat()
+	w = sw
+	var flusher http.Flusher = sw
 
 	send := func(eventName string, payload interface{}) {
 		data, err := json.Marshal(payload)
@@ -431,6 +449,9 @@ func (h *Handler) handleResponsesStream(
 		"type":     "response.created",
 		"response": initial,
 	})
+	// The 200 status line is already committed by the event above, and every error
+	// path below reports through the stream, so the heartbeat can arm immediately.
+	sw.arm()
 
 	excluded := make(map[string]bool)
 	var lastErr error
@@ -591,8 +612,17 @@ func (h *Handler) handleResponsesStream(
 			},
 		}
 
-		err := CallUpstreamAPI(account, model, payload, callback)
+		err := CallUpstreamAPI(ctx, account, model, payload, callback)
 		if err != nil {
+			// Client gone / stream stalled: do not retry onto another account,
+			// regardless of whether we had started streaming.
+			if isClientGoneError(err) {
+				lastErr = err
+				h.handleAccountFailure(account, err)
+				logger.Warnf("[Responses] Aborting stream for %s: %v", accountEmailForLog(account), err)
+				h.recordFailureForApiKey(apiKeyID, "responses", model, 0, err.Error(), startedAt)
+				return
+			}
 			if !responseStarted {
 				lastErr = err
 				excluded[account.ID] = true

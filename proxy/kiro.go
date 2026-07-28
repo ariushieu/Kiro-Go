@@ -4,7 +4,9 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"kiro-go/config"
@@ -27,6 +29,28 @@ import (
 // an upper bound a corrupt/hostile frame could make us allocate multiple GiB and OOM the
 // whole process from a single response. 32 MiB is far above any legitimate SSE frame.
 const maxEventStreamFrameBytes = 32 << 20
+
+// streamIdleTimeout bounds the GAP between two Event Stream frames, not the total
+// duration of a stream. The streaming client deliberately has no http.Client.Timeout
+// (see InitKiroHttpClient): a total cap cannot tell "the model is still thinking"
+// from "the connection is dead", so it kills long-but-healthy requests. A reasoning
+// model can legitimately stay silent for minutes before its first token while it
+// works through a hard prompt; it does not stay silent for three minutes MID-answer.
+//
+// A var rather than a const only so tests can shrink it; nothing at runtime writes it.
+var streamIdleTimeout = 180 * time.Second
+
+// streamResponseHeaderTimeout bounds only the pre-body phase (connect → response
+// headers). Once headers arrive, streamIdleTimeout takes over. This keeps a black
+// hole endpoint from hanging forever now that the total timeout is gone.
+const streamResponseHeaderTimeout = 120 * time.Second
+
+// streamHeartbeatInterval is how often a stream handler emits an SSE comment while
+// the upstream is silent. Intermediaries drop idle connections (Cloudflare at ~100s)
+// and clients apply their own idle timeouts; a comment frame is ignored by SSE
+// parsers but resets every idle timer along the path. Must stay well under the
+// tightest hop's threshold.
+const streamHeartbeatInterval = 15 * time.Second
 
 // Endpoint configuration (auto-fallback on quota exhaustion).
 type kiroEndpoint struct {
@@ -77,9 +101,11 @@ func GetClientForProxy(proxyURL string) *http.Client {
 	if cached, ok := proxyClientCache.Load(proxyURL); ok {
 		return cached.(*http.Client)
 	}
+	// Same rationale as InitKiroHttpClient: no total Timeout on a streaming client.
+	streamTransport := buildKiroTransport(proxyURL)
+	streamTransport.ResponseHeaderTimeout = streamResponseHeaderTimeout
 	client := &http.Client{
-		Timeout:   5 * time.Minute,
-		Transport: buildKiroTransport(proxyURL),
+		Transport: streamTransport,
 	}
 	proxyClientCache.Store(proxyURL, client)
 	return client
@@ -287,9 +313,18 @@ func buildKiroTransport(proxyURL string) *http.Transport {
 
 // InitKiroHttpClient initializes (or reinitializes) the HTTP clients used for Kiro API requests.
 func InitKiroHttpClient(proxyURL string) {
+	// No Timeout on the streaming client: http.Client.Timeout covers reading the
+	// response BODY, so any value here is a hard cap on total stream duration. A
+	// prompt that makes the model reason for minutes before emitting its first
+	// token would be killed mid-flight, and because the handler had not written
+	// anything yet it would silently retry on another account — burning upstream
+	// tokens N times and multiplying the user's wait instead of failing once.
+	// Liveness is enforced by streamResponseHeaderTimeout (pre-body) plus the
+	// per-frame streamIdleTimeout in parseEventStream (post-body).
+	streamTransport := buildKiroTransport(proxyURL)
+	streamTransport.ResponseHeaderTimeout = streamResponseHeaderTimeout
 	client := &http.Client{
-		Timeout:   5 * time.Minute,
-		Transport: buildKiroTransport(proxyURL),
+		Transport: streamTransport,
 	}
 	kiroHttpStore.Store(client)
 
@@ -499,7 +534,19 @@ func summarizeKiroPayload(payload *KiroPayload) string {
 }
 
 // CallKiroAPI calls the Kiro streaming API, trying each configured endpoint with automatic fallback.
-func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroStreamCallback) error {
+//
+// ctx should be the inbound request's context so that a client hanging up stops the
+// upstream stream. Without it we kept pulling (and paying for) tokens nobody would
+// receive; with a long HTML-generating answer that is a real amount of waste.
+func CallKiroAPI(ctx context.Context, account *config.Account, payload *KiroPayload, callback *KiroStreamCallback) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// cancelCause lets the idle watchdog explain WHY it killed the stream; plain
+	// cancellation would surface as an indistinguishable "context canceled".
+	reqCtx, cancelReq := context.WithCancelCause(ctx)
+	defer cancelReq(nil)
+
 	originalProfileArn := ""
 	if payload != nil {
 		originalProfileArn = payload.ProfileArn
@@ -581,7 +628,7 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 			// Target the account's region; endpoint URLs are declared for us-east-1.
 			epURL := regionalizeURL(ep.URL, account)
 			reqBody, _ := json.Marshal(payload)
-			req, err := http.NewRequest("POST", epURL, bytes.NewReader(reqBody))
+			req, err := http.NewRequestWithContext(reqCtx, "POST", epURL, bytes.NewReader(reqBody))
 			if err != nil {
 				lastErr = err
 				continue
@@ -609,6 +656,16 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 
 			resp, err := proxyClient.Do(req)
 			if err != nil {
+				// A cancelled context is the client hanging up (or our own idle
+				// watchdog), NOT a broken endpoint or a bad proxy. Trying the next
+				// endpoint would fail identically, and recording it as a transport
+				// failure would wrongly mark a healthy pool proxy unhealthy.
+				if ctxErr := reqCtx.Err(); ctxErr != nil {
+					if cause := context.Cause(reqCtx); cause != nil && cause != context.Canceled {
+						return cause
+					}
+					return ctxErr
+				}
 				lastErr = err
 				lastTransportErr = err
 				logger.Warnf("[KiroAPI] Endpoint %s failed: %v", ep.Name, err)
@@ -641,8 +698,24 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 			if poolKey != "" {
 				config.MarkProxyHealthy(poolKey)
 			}
-			err = parseEventStream(resp.Body, callback)
+			tracker := newActivityReader(resp.Body)
+			stopWatchdog := watchStreamIdle(tracker, cancelReq)
+			err = parseEventStream(tracker, callback)
+			stopWatchdog()
 			resp.Body.Close()
+			// Surface the cancellation cause: once the context is cancelled the
+			// error from Read is a generic "context canceled", which hides both
+			// the idle watchdog and the client having hung up.
+			if cause := context.Cause(reqCtx); err != nil && cause != nil && cause != context.Canceled {
+				err = cause
+			}
+			// Failures here were previously silent on stdout: this is past the
+			// pre-stream error branches above, so nothing logged mid-stream
+			// breakage and operators saw an error in the admin feed with no
+			// matching container log line.
+			if err != nil {
+				logger.Warnf("[KiroAPI] Stream from %s failed after %s: %v", ep.Name, tracker.idleFor().Round(time.Second), err)
+			}
 			return err
 		}
 
@@ -679,7 +752,9 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 		// request returns directly instead.
 		if isMalformedRequestError(lastErr) && flattenPayloadToolHistory(payload) {
 			logger.Warnf("[KiroAPI] Upstream rejected structured tool history (%v); retrying with flattened history", lastErr)
-			return CallKiroAPI(account, payload, callback)
+			// Pass the caller's ctx, not reqCtx: reqCtx is cancelled by this
+			// function's own defer, and the retry needs the original deadline.
+			return CallKiroAPI(ctx, account, payload, callback)
 		}
 		return lastErr
 	}
@@ -704,6 +779,71 @@ func isMalformedRequestError(err error) bool {
 }
 
 // ==================== Event Stream Parsing ====================
+
+// errStreamIdle is reported when the upstream stops sending frames for longer than
+// streamIdleTimeout. Kept distinct from a transport error so failover can treat it
+// as "this request stalled", not "this account is broken". The wording is matched
+// textually by isClientGoneError, so keep the two in sync.
+var errStreamIdle = errors.New("upstream stream idle for more than the allowed gap")
+
+// activityReader records when the underlying stream last produced bytes. A single
+// watchdog goroutine (see watchStreamIdle) reads that timestamp to decide whether
+// the socket has gone silent, which is cheaper and simpler than putting a timer
+// around every Read: a long answer is thousands of frames, and each frame costs
+// several Read calls.
+type activityReader struct {
+	inner io.Reader
+	// last is a UnixNano timestamp, read concurrently by the watchdog.
+	last atomic.Int64
+}
+
+func newActivityReader(inner io.Reader) *activityReader {
+	r := &activityReader{inner: inner}
+	r.touch()
+	return r
+}
+
+func (r *activityReader) touch() { r.last.Store(time.Now().UnixNano()) }
+
+func (r *activityReader) idleFor() time.Duration {
+	return time.Since(time.Unix(0, r.last.Load()))
+}
+
+func (r *activityReader) Read(p []byte) (int, error) {
+	n, err := r.inner.Read(p)
+	if n > 0 {
+		r.touch()
+	}
+	return n, err
+}
+
+// watchStreamIdle cancels the request once the stream has been silent for longer
+// than streamIdleTimeout. Cancelling the request context (rather than returning an
+// error from Read) is what actually unblocks a goroutine parked on a dead socket.
+// The returned stop function must be called when parsing finishes.
+func watchStreamIdle(tracker *activityReader, cancel context.CancelCauseFunc) (stop func()) {
+	// Read the budget once, here on the caller's goroutine, so the watchdog never
+	// touches the package variable concurrently with a test that overrides it.
+	budget := streamIdleTimeout
+	done := make(chan struct{})
+	go func() {
+		// Poll at a fraction of the budget so detection lag stays bounded.
+		ticker := time.NewTicker(budget / 6)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				if tracker.idleFor() >= budget {
+					cancel(errStreamIdle)
+					return
+				}
+			}
+		}
+	}()
+	return func() { close(done) }
+}
 
 // parseEventStream decodes an AWS binary Event Stream response body.
 func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {

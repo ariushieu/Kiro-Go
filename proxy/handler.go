@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
@@ -1171,9 +1172,9 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 
 	// Stream or non-stream
 	if req.Stream {
-		h.handleClaudeStream(w, kiroPayload, req.Model, thinking, thinkingResponseOpts, estimatedInputTokens, cacheProfile, apiKeyID)
+		h.handleClaudeStream(r.Context(), w, kiroPayload, req.Model, thinking, thinkingResponseOpts, estimatedInputTokens, cacheProfile, apiKeyID)
 	} else {
-		h.handleClaudeNonStream(w, kiroPayload, req.Model, thinking, thinkingResponseOpts, estimatedInputTokens, cacheProfile, apiKeyID)
+		h.handleClaudeNonStream(r.Context(), w, kiroPayload, req.Model, thinking, thinkingResponseOpts, estimatedInputTokens, cacheProfile, apiKeyID)
 	}
 }
 
@@ -1210,16 +1211,26 @@ func (h *Handler) nextAccountForKey(apiKeyID, model string, excluded map[string]
 }
 
 // handleClaudeStream Claude 流式响应
-func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID string) {
+func (h *Handler) handleClaudeStream(ctx context.Context, w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID string) {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	// Tell nginx not to buffer this response even if proxy_buffering is on for the
+	// location; buffering defeats both token-by-token delivery and the heartbeat.
+	w.Header().Set("X-Accel-Buffering", "no")
 
-	flusher, ok := w.(http.Flusher)
+	rawFlusher, ok := w.(http.Flusher)
 	if !ok {
 		h.sendClaudeError(w, 500, "api_error", "Streaming not supported")
 		return
 	}
+	// Serialize writes: the heartbeat runs on its own goroutine, and concurrent
+	// writes to a ResponseWriter are a data race that can interleave SSE frames.
+	sw := newStreamWriter(w, rawFlusher)
+	defer sw.stop()
+	sw.startHeartbeat()
+	w = sw
+	var flusher http.Flusher = sw
 
 	// 获取 thinking 输出格式配置
 	thinkingFormat := thinkingOpts.Format
@@ -1582,11 +1593,23 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			},
 		}
 
-		err := CallUpstreamAPI(account, model, payload, callback)
+		// Committed to streaming: let the heartbeat cover the upstream's silence.
+		// Arming here (not at setup) keeps the earlier "no accounts" path able to
+		// answer with a real 503 instead of a 200 that already sent a ping.
+		sw.arm()
+
+		err := CallUpstreamAPI(ctx, account, model, payload, callback)
 		if err != nil {
 			lastErr = err
 			excluded[account.ID] = true
 			h.handleAccountFailure(account, err)
+			// The client is gone (or our idle watchdog fired): retrying on another
+			// account would bill a second full generation that nobody reads.
+			if isClientGoneError(err) {
+				logger.Warnf("[Claude] Aborting stream for %s: %v", accountEmailForLog(account), err)
+				h.recordFailureForApiKey(apiKeyID, "claude", model, 0, err.Error(), startedAt)
+				return
+			}
 			if !messageStarted {
 				continue
 			}
@@ -1661,8 +1684,18 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 	}
 
 	status, clientMsg := clientFacingUpstreamError(lastErr)
-	applyRetryAfterHeader(w, lastErr)
 	h.recordFailureForApiKey(apiKeyID, "claude", model, status, lastErr.Error(), startedAt)
+	// Once any byte has left (a heartbeat counts), the status line is committed and
+	// WriteHeader would be a no-op that leaves the client parsing a truncated SSE
+	// stream. Report the failure as an SSE error event instead.
+	if sw.wroteAnything() {
+		h.sendSSE(w, flusher, "error", map[string]interface{}{
+			"type":  "error",
+			"error": map[string]string{"type": "api_error", "message": clientMsg},
+		})
+		return
+	}
+	applyRetryAfterHeader(w, lastErr)
 	h.sendClaudeError(w, status, "api_error", clientMsg)
 }
 
@@ -1827,7 +1860,7 @@ func (h *Handler) recordFailure() {
 }
 
 // handleClaudeNonStream Claude 非流式响应
-func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID string) {
+func (h *Handler) handleClaudeNonStream(ctx context.Context, w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID string) {
 	startedAt := time.Now()
 	excluded := make(map[string]bool)
 	var lastErr error
@@ -1876,11 +1909,18 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 			},
 		}
 
-		err := CallUpstreamAPI(account, model, payload, callback)
+		err := CallUpstreamAPI(ctx, account, model, payload, callback)
 		if err != nil {
 			lastErr = err
 			excluded[account.ID] = true
 			h.handleAccountFailure(account, err)
+			// Client gone / stream stalled: retrying bills another full generation
+			// for a response nobody will read.
+			if isClientGoneError(err) {
+				logger.Warnf("[Claude] Aborting request for %s: %v", accountEmailForLog(account), err)
+				h.recordFailureForApiKey(apiKeyID, "claude", model, 0, err.Error(), startedAt)
+				return
+			}
 			continue
 		}
 
@@ -2073,23 +2113,31 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	kiroPayload := OpenAIToKiro(&req, thinking)
 
 	if req.Stream {
-		h.handleOpenAIStream(w, kiroPayload, req.Model, thinking, estimatedInputTokens, apiKeyID)
+		h.handleOpenAIStream(r.Context(), w, kiroPayload, req.Model, thinking, estimatedInputTokens, apiKeyID)
 	} else {
-		h.handleOpenAINonStream(w, kiroPayload, req.Model, thinking, estimatedInputTokens, apiKeyID)
+		h.handleOpenAINonStream(r.Context(), w, kiroPayload, req.Model, thinking, estimatedInputTokens, apiKeyID)
 	}
 }
 
 // handleOpenAIStream OpenAI 流式响应
-func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, apiKeyID string) {
+func (h *Handler) handleOpenAIStream(ctx context.Context, w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, apiKeyID string) {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	// Defeat nginx buffering even when proxy_buffering is on for the location.
+	w.Header().Set("X-Accel-Buffering", "no")
 
-	flusher, ok := w.(http.Flusher)
+	rawFlusher, ok := w.(http.Flusher)
 	if !ok {
 		h.sendOpenAIError(w, 500, "server_error", "Streaming not supported")
 		return
 	}
+	// Serialize writes so the heartbeat goroutine cannot interleave with SSE frames.
+	sw := newStreamWriter(w, rawFlusher)
+	defer sw.stop()
+	sw.startHeartbeat()
+	w = sw
+	var flusher http.Flusher = sw
 
 	// 获取 thinking 输出格式配置
 	thinkingFormat := config.GetThinkingConfig().OpenAIFormat
@@ -2393,11 +2441,20 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 			},
 		}
 
-		err := CallUpstreamAPI(account, model, payload, callback)
+		// Committed to streaming: let the heartbeat cover the upstream's silence.
+		sw.arm()
+
+		err := CallUpstreamAPI(ctx, account, model, payload, callback)
 		if err != nil {
 			lastErr = err
 			excluded[account.ID] = true
 			h.handleAccountFailure(account, err)
+			// Client gone / stream stalled: do not retry onto another account.
+			if isClientGoneError(err) {
+				logger.Warnf("[OpenAI] Aborting stream for %s: %v", accountEmailForLog(account), err)
+				h.recordFailureForApiKey(apiKeyID, "openai", model, 0, err.Error(), startedAt)
+				return
+			}
 			if !responseStarted {
 				continue
 			}
@@ -2474,12 +2531,27 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 
 	h.recordFailure()
 	status, clientMsg := clientFacingUpstreamError(lastErr)
+	// A heartbeat may already have committed the 200 status line; in that case an
+	// HTTP error is a silent no-op, so emit the failure inside the stream instead.
+	if sw.wroteAnything() {
+		errChunk := map[string]interface{}{
+			"error": map[string]string{
+				"type":    errorTypeForOpenAIStatus(status),
+				"message": clientMsg,
+			},
+		}
+		data, _ := json.Marshal(errChunk)
+		fmt.Fprintf(w, "data: %s\n\n", string(data))
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+		return
+	}
 	applyRetryAfterHeader(w, lastErr)
 	h.sendOpenAIError(w, status, errorTypeForOpenAIStatus(status), clientMsg)
 }
 
 // handleOpenAINonStream OpenAI 非流式响应
-func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, apiKeyID string) {
+func (h *Handler) handleOpenAINonStream(ctx context.Context, w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, apiKeyID string) {
 	startedAt := time.Now()
 	excluded := make(map[string]bool)
 	var lastErr error
@@ -2520,11 +2592,17 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 			},
 		}
 
-		err := CallUpstreamAPI(account, model, payload, callback)
+		err := CallUpstreamAPI(ctx, account, model, payload, callback)
 		if err != nil {
 			lastErr = err
 			excluded[account.ID] = true
 			h.handleAccountFailure(account, err)
+			// Client gone / stream stalled: do not retry onto another account.
+			if isClientGoneError(err) {
+				logger.Warnf("[OpenAI] Aborting request for %s: %v", accountEmailForLog(account), err)
+				h.recordFailureForApiKey(apiKeyID, "openai", model, 0, err.Error(), startedAt)
+				return
+			}
 			continue
 		}
 
@@ -4343,7 +4421,11 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 		OnContextUsage: func(pct float64) {},
 	}
 
-	err := CallUpstreamAPI(account, actualModel, kiroPayload, callback)
+	// Admin connectivity probe: a fixed short budget, not the browser's context.
+	// It sends "say ok" with MaxTokens 5, so anything slower than this is a fault.
+	testCtx, cancelTest := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancelTest()
+	err := CallUpstreamAPI(testCtx, account, actualModel, kiroPayload, callback)
 	if err != nil {
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})

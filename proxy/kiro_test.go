@@ -195,6 +195,16 @@ func TestBuildKiroTransportFallsBackToEnvironmentProxy(t *testing.T) {
 	assertProxyURL(t, got, "http://env-proxy.local:2323")
 }
 
+// TestInitKiroHttpClientKeepsShortRestTimeout pins the asymmetry between the two
+// clients: the streaming client must have NO total timeout, while REST keeps a short
+// one.
+//
+// http.Client.Timeout covers reading the response body, so any value on the streaming
+// client is a hard cap on total stream duration. The old 5-minute cap killed requests
+// where the model reasoned for minutes before its first token — and since nothing had
+// been written yet, the handler silently retried on another account, billing the same
+// generation up to maxAccountRetryAttempts times. Liveness for streams comes from
+// ResponseHeaderTimeout plus the per-frame idle watchdog instead.
 func TestInitKiroHttpClientKeepsShortRestTimeout(t *testing.T) {
 	InitKiroHttpClient("")
 	t.Cleanup(func() { InitKiroHttpClient("") })
@@ -202,11 +212,35 @@ func TestInitKiroHttpClientKeepsShortRestTimeout(t *testing.T) {
 	streamClient := kiroHttpStore.Load()
 	restClient := kiroRestHttpStore.Load()
 
-	if streamClient.Timeout != 5*time.Minute {
-		t.Fatalf("expected streaming timeout to be 5m, got %s", streamClient.Timeout)
+	if streamClient.Timeout != 0 {
+		t.Fatalf("streaming client must have no total timeout, got %s", streamClient.Timeout)
+	}
+	streamTransport, ok := streamClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("expected *http.Transport, got %T", streamClient.Transport)
+	}
+	if streamTransport.ResponseHeaderTimeout != streamResponseHeaderTimeout {
+		t.Fatalf("expected header timeout %s, got %s", streamResponseHeaderTimeout, streamTransport.ResponseHeaderTimeout)
 	}
 	if restClient.Timeout != 30*time.Second {
 		t.Fatalf("expected REST timeout to stay 30s, got %s", restClient.Timeout)
+	}
+}
+
+// TestGetClientForProxyHasNoStreamTimeout guards the per-account proxy path, which
+// builds its own client and would otherwise reintroduce the 5-minute cap for every
+// account that has a proxy configured.
+func TestGetClientForProxyHasNoStreamTimeout(t *testing.T) {
+	client := GetClientForProxy("http://stream-timeout-probe.local:3128")
+	if client.Timeout != 0 {
+		t.Fatalf("proxied streaming client must have no total timeout, got %s", client.Timeout)
+	}
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("expected *http.Transport, got %T", client.Transport)
+	}
+	if transport.ResponseHeaderTimeout != streamResponseHeaderTimeout {
+		t.Fatalf("expected header timeout %s, got %s", streamResponseHeaderTimeout, transport.ResponseHeaderTimeout)
 	}
 }
 

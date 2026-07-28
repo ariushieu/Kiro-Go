@@ -3,6 +3,7 @@ package proxy
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -39,7 +40,13 @@ type openAIToolAccumulator struct {
 // CallOpenAICompatibleAPI translates the common KiroPayload representation to
 // Chat Completions, consumes either SSE or a JSON response, and emits the same
 // callback events as the Kiro Event Stream adapter.
-func CallOpenAICompatibleAPI(account *config.Account, model string, payload *KiroPayload, callback *KiroStreamCallback) error {
+func CallOpenAICompatibleAPI(ctx context.Context, account *config.Account, model string, payload *KiroPayload, callback *KiroStreamCallback) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	reqCtx, cancelReq := context.WithCancelCause(ctx)
+	defer cancelReq(nil)
+
 	upstreamReq, err := kiroPayloadToOpenAI(model, payload)
 	if err != nil {
 		return err
@@ -59,7 +66,7 @@ func CallOpenAICompatibleAPI(account *config.Account, model string, payload *Kir
 		if err != nil {
 			return err
 		}
-		req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
+		req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, endpoint, bytes.NewReader(body))
 		if err != nil {
 			return err
 		}
@@ -69,6 +76,15 @@ func CallOpenAICompatibleAPI(account *config.Account, model string, payload *Kir
 
 		resp, err := GetClientForProxy(proxyURL).Do(req)
 		if err != nil {
+			// Cancellation is the client hanging up (or our idle watchdog), not a
+			// dead proxy — swapping proxies would fail identically and would mark
+			// a healthy pool entry unhealthy.
+			if ctxErr := reqCtx.Err(); ctxErr != nil {
+				if cause := context.Cause(reqCtx); cause != nil && cause != context.Canceled {
+					return cause
+				}
+				return ctxErr
+			}
 			if isProxyErrorMessage(err.Error()) && poolKey != "" && proxyAttempts < maxProxySwapAttempts {
 				config.MarkProxyUnhealthy(poolKey)
 				proxyAttempts++
@@ -91,7 +107,19 @@ func CallOpenAICompatibleAPI(account *config.Account, model string, payload *Kir
 		}
 
 		if strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
-			return consumeOpenAICompatibleSSE(resp.Body, account, payload, callback)
+			// Same idle protection as the Kiro path: the shared client has no total
+			// timeout, so a silent socket must be detected rather than waited on.
+			tracker := newActivityReader(resp.Body)
+			stopWatchdog := watchStreamIdle(tracker, cancelReq)
+			err := consumeOpenAICompatibleSSE(tracker, account, payload, callback)
+			stopWatchdog()
+			if cause := context.Cause(reqCtx); err != nil && cause != nil && cause != context.Canceled {
+				err = cause
+			}
+			if err != nil {
+				logger.Warnf("[OpenAIUpstream] Stream failed: %v", err)
+			}
+			return err
 		}
 		return consumeOpenAICompatibleJSON(resp.Body, account, payload, callback)
 	}

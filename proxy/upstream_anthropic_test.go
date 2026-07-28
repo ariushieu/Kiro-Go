@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -70,7 +71,7 @@ func TestAnthropicUpstreamMaxTokensStopReasonIsParsed(t *testing.T) {
 
 	var text string
 	outputTokens, completes := 0, 0
-	err := CallUpstreamAPI(account, "claude-fable-5", payload, &KiroStreamCallback{
+	err := CallUpstreamAPI(context.Background(), account, "claude-fable-5", payload, &KiroStreamCallback{
 		OnText:     func(value string, isThinking bool) { text += value },
 		OnComplete: func(in, out int) { outputTokens = out; completes++ },
 	})
@@ -134,7 +135,7 @@ func TestAnthropicCompatibleSSEDispatch(t *testing.T) {
 	var tools []KiroToolUse
 	inputTokens, outputTokens, completes := 0, 0, 0
 	sourceCost, charge := 0.0, 0.0
-	err := CallUpstreamAPI(account, "claude-fable-5", payload, &KiroStreamCallback{
+	err := CallUpstreamAPI(context.Background(), account, "claude-fable-5", payload, &KiroStreamCallback{
 		OnText: func(value string, isThinking bool) {
 			if isThinking {
 				thinking += value
@@ -178,7 +179,7 @@ func TestAnthropicCompatibleHTTPErrorDoesNotLeakKey(t *testing.T) {
 		ApiKey: "do-not-leak", BaseURL: server.URL + "/v1", Models: []string{"claude-fable-5"},
 	}
 	payload := OpenAIToKiro(&OpenAIRequest{Model: "claude-fable-5", Messages: []OpenAIMessage{{Role: "user", Content: "hi"}}}, false)
-	err := CallUpstreamAPI(account, "claude-fable-5", payload, &KiroStreamCallback{})
+	err := CallUpstreamAPI(context.Background(), account, "claude-fable-5", payload, &KiroStreamCallback{})
 	if err == nil || !strings.Contains(err.Error(), "HTTP 503") {
 		t.Fatalf("expected HTTP 503, got %v", err)
 	}

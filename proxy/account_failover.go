@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"context"
+	"errors"
 	"kiro-go/config"
 	"kiro-go/logger"
 	"net/http"
@@ -9,6 +11,40 @@ import (
 )
 
 const maxAccountRetryAttempts = 3
+
+// isClientGoneError reports that the request was abandoned rather than failing on
+// the upstream's side: the caller disconnected, or our own idle watchdog gave up on
+// a silent stream (see watchStreamIdle).
+//
+// These must NOT be retried on another account. A retry re-runs the whole generation
+// upstream — real tokens, real cost — to produce a response that either nobody is
+// listening for, or that will stall exactly the same way. Before this check, a client
+// that hung up mid-stream quietly triggered up to maxAccountRetryAttempts full
+// generations.
+func isClientGoneError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, errStreamIdle) {
+		return true
+	}
+	// Textual fallback for errors that crossed a boundary which dropped the wrap
+	// (e.g. an error rebuilt from a string).
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "context canceled") ||
+		strings.Contains(msg, "stream idle for more than")
+}
+
+// isUpstreamTimeoutMessage matches a stalled upstream: a deadline exceeded while
+// waiting on response headers or the body. Distinct from isClientGoneError because
+// the account itself may be perfectly healthy, so it earns at most a short cooldown
+// and never a ban.
+func isUpstreamTimeoutMessage(msg string) bool {
+	msg = strings.ToLower(msg)
+	return strings.Contains(msg, "context deadline exceeded") ||
+		strings.Contains(msg, "client.timeout exceeded") ||
+		strings.Contains(msg, "timeout awaiting response headers")
+}
 
 func isQuotaErrorMessage(msg string) bool {
 	msg = strings.ToLower(msg)
@@ -126,6 +162,10 @@ func clientFacingUpstreamError(err error) (status int, message string) {
 	switch {
 	case isQuotaErrorMessage(msg):
 		return http.StatusTooManyRequests, rateLimitedClientMessage
+	case isUpstreamTimeoutMessage(msg):
+		// 上游卡住是内部故障：原文里带着我们的超时细节，对客户毫无意义，
+		// 一律走维护文案（504 让客户端知道可以重试）。
+		return http.StatusGatewayTimeout, noAccountsClientMessage
 	case isOverageErrorMessage(msg),
 		isSuspensionErrorMessage(msg),
 		isProfileUnavailableErrorMessage(msg),
@@ -227,6 +267,12 @@ func (h *Handler) handleAccountFailure(account *config.Account, err error) {
 	errMsg := err.Error()
 	if account.EffectiveBackend() != config.BackendKiro {
 		switch {
+		case isClientGoneError(err):
+			// Caller left / stream went silent — not the account's fault.
+			logger.Warnf("[AccountFailover] Request abandoned on %s: %v", account.Email, err)
+		case isUpstreamTimeoutMessage(errMsg):
+			logger.Warnf("[AccountFailover] Upstream timeout for %s: %v", account.Email, err)
+			h.pool.RecordError(account.ID, false)
 		case isProxyErrorMessage(errMsg):
 			logger.Warnf("[AccountFailover] Proxy/dial failure for %s: %v", account.Email, err)
 			h.pool.RecordError(account.ID, false)
@@ -245,6 +291,16 @@ func (h *Handler) handleAccountFailure(account *config.Account, err error) {
 		return
 	}
 	switch {
+	case isClientGoneError(err):
+		// The caller left or the stream went silent. Nothing about the account is
+		// known to be wrong, so do not penalise it at all — counting this as an
+		// error would push healthy accounts into cooldown whenever users cancel.
+		logger.Warnf("[AccountFailover] Request abandoned on %s: %v", account.Email, err)
+	case isUpstreamTimeoutMessage(errMsg):
+		// Upstream stalled. Cool down so the next request rotates away, but never
+		// ban: the credentials are fine and the endpoint usually recovers.
+		logger.Warnf("[AccountFailover] Upstream timeout for %s: %v", account.Email, err)
+		h.pool.RecordError(account.ID, false)
 	case isProxyErrorMessage(errMsg):
 		// Proxy/dial failure — cool down and rotate; never disable the account
 		// and never fall through to a direct connection.
