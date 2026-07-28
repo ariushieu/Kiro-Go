@@ -87,7 +87,7 @@ func CallAnthropicCompatibleAPI(ctx context.Context, account *config.Account, mo
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "text/event-stream")
 
-		resp, err := GetClientForProxy(proxyURL).Do(req)
+		resp, err := GetCustomUpstreamClientForProxy(proxyURL).Do(req)
 		if err != nil {
 			// Cancellation is the client hanging up (or our idle watchdog), not a
 			// dead proxy — see the OpenAI-compatible path for the same guard.

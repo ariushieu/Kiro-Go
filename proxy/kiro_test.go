@@ -244,6 +244,52 @@ func TestGetClientForProxyHasNoStreamTimeout(t *testing.T) {
 	}
 }
 
+// TestCustomUpstreamClientHasNoHeaderTimeout pins the distinction that Kiro's
+// endpoints send headers before generating, while a resold gateway may buffer the
+// whole completion and only then respond. Applying Kiro's header timeout to custom
+// upstreams broke every slow one with "timeout awaiting response headers", so the
+// custom client must bound neither the header wait nor the total duration; liveness
+// comes from the request context and the SSE idle watchdog.
+func TestCustomUpstreamClientHasNoHeaderTimeout(t *testing.T) {
+	for _, proxyURL := range []string{"", "http://custom-upstream-probe.local:3128"} {
+		client := GetCustomUpstreamClientForProxy(proxyURL)
+		if client.Timeout != 0 {
+			t.Fatalf("proxy %q: custom upstream client must have no total timeout, got %s", proxyURL, client.Timeout)
+		}
+		transport, ok := client.Transport.(*http.Transport)
+		if !ok {
+			t.Fatalf("proxy %q: expected *http.Transport, got %T", proxyURL, client.Transport)
+		}
+		if transport.ResponseHeaderTimeout != 0 {
+			t.Fatalf("proxy %q: custom upstream must not bound the header wait, got %s", proxyURL, transport.ResponseHeaderTimeout)
+		}
+	}
+}
+
+// TestAccountEmailForLogFallsBackWhenEmailEmpty covers the log line that read
+// "Upstream timeout for :" — custom-upstream accounts frequently have no email, and a
+// warning that names nothing cannot be acted on.
+func TestAccountEmailForLogFallsBackWhenEmailEmpty(t *testing.T) {
+	cases := []struct {
+		name    string
+		account *config.Account
+		want    string
+	}{
+		{"nil", nil, "<nil>"},
+		{"email wins", &config.Account{Email: "a@b.c", ID: "id-1"}, "a@b.c"},
+		{"id when no email", &config.Account{ID: "id-1"}, "id-1"},
+		{"host when no email or id", &config.Account{BaseURL: "https://xapi.example.dev/v1"}, "xapi.example.dev"},
+		{"nothing identifiable", &config.Account{}, "<unnamed>"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := accountEmailForLog(tc.account); got != tc.want {
+				t.Fatalf("accountEmailForLog = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestResolveAccountProxyURLStrictBlocksWhenRequired(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)

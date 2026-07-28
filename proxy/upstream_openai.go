@@ -74,7 +74,7 @@ func CallOpenAICompatibleAPI(ctx context.Context, account *config.Account, model
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "text/event-stream")
 
-		resp, err := GetClientForProxy(proxyURL).Do(req)
+		resp, err := GetCustomUpstreamClientForProxy(proxyURL).Do(req)
 		if err != nil {
 			// Cancellation is the client hanging up (or our idle watchdog), not a
 			// dead proxy — swapping proxies would fail identically and would mark

@@ -41,8 +41,14 @@ const maxEventStreamFrameBytes = 32 << 20
 var streamIdleTimeout = 180 * time.Second
 
 // streamResponseHeaderTimeout bounds only the pre-body phase (connect → response
-// headers). Once headers arrive, streamIdleTimeout takes over. This keeps a black
-// hole endpoint from hanging forever now that the total timeout is gone.
+// headers) for the KIRO endpoints, which send headers immediately and then stream.
+// Once headers arrive, streamIdleTimeout takes over. This keeps a black hole endpoint
+// from hanging forever now that the total timeout is gone.
+//
+// Deliberately NOT applied to custom (OpenAI/Anthropic-compatible) upstreams: a
+// resold gateway may buffer the whole completion and only then send headers, so its
+// header wait legitimately covers the entire generation. Bounding that at two minutes
+// broke every slow custom upstream with "timeout awaiting response headers".
 const streamResponseHeaderTimeout = 120 * time.Second
 
 // streamHeartbeatInterval is how often a stream handler emits an SSE comment while
@@ -92,8 +98,12 @@ func init() {
 	InitKiroHttpClient("")
 }
 
-// GetClientForProxy returns an http.Client configured for the given proxy URL.
-// If proxyURL is empty, returns the global kiro HTTP client.
+// GetClientForProxy returns an http.Client for the KIRO endpoints via the given proxy
+// URL. If proxyURL is empty, returns the global kiro HTTP client.
+//
+// Carries streamResponseHeaderTimeout, which is only safe because Kiro sends response
+// headers before it starts generating. Custom upstreams must use
+// GetCustomUpstreamClientForProxy instead.
 func GetClientForProxy(proxyURL string) *http.Client {
 	if proxyURL == "" {
 		return kiroHttpStore.Load()
@@ -109,6 +119,28 @@ func GetClientForProxy(proxyURL string) *http.Client {
 	}
 	proxyClientCache.Store(proxyURL, client)
 	return client
+}
+
+// customUpstreamClientCache caches clients for custom (OpenAI/Anthropic-compatible)
+// upstreams, keyed by proxy URL.
+var customUpstreamClientCache sync.Map
+
+// GetCustomUpstreamClientForProxy returns an http.Client for a custom upstream.
+//
+// Unlike the Kiro client it sets NO ResponseHeaderTimeout: a resold gateway may
+// generate the entire completion before sending any header, in which case the header
+// wait covers the whole request and any bound on it fails slow-but-healthy calls.
+// Liveness for these comes from the caller's context plus, for SSE responses, the
+// per-frame idle watchdog.
+func GetCustomUpstreamClientForProxy(proxyURL string) *http.Client {
+	if cached, ok := customUpstreamClientCache.Load(proxyURL); ok {
+		return cached.(*http.Client)
+	}
+	client := &http.Client{
+		Transport: buildKiroTransport(proxyURL),
+	}
+	actual, _ := customUpstreamClientCache.LoadOrStore(proxyURL, client)
+	return actual.(*http.Client)
 }
 
 // GetRestClientForProxy returns a rest http.Client (30s timeout) for the given proxy URL.

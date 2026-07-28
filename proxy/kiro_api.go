@@ -98,11 +98,27 @@ func regionalizeURLForRegion(rawURL, region string) string {
 }
 
 // accountEmailForLog returns a nil-safe string for logging account identity.
+//
+// Custom-upstream accounts often carry no email, which rendered log lines as
+// "Upstream timeout for :" — identifying nothing. Fall back to the account ID, then
+// to the upstream host, so every line names something operators can act on.
 func accountEmailForLog(account *config.Account) string {
 	if account == nil {
 		return "<nil>"
 	}
-	return account.Email
+	if email := strings.TrimSpace(account.Email); email != "" {
+		return email
+	}
+	if id := strings.TrimSpace(account.ID); id != "" {
+		return id
+	}
+	if base := strings.TrimSpace(account.BaseURL); base != "" {
+		if u, err := neturl.Parse(base); err == nil && u.Host != "" {
+			return u.Host
+		}
+		return base
+	}
+	return "<unnamed>"
 }
 
 // ensureRestProfileArn resolves the account profile ARN before REST calls,
