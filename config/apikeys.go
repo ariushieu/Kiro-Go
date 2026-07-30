@@ -266,6 +266,91 @@ func DeleteApiKeys(ids []string) (int, error) {
 	return deleted, nil
 }
 
+// ExtendApiKeysResult reports what ExtendApiKeys did, per outcome, so the caller
+// can explain a partial result instead of just a count.
+type ExtendApiKeysResult struct {
+	// Extended lists the IDs whose expiry moved, with their new value.
+	Extended map[string]int64
+	// SkippedNeverExpires lists keys with ExpiresAt == 0. Adding a delta to those
+	// would convert an unlimited key into an expiring one — that silently cuts off
+	// a paying customer, so they are left alone and reported.
+	SkippedNeverExpires []string
+	// NotFound lists IDs that matched no entry.
+	NotFound []string
+}
+
+// ExtendApiKeys shifts the expiry of the named keys by delta seconds.
+//
+// The base is max(now, current expiry): a key that is still valid gets the time
+// added on top of its remaining validity, while an already-expired key is
+// revived relative to now rather than to a date in the past (adding a day to a
+// key that lapsed last week would otherwise leave it still expired).
+//
+// Keys that never expire are skipped, not extended — see SkippedNeverExpires.
+// Applies all-or-nothing: a save failure rolls the whole batch back.
+func ExtendApiKeys(ids []string, delta int64) (ExtendApiKeysResult, error) {
+	res := ExtendApiKeysResult{Extended: make(map[string]int64)}
+	if delta == 0 {
+		return res, errors.New("delta must be non-zero")
+	}
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	if cfg == nil {
+		return res, errors.New("config not initialized")
+	}
+
+	want := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if strings.TrimSpace(id) != "" {
+			want[id] = true
+		}
+	}
+	if len(want) == 0 {
+		return res, errors.New("no api key ids provided")
+	}
+
+	original := append([]ApiKeyEntry(nil), cfg.ApiKeys...)
+	now := time.Now().Unix()
+	seen := make(map[string]bool, len(want))
+
+	for i := range cfg.ApiKeys {
+		id := cfg.ApiKeys[i].ID
+		if !want[id] {
+			continue
+		}
+		seen[id] = true
+		if cfg.ApiKeys[i].ExpiresAt <= 0 {
+			res.SkippedNeverExpires = append(res.SkippedNeverExpires, id)
+			continue
+		}
+		base := cfg.ApiKeys[i].ExpiresAt
+		if base < now {
+			base = now
+		}
+		next := base + delta
+		// Shortening must not push the expiry into the past and silently kill the
+		// key; clamp at now, which reads as "expires immediately".
+		if next < now {
+			next = now
+		}
+		cfg.ApiKeys[i].ExpiresAt = next
+		res.Extended[id] = next
+	}
+	for id := range want {
+		if !seen[id] {
+			res.NotFound = append(res.NotFound, id)
+		}
+	}
+	if len(res.Extended) == 0 {
+		return res, nil
+	}
+	if err := saveLocked(); err != nil {
+		cfg.ApiKeys = original
+		return ExtendApiKeysResult{Extended: make(map[string]int64)}, err
+	}
+	return res, nil
+}
+
 // FindApiKeyByValue returns a copy of the entry whose Key matches the given value,
 // or nil if no match. O(n) linear scan.
 func FindApiKeyByValue(key string) *ApiKeyEntry {

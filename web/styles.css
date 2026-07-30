@@ -2279,6 +2279,20 @@ body:has(#tabConsole:not(.hidden)) #mainPage > .container {
 }
 /* "include real keys" toggle under the export list — matches .export-row's
    checkbox so the two don't look like different controls. */
+/* Quick-add buttons in the extend-expiry modal. */
+.extend-quick-row {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+/* The extend button sits inline after the "Expires: <date>" text, so keep the
+   two on one baseline and let the row wrap on narrow cards. */
+.expiry-line {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
 /* Test-connection + Save sit together under the custom-upstream editor. */
 .upstream-edit-actions {
   display: flex;
@@ -3476,6 +3490,20 @@ body:has(#tabConsole:not(.hidden)) #mainPage > .container {
 .input-row > textarea {
   flex: 1;
   min-width: 8rem;
+}
+/* enhanceCustomSelect() replaces each <select> with a div.custom-select wrapper
+   that is width:100%, so a select inside a flex row claims a whole line and
+   pushes the rest of the row onto its own lines. Size the wrapper to its content
+   instead, so number + unit + button stays on one line. Targeting `select` here
+   would do nothing: the native element is left in the DOM at 1px. */
+.input-row > select,
+.input-row > .custom-select {
+  flex: 0 0 auto;
+  width: auto;
+  min-width: 7rem;
+}
+.input-row > .btn {
+  flex: 0 0 auto;
 }
 .form-group .input-row > label {
   display: inline-flex;

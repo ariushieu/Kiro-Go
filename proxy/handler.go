@@ -2969,6 +2969,10 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiBulkCreateApiKeys(w, r)
 	case path == "/api-keys/bulk" && r.Method == "DELETE":
 		h.apiBulkDeleteApiKeys(w, r)
+	// Literal paths must precede the generic /api-keys/<id> cases below, or
+	// "extend" is mistaken for a key ID.
+	case path == "/api-keys/extend" && r.Method == "POST":
+		h.apiExtendApiKeys(w, r)
 	case path == "/api-keys/export" && r.Method == "POST":
 		h.apiExportApiKeys(w, r)
 	// Must precede the generic /api-keys/<id> prefix cases below, or "import" is

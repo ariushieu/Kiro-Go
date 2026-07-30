@@ -291,8 +291,12 @@
             </label>
             <div id="apiKeyBulkBar" class="batch-bar hidden">
               <span id="apiKeyBulkCount" class="batch-count"></span>
+              <button class="btn btn-outline btn-xs" id="bulkExtendApiKeyBtn" type="button"
+                data-i18n="apiKeys.extend.openSelected"></button>
               <button class="btn btn-danger btn-xs" id="bulkDeleteApiKeyBtn" type="button" data-i18n="apiKeys.bulkDelete"></button>
             </div>
+            <button class="btn btn-outline btn-xs" id="extendAllApiKeysBtn" type="button"
+              style="margin-left:auto;" data-i18n="apiKeys.extend.openAll"></button>
           </div>
           <div id="apiKeysList"></div>
         </div>
@@ -793,6 +797,52 @@
       </div>
     </div>
   </div>
+  <div id="apiKeyExtendModal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <span class="modal-title" data-i18n="apiKeys.extend.title"></span>
+        <button class="modal-close" id="apiKeyExtendModalClose" type="button" aria-label=""
+          data-i18n-aria-label="common.close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="help-block" id="apiKeyExtendScope"></p>
+        <div class="form-group">
+          <label data-i18n="apiKeys.extend.quickLabel"></label>
+          <div class="extend-quick-row" id="apiKeyExtendQuick">
+            <button class="btn btn-outline btn-sm" type="button" data-extend="1800"
+              data-i18n="apiKeys.extend.plus30m"></button>
+            <button class="btn btn-outline btn-sm" type="button" data-extend="3600"
+              data-i18n="apiKeys.extend.plus1h"></button>
+            <button class="btn btn-outline btn-sm" type="button" data-extend="86400"
+              data-i18n="apiKeys.extend.plus1d"></button>
+            <button class="btn btn-outline btn-sm" type="button" data-extend="604800"
+              data-i18n="apiKeys.extend.plus7d"></button>
+            <button class="btn btn-outline btn-sm" type="button" data-extend="2592000"
+              data-i18n="apiKeys.extend.plus30d"></button>
+          </div>
+        </div>
+        <div class="form-group">
+          <label for="apiKeyExtendAmount" data-i18n="apiKeys.extend.customLabel"></label>
+          <div class="input-row">
+            <input type="number" id="apiKeyExtendAmount" min="1" step="1" value="1" />
+            <select id="apiKeyExtendUnit">
+              <option value="60" data-i18n="apiKeys.extend.unitMinutes"></option>
+              <option value="3600" data-i18n="apiKeys.extend.unitHours"></option>
+              <option value="86400" selected data-i18n="apiKeys.extend.unitDays"></option>
+            </select>
+            <button class="btn btn-primary btn-sm" id="apiKeyExtendCustomBtn" type="button"
+              data-i18n="apiKeys.extend.submit"></button>
+          </div>
+          <small data-i18n="apiKeys.extend.hint"></small>
+        </div>
+        <div id="apiKeyExtendResult" class="proxy-import-log hidden mt-3"></div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" id="apiKeyExtendCancelBtn" type="button"
+            data-i18n="common.close"></button>
+        </div>
+      </div>
+    </div>
+  </div>
   <div id="testModal" class="modal">
     <div class="modal-content test-modal-content">
       <div class="modal-header"><span class="modal-title" data-i18n="accounts.testModalTitle"></span><button
@@ -861,7 +911,7 @@
         </div>
         <div class="form-group">
           <label data-i18n="apiKeys.expiresAt"></label>
-          <input type="date" id="apiKeyForm_expiresAt" />
+          <input type="datetime-local" id="apiKeyForm_expiresAt" />
           <small data-i18n="apiKeys.expiresAtHint"></small>
         </div>
         <div class="form-group">
@@ -945,7 +995,7 @@
         </div>
         <div class="form-group">
           <label data-i18n="apiKeys.expiresAt"></label>
-          <input type="date" id="apiKeyBulk_expiresAt" />
+          <input type="datetime-local" id="apiKeyBulk_expiresAt" />
           <small data-i18n="apiKeys.expiresAtHint"></small>
         </div>
         <div class="form-group">

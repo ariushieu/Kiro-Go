@@ -263,6 +263,72 @@ type apiKeyBulkDeleteRequest struct {
 	IDs []string `json:"ids"`
 }
 
+// apiKeyExtendRequest shifts expiry on a set of keys.
+//
+// Seconds is the delta; the panel's quick buttons send 1800, 3600, 86400 and so
+// on. All targets every configured key, which is why it is an explicit flag
+// rather than "empty IDs means everything" — an accidentally empty selection
+// must not silently rewrite the whole key list.
+type apiKeyExtendRequest struct {
+	IDs     []string `json:"ids"`
+	All     bool     `json:"all"`
+	Seconds int64    `json:"seconds"`
+}
+
+// maxApiKeyExtendSeconds caps a single call at ~10 years. Without a bound a typo
+// in the custom-amount box (or a units mixup) can push expiry past the year
+// 275760 limit of a JS Date and render the key list unreadable.
+const maxApiKeyExtendSeconds = 10 * 365 * 24 * 60 * 60
+
+func (h *Handler) apiExtendApiKeys(w http.ResponseWriter, r *http.Request) {
+	var req apiKeyExtendRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
+		return
+	}
+	if req.Seconds == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "seconds must be non-zero"})
+		return
+	}
+	if req.Seconds > maxApiKeyExtendSeconds || req.Seconds < -maxApiKeyExtendSeconds {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "seconds is out of range"})
+		return
+	}
+
+	ids := req.IDs
+	if req.All {
+		entries := config.ListApiKeys()
+		ids = make([]string, 0, len(entries))
+		for _, e := range entries {
+			ids = append(ids, e.ID)
+		}
+	}
+	if len(ids) == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "no api key ids provided"})
+		return
+	}
+
+	res, err := config.ExtendApiKeys(ids, req.Seconds)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	logger.Infof("[ApiKeyExtend] %+d s on %d key(s): %d extended, %d never-expires skipped, %d not found",
+		req.Seconds, len(ids), len(res.Extended), len(res.SkippedNeverExpires), len(res.NotFound))
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":             true,
+		"extended":            len(res.Extended),
+		"skippedNeverExpires": len(res.SkippedNeverExpires),
+		"notFound":            len(res.NotFound),
+		"expiresAt":           res.Extended,
+	})
+}
+
 func (h *Handler) apiBulkDeleteApiKeys(w http.ResponseWriter, r *http.Request) {
 	var req apiKeyBulkDeleteRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {

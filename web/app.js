@@ -2031,7 +2031,7 @@
         ? '<span class="text-xs" style="background:rgba(239,68,68,0.15);color:#ef4444;padding:1px 6px;border-radius:4px;">' + escapeHtml(t('apiKeys.disabled')) + '</span>'
         : '';
       const expiredBadge = apiKeyExpiryBadge(item.expiresAt);
-      const expiryLine = apiKeyExpiryLine(item.expiresAt);
+      const expiryLine = apiKeyExpiryLine(item.expiresAt, rawId);
       const tokensLine = usageLine(t('apiKeys.tokens'), item.tokensUsed || 0, item.tokenLimit || 0);
       const creditsLine = usageLine(t('apiKeys.credits'), item.creditsUsed || 0, item.creditLimit || 0);
       const requestsLine = '<div class="text-xs muted-text">' + escapeHtml(t('apiKeys.requests')) + ': ' + escapeHtml(formatNumber(item.requestsCount || 0)) + '</div>';
@@ -2332,6 +2332,69 @@
     }
   }
 
+  // Extend-expiry modal. Scope is either an explicit id list (one key from its row,
+  // or the current selection) or every key via the server's `all` flag, so an
+  // empty selection can never be mistaken for "everything".
+  let apiKeyExtendScope = null;
+
+  function openApiKeyExtendModal(scope) {
+    apiKeyExtendScope = scope;
+    const label = $('apiKeyExtendScope');
+    if (scope.all) {
+      label.textContent = t('apiKeys.extend.scopeAll', apiKeysCache.length);
+    } else if (scope.ids.length === 1) {
+      const entry = apiKeysCache.find(k => k.id === scope.ids[0]);
+      label.textContent = t('apiKeys.extend.scopeOne',
+        (entry && (entry.name || entry.keyMasked)) || scope.ids[0]);
+    } else {
+      label.textContent = t('apiKeys.extend.scopeSelected', scope.ids.length);
+    }
+    const box = $('apiKeyExtendResult');
+    box.classList.add('hidden');
+    box.innerHTML = '';
+    openDialog('apiKeyExtendModal');
+  }
+
+  async function submitApiKeyExtend(seconds) {
+    if (!apiKeyExtendScope || !seconds) return;
+    const payload = apiKeyExtendScope.all
+      ? { all: true, seconds }
+      : { ids: apiKeyExtendScope.ids, seconds };
+    const box = $('apiKeyExtendResult');
+    box.classList.remove('hidden');
+    box.innerHTML = '<p class="help-block">' + escapeHtml(t('apiKeys.extend.running')) + '</p>';
+    try {
+      const res = await api('/api-keys/extend', { method: 'POST', body: JSON.stringify(payload) });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok || d.success === false) throw new Error(d.error || t('common.failed'));
+      let html = '<div class="proxy-import-summary">' +
+        escapeHtml(t('apiKeys.extend.done', d.extended || 0)) + '</div>';
+      if (d.skippedNeverExpires) {
+        // Adding time to a never-expires key would give it an expiry, so those are
+        // deliberately left alone — say so rather than reporting a silent no-op.
+        html += '<div class="proxy-import-row muted-text">' +
+          escapeHtml(t('apiKeys.extend.skippedNever', d.skippedNeverExpires)) + '</div>';
+      }
+      if (d.notFound) {
+        html += '<div class="proxy-import-row error-text">' +
+          escapeHtml(t('apiKeys.extend.notFound', d.notFound)) + '</div>';
+      }
+      box.innerHTML = html;
+      toast(t('apiKeys.extend.done', d.extended || 0), 'success');
+      await loadApiKeys();
+    } catch (e) {
+      box.innerHTML = '<p class="help-block error-text">' +
+        escapeHtml((e && e.message) || t('common.failed')) + '</p>';
+    }
+  }
+
+  function submitApiKeyExtendCustom() {
+    const amount = Math.floor(Number($('apiKeyExtendAmount').value) || 0);
+    if (amount <= 0) return toastWarning(t('apiKeys.extend.amountRequired'));
+    const unit = Number($('apiKeyExtendUnit').value) || 86400;
+    submitApiKeyExtend(amount * unit);
+  }
+
   async function submitApiKeyModal() {
     if (apiKeyModalSubmitting) return;
     apiKeyModalSubmitting = true;
@@ -2510,6 +2573,7 @@
         else if (action === 'delete') deleteApiKeyEntry(id, name);
         else if (action === 'reset') resetApiKeyUsageEntry(id, name);
         else if (action === 'reset-all') resetAllApiKeyUsageEntry(id, name);
+        else if (action === 'extend') openApiKeyExtendModal({ ids: [id] });
         else if (action === 'portal') copyPortalLink();
       });
       list.addEventListener('change', e => {
@@ -2548,6 +2612,24 @@
     if (bulkAddBtn) bulkAddBtn.addEventListener('click', openApiKeyBulkModal);
     const bulkDeleteBtn = $('bulkDeleteApiKeyBtn');
     if (bulkDeleteBtn) bulkDeleteBtn.addEventListener('click', bulkDeleteApiKeys);
+    const bulkExtendBtn = $('bulkExtendApiKeyBtn');
+    if (bulkExtendBtn) bulkExtendBtn.addEventListener('click', () => {
+      const ids = Array.from(selectedApiKeyIds);
+      if (ids.length) openApiKeyExtendModal({ ids });
+    });
+    const extendAllBtn = $('extendAllApiKeysBtn');
+    if (extendAllBtn) extendAllBtn.addEventListener('click', () => openApiKeyExtendModal({ all: true }));
+    const extendQuick = $('apiKeyExtendQuick');
+    if (extendQuick) extendQuick.addEventListener('click', e => {
+      const b = e.target.closest('[data-extend]');
+      if (b) submitApiKeyExtend(Number(b.dataset.extend));
+    });
+    const extendCustomBtn = $('apiKeyExtendCustomBtn');
+    if (extendCustomBtn) extendCustomBtn.addEventListener('click', submitApiKeyExtendCustom);
+    const extendClose = $('apiKeyExtendModalClose');
+    if (extendClose) extendClose.addEventListener('click', () => closeDialog('apiKeyExtendModal'));
+    const extendCancel = $('apiKeyExtendCancelBtn');
+    if (extendCancel) extendCancel.addEventListener('click', () => closeDialog('apiKeyExtendModal'));
     const selectAllApiKeys = $('apiKeySelectAll');
     if (selectAllApiKeys) selectAllApiKeys.addEventListener('change', e => toggleApiKeySelectAll(e.target.checked));
     const apiKeySearchInput = $('apiKeySearchInput');
@@ -2632,6 +2714,7 @@
     bindDialogBackdropClose('apiKeyBulkModal', closeApiKeyBulkModal);
     bindDialogBackdropClose('apiKeyShowModal', closeShowApiKeyModal);
     bindDialogBackdropClose('apiKeyImportModal', () => closeDialog('apiKeyImportModal'));
+    bindDialogBackdropClose('apiKeyExtendModal', () => closeDialog('apiKeyExtendModal'));
   }
 
   // Prompt filter rules
@@ -4267,22 +4350,37 @@
     return n > 1e12 ? Math.floor(n / 1000) : Math.floor(n);
   }
 
-  // Convert a Unix seconds timestamp to a value for <input type="date"> (local yyyy-mm-dd).
+  // Convert a Unix seconds timestamp to a value for <input type="datetime-local">
+  // (local yyyy-mm-ddThh:mm).
+  //
+  // These inputs carry minutes because expiry can now be extended by as little as
+  // 30 of them; a date-only field rounded any sub-day expiry away the next time
+  // the edit form was saved.
   function unixToLocalInput(unixSec) {
     unixSec = normalizeUnixSeconds(unixSec);
     if (!unixSec) return '';
     const d = new Date(unixSec * 1000);
     const pad = n => String(n).padStart(2, '0');
-    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) +
+      'T' + pad(d.getHours()) + ':' + pad(d.getMinutes());
   }
 
-  // Convert a <input type="date"> value (yyyy-mm-dd) to Unix seconds at end of that
-  // day in local time. Empty input → 0 (never expires).
+  // Convert a <input type="datetime-local"> value to Unix seconds. A date-only
+  // value still means end of that day, so anything typed or pasted in the old
+  // yyyy-mm-dd form keeps its previous meaning. Empty input → 0 (never expires).
   function localInputToUnix(val) {
     if (!val) return 0;
-    const parts = val.split('-');
+    const [datePart, timePart] = val.split('T');
+    const parts = datePart.split('-');
     if (parts.length !== 3) return 0;
-    const d = new Date(+parts[0], +parts[1] - 1, +parts[2], 23, 59, 59);
+    let h = 23, m = 59, s = 59;
+    if (timePart) {
+      const hm = timePart.split(':');
+      h = +hm[0] || 0;
+      m = +hm[1] || 0;
+      s = hm[2] ? (+hm[2] || 0) : 0;
+    }
+    const d = new Date(+parts[0], +parts[1] - 1, +parts[2], h, m, s);
     const ms = d.getTime();
     return isNaN(ms) ? 0 : Math.floor(ms / 1000);
   }
@@ -4303,10 +4401,20 @@
   }
 
   // Full "Expires: <date>" line for the key/usage cards. Empty when never expires.
-  function apiKeyExpiryLine(expiresAt) {
+  //
+  // keyId is optional: when given, the line carries an inline extend button. It sits
+  // here rather than with the row's other action buttons because it acts on this
+  // value, and that row is already five buttons wide.
+  function apiKeyExpiryLine(expiresAt, keyId) {
     expiresAt = normalizeUnixSeconds(expiresAt);
     const val = expiresAt ? formatLogTime(expiresAt) : t('apiKeys.neverExpires');
-    return '<div class="text-xs muted-text">' + escapeHtml(t('apiKeys.expiry')) + ': ' + escapeHtml(val) + '</div>';
+    // A never-expires key has nothing to extend, so the button is omitted there.
+    const btn = (keyId && expiresAt)
+      ? ' <button class="btn btn-outline btn-xs" type="button" data-apikey-action="extend" data-id="' +
+        escapeAttr(keyId) + '">' + escapeHtml(t('apiKeys.extend.action')) + '</button>'
+      : '';
+    return '<div class="text-xs muted-text expiry-line">' + escapeHtml(t('apiKeys.expiry')) + ': ' +
+      escapeHtml(val) + btn + '</div>';
   }
 
   let apiLogCache = [];
