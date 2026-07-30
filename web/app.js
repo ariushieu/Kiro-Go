@@ -33,6 +33,9 @@
   let iamSession = '';
   let exportSelectedIds = new Set();
   let apiKeyExportSelectedIds = new Set();
+  // Whether the pending API key export includes cleartext key values. Reset every
+  // time the modal opens so a masked report is always the default.
+  let apiKeyExportIncludeSecrets = false;
   let currentVersion = '';
   let testLogs = [];
   let testModalAccountId = '';
@@ -2515,6 +2518,16 @@
     }
     const exportBtn = $('exportApiKeysBtn');
     if (exportBtn) exportBtn.addEventListener('click', showApiKeyExportModal);
+    const importBtn = $('importApiKeysBtn');
+    if (importBtn) importBtn.addEventListener('click', showApiKeyImportModal);
+    const importSubmit = $('apiKeyImportSubmitBtn');
+    if (importSubmit) importSubmit.addEventListener('click', submitApiKeyImport);
+    const importCancel = $('apiKeyImportCancelBtn');
+    if (importCancel) importCancel.addEventListener('click', () => closeDialog('apiKeyImportModal'));
+    const importClose = $('apiKeyImportModalClose');
+    if (importClose) importClose.addEventListener('click', () => closeDialog('apiKeyImportModal'));
+    const importFile = $('apiKeyImportFile');
+    if (importFile) importFile.addEventListener('change', e => loadLocalFile(e.target, 'apiKeyImportJson'));
     const addBtn = $('addApiKeyBtn');
     if (addBtn) addBtn.addEventListener('click', () => openApiKeyModal(null));
     const bulkAddBtn = $('bulkAddApiKeyBtn');
@@ -2604,6 +2617,7 @@
     bindDialogBackdropClose('apiKeyModal', closeApiKeyModal);
     bindDialogBackdropClose('apiKeyBulkModal', closeApiKeyBulkModal);
     bindDialogBackdropClose('apiKeyShowModal', closeShowApiKeyModal);
+    bindDialogBackdropClose('apiKeyImportModal', () => closeDialog('apiKeyImportModal'));
   }
 
   // Prompt filter rules
@@ -3644,10 +3658,12 @@
     URL.revokeObjectURL(url);
   }
 
-  // API key usage export modal (masked report, not re-importable)
+  // API key export modal. Masked usage report by default; the includeSecrets toggle
+  // turns it into a restorable backup (see apiKeyExportIncludeSecrets).
   function showApiKeyExportModal() {
     if (!apiKeysCache.length) return toastWarning(t('apiKeys.export.empty'));
     apiKeyExportSelectedIds = new Set(apiKeysCache.map(k => k.id));
+    apiKeyExportIncludeSecrets = false;
     renderApiKeyExportModal();
     openDialog('exportModal');
   }
@@ -3674,6 +3690,11 @@
       }).join('') +
       '</div>' +
       '<div id="apiKeyExportJsonPreview" class="hidden mb-3"><textarea id="apiKeyExportJsonText" readonly class="font-mono"></textarea></div>' +
+      '<label class="flex items-center gap-2 mb-2">' +
+      '<input type="checkbox" id="apiKeyExportIncludeSecrets" ' + (apiKeyExportIncludeSecrets ? 'checked' : '') + ' />' +
+      '<span data-i18n="apiKeys.export.includeSecrets">' + escapeHtml(t('apiKeys.export.includeSecrets')) + '</span>' +
+      '</label>' +
+      '<small class="help-block">' + escapeHtml(t('apiKeys.export.includeSecretsHint')) + '</small>' +
       '<div class="modal-footer">' +
       '<button class="btn btn-secondary" id="apiKeyExportCloseBtn" type="button">' + escapeHtml(t('common.cancel')) + '</button>' +
       '<button class="btn btn-outline" id="apiKeyExportShowJsonBtn" type="button">' + escapeHtml(t('export.showJson')) + '</button>' +
@@ -3687,6 +3708,15 @@
       renderApiKeyExportModal();
     });
     $('apiKeyExportCloseBtn').addEventListener('click', () => closeDialog('exportModal'));
+    // Ticking this turns the download into a credential dump — confirm once, on the
+    // way in only, so unticking never nags.
+    $('apiKeyExportIncludeSecrets').addEventListener('change', e => {
+      if (e.target.checked && !confirm(t('apiKeys.export.includeSecretsConfirm'))) {
+        e.target.checked = false;
+        return;
+      }
+      apiKeyExportIncludeSecrets = e.target.checked;
+    });
     $('apiKeyExportShowJsonBtn').addEventListener('click', apiKeyExportShowJson);
     $('apiKeyExportCopyJsonBtn').addEventListener('click', apiKeyExportCopyJson);
     $('apiKeyExportCsvBtn').addEventListener('click', apiKeyExportDownloadCsv);
@@ -3700,7 +3730,13 @@
   }
   async function getApiKeyExportData() {
     if (apiKeyExportSelectedIds.size === 0) { toastWarning(t('export.noSelection')); return null; }
-    const res = await api('/api-keys/export', { method: 'POST', body: JSON.stringify({ ids: Array.from(apiKeyExportSelectedIds) }) });
+    const res = await api('/api-keys/export', {
+      method: 'POST',
+      body: JSON.stringify({
+        ids: Array.from(apiKeyExportSelectedIds),
+        includeSecrets: apiKeyExportIncludeSecrets,
+      })
+    });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       toastError(t('common.failed') + ': ' + (err.error || t('common.unknownError')));
@@ -3747,6 +3783,9 @@
     const cols = ['id', 'name', 'keyMasked', 'enabled', 'requestsCount', 'tokensUsed',
       'creditsUsed', 'tokenLimit', 'creditLimit', 'tokenPercentUsed', 'creditPercentUsed',
       'overToken', 'overCredit', 'expired', 'expiresAt', 'createdAt', 'lastUsedAt'];
+    // Only widen the report with the cleartext column when the operator asked for it,
+    // so the everyday CSV a customer might see stays masked.
+    if (data.includeSecrets) cols.splice(3, 0, 'key');
     const rows = [cols.join(',')];
     (data.apiKeys || []).forEach(k => {
       rows.push(cols.map(c => csvCell(k[c])).join(','));
@@ -3763,6 +3802,42 @@
     a.download = 'kiro-apikeys-' + new Date().toISOString().slice(0, 10) + '.csv';
     a.click();
     URL.revokeObjectURL(url);
+  }
+
+  // API key import — restores keys from an "include real keys" export (or a raw
+  // apiKeys array out of config.json) so a server move keeps customer keys working.
+  function showApiKeyImportModal() {
+    $('apiKeyImportJson').value = '';
+    const results = $('apiKeyImportResults');
+    results.innerHTML = '';
+    results.classList.add('hidden');
+    openDialog('apiKeyImportModal');
+  }
+  async function submitApiKeyImport() {
+    const raw = $('apiKeyImportJson').value.trim();
+    if (!raw) return toastWarning(t('apiKeys.import.empty'));
+    // Parse client-side first so a typo gives an instant, local error.
+    try { JSON.parse(raw); } catch { return toastWarning(t('apiKeys.import.invalidJson')); }
+
+    const btn = $('apiKeyImportSubmitBtn');
+    btn.disabled = true;
+    try {
+      const res = await api('/api-keys/import', { method: 'POST', body: raw });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        toastError(t('common.failed') + ': ' + (d.error || t('common.unknownError')));
+        return;
+      }
+      const results = $('apiKeyImportResults');
+      results.classList.remove('hidden');
+      results.textContent = t('apiKeys.import.result', d.imported || 0, d.skipped || 0, d.invalid || 0);
+      toastPrimary(t('apiKeys.import.result', d.imported || 0, d.skipped || 0, d.invalid || 0), { duration: 5200 });
+      await loadApiKeys();
+    } catch (e) {
+      toastError(t('common.failed') + ': ' + (e && e.message ? e.message : t('common.unknownError')));
+    } finally {
+      btn.disabled = false;
+    }
   }
 
   // Version and update

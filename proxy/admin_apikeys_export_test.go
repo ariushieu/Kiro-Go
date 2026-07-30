@@ -42,14 +42,18 @@ func seedExportKeys(t *testing.T) (unlimited, under, overTok, expired string) {
 	return e1.ID, e2.ID, e3.ID, e4.ID
 }
 
-func decodeExport(t *testing.T, body string, ids []string) map[string]apiKeyExportView {
+// decodeExport posts an export request and returns the rows by ID. When
+// includeSecrets is false it also asserts the raw key values (seeded as "sk-*-secret")
+// never reach the response; when true it asserts the opposite, since a cleartext
+// export is only useful if the secret IS present.
+func decodeExport(t *testing.T, ids []string, includeSecrets bool) map[string]apiKeyExportView {
 	t.Helper()
-	reqBody := "{}"
+	body := map[string]interface{}{"includeSecrets": includeSecrets}
 	if ids != nil {
-		b, _ := json.Marshal(map[string][]string{"ids": ids})
-		reqBody = string(b)
+		body["ids"] = ids
 	}
-	r := httptest.NewRequest(http.MethodPost, "/admin/api/api-keys/export", strings.NewReader(reqBody))
+	b, _ := json.Marshal(body)
+	r := httptest.NewRequest(http.MethodPost, "/admin/api/api-keys/export", strings.NewReader(string(b)))
 	w := httptest.NewRecorder()
 
 	h := &Handler{}
@@ -58,21 +62,28 @@ func decodeExport(t *testing.T, body string, ids []string) map[string]apiKeyExpo
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	// Raw secret must never appear.
-	if strings.Contains(w.Body.String(), "secret") {
-		t.Fatalf("raw key value leaked in output: %s", w.Body.String())
+	hasSecret := strings.Contains(w.Body.String(), "secret")
+	if !includeSecrets && hasSecret {
+		t.Fatalf("raw key value leaked in masked output: %s", w.Body.String())
+	}
+	if includeSecrets && !hasSecret {
+		t.Fatalf("includeSecrets export omitted the raw key: %s", w.Body.String())
 	}
 
 	var out struct {
-		Version    string             `json:"version"`
-		ExportedAt int64              `json:"exportedAt"`
-		ApiKeys    []apiKeyExportView `json:"apiKeys"`
+		Version        string             `json:"version"`
+		ExportedAt     int64              `json:"exportedAt"`
+		IncludeSecrets bool               `json:"includeSecrets"`
+		ApiKeys        []apiKeyExportView `json:"apiKeys"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if out.ExportedAt == 0 {
 		t.Fatalf("expected exportedAt to be set")
+	}
+	if out.IncludeSecrets != includeSecrets {
+		t.Fatalf("includeSecrets echo: want %v, got %v", includeSecrets, out.IncludeSecrets)
 	}
 	byID := make(map[string]apiKeyExportView, len(out.ApiKeys))
 	for _, v := range out.ApiKeys {
@@ -85,7 +96,7 @@ func TestExportApiKeysAllMaskedAndDerived(t *testing.T) {
 	mustInitConfig(t)
 	_, under, overTok, expired := seedExportKeys(t)
 
-	got := decodeExport(t, "", nil)
+	got := decodeExport(t, nil, false)
 	if len(got) != 4 {
 		t.Fatalf("expected 4 entries, got %d", len(got))
 	}
@@ -93,6 +104,9 @@ func TestExportApiKeysAllMaskedAndDerived(t *testing.T) {
 	u := got[under]
 	if !strings.HasPrefix(u.KeyMasked, "sk-") || !strings.Contains(u.KeyMasked, "***") {
 		t.Fatalf("under key not masked: %q", u.KeyMasked)
+	}
+	if u.Key != "" {
+		t.Fatalf("masked export must omit Key, got %q", u.Key)
 	}
 	if u.TokenPercentUsed != 50 {
 		t.Fatalf("under tokenPercentUsed: want 50, got %v", u.TokenPercentUsed)
@@ -128,7 +142,7 @@ func TestExportApiKeysFilterByIDs(t *testing.T) {
 	mustInitConfig(t)
 	unlimited, under, _, _ := seedExportKeys(t)
 
-	got := decodeExport(t, "", []string{unlimited, under})
+	got := decodeExport(t, []string{unlimited, under}, false)
 	if len(got) != 2 {
 		t.Fatalf("expected 2 filtered entries, got %d", len(got))
 	}
@@ -137,5 +151,59 @@ func TestExportApiKeysFilterByIDs(t *testing.T) {
 	}
 	if _, ok := got[under]; !ok {
 		t.Fatalf("expected under in filtered result")
+	}
+}
+
+// TestExportApiKeysIncludeSecrets covers the opt-in path: cleartext key present, and
+// the masked column still populated so the CSV report keeps working either way.
+func TestExportApiKeysIncludeSecrets(t *testing.T) {
+	mustInitConfig(t)
+	_, under, _, _ := seedExportKeys(t)
+
+	got := decodeExport(t, []string{under}, true)
+	u := got[under]
+	if u.Key != "sk-under-secret" {
+		t.Fatalf("expected cleartext key, got %q", u.Key)
+	}
+	if !strings.Contains(u.KeyMasked, "***") {
+		t.Fatalf("KeyMasked should still be set alongside Key: %q", u.KeyMasked)
+	}
+}
+
+// TestExportApiKeysCarriesRestorableFields guards the fields the export used to drop.
+// Without them an export/import round-trip silently loses rate limits and bindings.
+func TestExportApiKeysCarriesRestorableFields(t *testing.T) {
+	mustInitConfig(t)
+
+	entry, err := config.AddApiKey(config.ApiKeyEntry{
+		Name:        "full",
+		Key:         "sk-full-secret",
+		Enabled:     true,
+		TokenLimit:  5000,
+		RPMLimit:    30,
+		IPLimit:     3,
+		IPAllowlist: []string{"203.0.113.4"},
+		TPMLimit:    9000,
+		Models:      []string{"claude-sonnet-4-5"},
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := config.RecordApiKeyUsage(entry.ID, 700, 1.5); err != nil {
+		t.Fatalf("usage: %v", err)
+	}
+
+	got := decodeExport(t, []string{entry.ID}, true)[entry.ID]
+	if got.RPMLimit != 30 || got.IPLimit != 3 || got.TPMLimit != 9000 {
+		t.Fatalf("rate/IP limits not exported: %+v", got)
+	}
+	if len(got.IPAllowlist) != 1 || got.IPAllowlist[0] != "203.0.113.4" {
+		t.Fatalf("ipAllowlist not exported: %+v", got.IPAllowlist)
+	}
+	if len(got.Models) != 1 || got.Models[0] != "claude-sonnet-4-5" {
+		t.Fatalf("models not exported: %+v", got.Models)
+	}
+	if got.LifetimeTokens != 700 || got.LifetimeCredits != 1.5 || got.LifetimeRequests != 1 {
+		t.Fatalf("lifetime counters not exported: %+v", got)
 	}
 }

@@ -319,3 +319,131 @@ func TestBulkApiKeyCreateDelete(t *testing.T) {
 		t.Fatalf("expected two deleted keys, got deleted=%d list=%d", deleted, len(ListApiKeys()))
 	}
 }
+
+// TestImportApiKeysSkipsDuplicatesInsteadOfFailing pins the behaviour that separates
+// ImportApiKeys from AddApiKeys: one duplicate row must not reject the whole batch,
+// otherwise a single stale key would block an entire server migration.
+func TestImportApiKeysSkipsDuplicatesInsteadOfFailing(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	if _, err := AddApiKey(ApiKeyEntry{Name: "existing", Key: "sk-existing", Enabled: true}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Same batch: one duplicate of an existing key, one repeated within the batch,
+	// one empty, two genuinely new.
+	res, err := ImportApiKeys([]ApiKeyEntry{
+		{Name: "dup-existing", Key: "sk-existing"},
+		{Name: "new-1", Key: "sk-new-1"},
+		{Name: "new-1-again", Key: "sk-new-1"},
+		{Name: "blank", Key: "   "},
+		{Name: "new-2", Key: "sk-new-2"},
+	})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if len(res.Imported) != 2 {
+		t.Fatalf("want 2 imported, got %d", len(res.Imported))
+	}
+	if res.Skipped != 2 {
+		t.Fatalf("want 2 skipped (existing + in-batch repeat), got %d", res.Skipped)
+	}
+	if res.Invalid != 1 {
+		t.Fatalf("want 1 invalid, got %d", res.Invalid)
+	}
+	if n := len(ListApiKeys()); n != 3 {
+		t.Fatalf("want 3 keys stored (1 seeded + 2 new), got %d", n)
+	}
+
+	// AddApiKeys, by contrast, rejects the batch and stores nothing.
+	if _, err := AddApiKeys([]ApiKeyEntry{{Name: "x", Key: "sk-x"}, {Name: "dup", Key: "sk-existing"}}); err == nil {
+		t.Fatalf("AddApiKeys should still fail on a duplicate")
+	}
+	if n := len(ListApiKeys()); n != 3 {
+		t.Fatalf("failed AddApiKeys must not persist anything, got %d keys", n)
+	}
+}
+
+// TestImportApiKeysPreservesCountersAndReassignsIDs: a restored key resumes its quota,
+// but never keeps an ID that could collide with an entry already on this server.
+func TestImportApiKeysPreservesCountersAndReassignsIDs(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	res, err := ImportApiKeys([]ApiKeyEntry{{
+		ID:               "id-from-the-old-server",
+		Name:             "restored",
+		Key:              "sk-restored",
+		Enabled:          true,
+		CreatedAt:        1700000000,
+		TokensUsed:       4321,
+		CreditsUsed:      12.5,
+		RequestsCount:    9,
+		LifetimeTokens:   9876,
+		LifetimeCredits:  30.25,
+		LifetimeRequests: 42,
+	}})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if len(res.Imported) != 1 {
+		t.Fatalf("want 1 imported, got %d", len(res.Imported))
+	}
+
+	got := res.Imported[0]
+	if got.ID == "id-from-the-old-server" || got.ID == "" {
+		t.Fatalf("ID should be regenerated, got %q", got.ID)
+	}
+	if got.CreatedAt != 1700000000 {
+		t.Fatalf("CreatedAt should be preserved, got %d", got.CreatedAt)
+	}
+	if got.TokensUsed != 4321 || got.CreditsUsed != 12.5 || got.RequestsCount != 9 {
+		t.Fatalf("current-period counters not preserved: %+v", got)
+	}
+	if got.LifetimeTokens != 9876 || got.LifetimeCredits != 30.25 || got.LifetimeRequests != 42 {
+		t.Fatalf("lifetime counters not preserved: %+v", got)
+	}
+
+	// A key with no CreatedAt gets stamped rather than persisting a zero timestamp.
+	res2, err := ImportApiKeys([]ApiKeyEntry{{Name: "fresh", Key: "sk-fresh"}})
+	if err != nil {
+		t.Fatalf("import fresh: %v", err)
+	}
+	if res2.Imported[0].CreatedAt == 0 {
+		t.Fatalf("CreatedAt should default to now")
+	}
+}
+
+// TestImportApiKeysAllDuplicatesIsNotAnError: a fully redundant import reports zero
+// imported without erroring, so re-running a migration is safe.
+func TestImportApiKeysAllDuplicatesIsNotAnError(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	if _, err := AddApiKey(ApiKeyEntry{Name: "a", Key: "sk-a", Enabled: true}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	res, err := ImportApiKeys([]ApiKeyEntry{{Name: "a", Key: "sk-a"}})
+	if err != nil {
+		t.Fatalf("all-duplicate import should not error: %v", err)
+	}
+	if len(res.Imported) != 0 || res.Skipped != 1 {
+		t.Fatalf("want 0 imported/1 skipped, got %+v", res)
+	}
+	if n := len(ListApiKeys()); n != 1 {
+		t.Fatalf("want 1 key, got %d", n)
+	}
+}
+
+// TestImportApiKeysEmptyInput rejects an empty batch — it signals a bad payload.
+func TestImportApiKeysEmptyInput(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	if _, err := ImportApiKeys(nil); err == nil {
+		t.Fatalf("expected an error for an empty batch")
+	}
+}

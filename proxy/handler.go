@@ -2967,6 +2967,10 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiBulkDeleteApiKeys(w, r)
 	case path == "/api-keys/export" && r.Method == "POST":
 		h.apiExportApiKeys(w, r)
+	// Must precede the generic /api-keys/<id> prefix cases below, or "import" is
+	// mistaken for a key ID.
+	case path == "/api-keys/import" && r.Method == "POST":
+		h.apiRestoreApiKeys(w, r)
 	case strings.HasPrefix(path, "/api-keys/") && strings.HasSuffix(path, "/reset-usage") && r.Method == "POST":
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/api-keys/"), "/reset-usage")
 		h.apiResetApiKeyUsage(w, r, id)

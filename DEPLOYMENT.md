@@ -366,3 +366,63 @@ go build -o kiro-go .
 
 Mở <http://localhost:8080/admin>. Khi chạy local (không container), browser và
 loopback server cùng máy nên **không cần** đặt `LOOPBACK_HOST=0.0.0.0`.
+
+---
+
+## 9. Backup & chuyển sang VPS mới
+
+Toàn bộ state của app nằm trong **`data/config.json`** (accounts + token, API key +
+usage, settings, thống kê). Không có database nào khác.
+
+### 9.1. Chuyển cả hệ thống
+
+`docker compose down` trước khi copy: counter usage/stats chỉ được flush ra đĩa mỗi
+30s, `down` gửi SIGTERM để app flush nốt phần còn treo trước khi thoát.
+
+```bash
+# --- VPS cũ ---
+docker compose down
+tar czf ~/kiro-backup-$(date +%F).tar.gz data/ .env
+
+# --- chuyển ---
+scp ~/kiro-backup-*.tar.gz user@vps-moi:~/
+
+# --- VPS mới ---
+git clone <repo> Kiro-Go && cd Kiro-Go
+tar xzf ~/kiro-backup-*.tar.gz
+chmod 600 data/config.json
+docker compose up -d --build
+```
+
+Ngoài repo còn phải mang theo: cấu hình nginx (`/etc/nginx/sites-available/`), cert
+Let's Encrypt (`/etc/letsencrypt/`), và jail fail2ban nếu đã cài (template ở `deploy/`).
+Sau đó trỏ lại DNS và kiểm tra `KIRO_TRUST_PROXY` / `KIRO_TRUSTED_PROXY_HOPS` vẫn đúng
+số hop (§5.2).
+
+Không cần backup: request log (ring buffer trong RAM, mất khi restart), docker image
+(build lại từ source), `data/config.json.tmp` (file tạm của atomic write).
+
+> **Lưu ý bảo mật**: `config.json` chứa refresh token của mọi Kiro account ở dạng
+> plaintext. Chỉ chuyển trực tiếp giữa hai server (`scp`), đừng đi qua Drive/pastebin/S3
+> công khai, và xoá tarball ở cả hai máy sau khi xong.
+
+### 9.2. Chỉ chuyển API key của khách
+
+Panel → Settings → API Keys có **Xuất** và **Nhập**:
+
+- **Xuất** mặc định che key (`sk-***abc`) — đây là báo cáo usage, an toàn để gửi khách,
+  và **không nhập lại được**. Tải được cả JSON và CSV.
+- Tick **"Kèm key thật"** để file chứa key cleartext cùng đầy đủ limit/binding/counter.
+  File này khôi phục được bằng Nhập, và là một credential dump của mọi khách trong
+  danh sách — xoá ngay sau khi dùng.
+- **Nhập** nhận cả `{"apiKeys": [...]}` và mảng `[...]` trần, nên `jq '.apiKeys'
+  data/config.json` từ server cũ cũng dán vào được. Key đã tồn tại sẽ bị bỏ qua, nhập
+  hai lần vẫn an toàn. Usage counter được giữ nguyên nên quota khách tiếp tục từ chỗ cũ
+  (muốn chu kỳ mới thì bấm Reset Usage sau khi nhập).
+
+Hai điều cần biết khi chỉ chuyển key:
+
+- **`requireApiKey` không nằm trong file xuất.** Nó là master switch — có key mà cờ này
+  tắt thì `/v1/*` mở cho mọi request. Bật lại bằng toggle trong panel sau khi nhập.
+- **`boundAccountIds` bị loại khi nhập.** Account trên server mới có UUID khác, nên
+  binding cũ là tham chiếu chết; gán lại trong panel nếu cần.

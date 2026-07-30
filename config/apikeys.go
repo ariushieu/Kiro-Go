@@ -96,6 +96,79 @@ func AddApiKeys(entries []ApiKeyEntry) ([]ApiKeyEntry, error) {
 	return out, nil
 }
 
+// ImportApiKeysResult reports the outcome of a batch import.
+type ImportApiKeysResult struct {
+	Imported []ApiKeyEntry // entries actually stored, with their newly assigned IDs
+	Skipped  int           // duplicates of an existing key, or repeats within the batch
+	Invalid  int           // entries with an empty Key value
+}
+
+// ImportApiKeys restores API key entries from an external backup, e.g. the admin
+// panel's cleartext export when moving to a new server.
+//
+// It differs from AddApiKeys in three ways, all of which matter for a restore:
+//   - Duplicates are skipped instead of failing the batch, so re-running the same
+//     import is idempotent and one stale row can't block the other 99.
+//   - Usage counters (current-period and lifetime) are carried over verbatim, so a
+//     customer's quota continues where it left off rather than resetting to full.
+//   - IDs are always regenerated. An incoming ID could collide with an existing
+//     entry, and callers have no reason to trust IDs from a file.
+//
+// BoundAccountIDs are sanitized against the accounts stored *here*: IDs from the
+// source server won't exist after accounts are re-added (they get fresh UUIDs), so
+// stale bindings are dropped at import rather than persisted as dead references.
+func ImportApiKeys(entries []ApiKeyEntry) (ImportApiKeysResult, error) {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	var result ImportApiKeysResult
+	if cfg == nil {
+		return result, errors.New("config not initialized")
+	}
+	if len(entries) == 0 {
+		return result, errors.New("no api keys provided")
+	}
+
+	seen := make(map[string]bool, len(cfg.ApiKeys)+len(entries))
+	for _, existing := range cfg.ApiKeys {
+		seen[existing.Key] = true
+	}
+
+	now := time.Now().Unix()
+	for _, entry := range entries {
+		entry.Key = strings.TrimSpace(entry.Key)
+		if entry.Key == "" {
+			result.Invalid++
+			continue
+		}
+		if seen[entry.Key] {
+			result.Skipped++
+			continue
+		}
+		seen[entry.Key] = true
+
+		entry.ID = newUUID()
+		if entry.CreatedAt == 0 {
+			entry.CreatedAt = now
+		}
+		entry.BoundAccountIDs = sanitizeBoundAccountIDsLocked(entry.BoundAccountIDs)
+		entry.Models = sanitizeModelList(entry.Models)
+		entry.Model = ""
+		result.Imported = append(result.Imported, entry)
+	}
+
+	if len(result.Imported) == 0 {
+		return result, nil
+	}
+
+	oldLen := len(cfg.ApiKeys)
+	cfg.ApiKeys = append(cfg.ApiKeys, result.Imported...)
+	if err := saveLocked(); err != nil {
+		cfg.ApiKeys = cfg.ApiKeys[:oldLen]
+		return ImportApiKeysResult{}, err
+	}
+	return result, nil
+}
+
 // UpdateApiKey applies a patch to an existing API key. Patch semantics:
 //   - Name, Key are overwritten when non-empty in patch.
 //   - Enabled, TokenLimit, CreditLimit are always overwritten (zero values are valid).
