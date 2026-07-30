@@ -1130,9 +1130,23 @@
       '<option value="openai"' + (format === 'openai' ? ' selected' : '') + '>' + escapeHtml(t('openaiCompat.formatOpenAI')) + '</option>' +
       '<option value="anthropic"' + (format === 'anthropic' ? ' selected' : '') + '>' + escapeHtml(t('openaiCompat.formatAnthropic')) + '</option>' +
       '</select><small>' + escapeHtml(t('openaiCompat.formatHint')) + '</small></div>' +
-      '<button class="btn btn-sm btn-primary" data-detail-action="saveAPIFormat" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.save')) + '</button>' +
-      '<div class="detail-grid mt-3">' + detailItem(t('openaiCompat.baseURL'), a.baseURL || '-') +
-      detailItem(t('openaiCompat.models'), (a.models || []).join(', ') || '-') + '</div></div>' +
+      '<div class="form-group"><label for="upstreamBaseURLInput">' + escapeHtml(t('openaiCompat.baseURL')) + '</label>' +
+      '<input type="url" id="upstreamBaseURLInput" value="' + escapeAttr(a.baseURL || '') + '" placeholder="https://api.openai.com/v1" /></div>' +
+      // Blank means "keep the stored key": the cleartext secret is never sent to
+      // the browser, only the mask below.
+      '<div class="form-group"><label for="upstreamApiKeyInput">' + escapeHtml(t('openaiCompat.apiKey')) + '</label>' +
+      '<input type="password" id="upstreamApiKeyInput" autocomplete="new-password" placeholder="' + escapeAttr(t('openaiCompat.apiKeyKeepPlaceholder')) + '" />' +
+      '<small>' + escapeHtml(a.apiKeyMasked
+        ? t('openaiCompat.apiKeyCurrent') + ' ' + a.apiKeyMasked
+        : t('openaiCompat.apiKeyMissing')) + '</small></div>' +
+      '<div class="form-group"><label for="upstreamModelsInput">' + escapeHtml(t('openaiCompat.models')) + '</label>' +
+      '<textarea id="upstreamModelsInput" class="font-mono" rows="4">' + escapeHtml((a.models || []).join('\n')) + '</textarea>' +
+      '<small>' + escapeHtml(t('openaiCompat.modelsHint')) + '</small></div>' +
+      '<div id="upstreamTestResult" class="proxy-import-log hidden mb-3"></div>' +
+      '<div class="upstream-edit-actions">' +
+      '<button class="btn btn-sm btn-outline" data-detail-action="testUpstream" data-id="' + idAttr + '" type="button">' + escapeHtml(t('openaiCompat.testConnection')) + '</button>' +
+      '<button class="btn btn-sm btn-primary" data-detail-action="saveUpstream" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.save')) + '</button>' +
+      '</div></div>' +
       '<div class="detail-section"><h4>' + escapeHtml(t('billing.title')) + '</h4>' +
       '<p class="help-block">' + escapeHtml(t('billing.desc')) + '</p><div class="detail-grid">' +
       billingNumberField('pricingInput', t('billing.inputPrice'), p.inputPerMillion || 0, '0.01') +
@@ -3010,9 +3024,84 @@
       '<div id="apikeyBatchResults" class="mt-3"></div>';
     $('importApikeyBatchBtn').addEventListener('click', importApiKeysBatch);
   }
-  async function saveAPIFormat(id) {
-    const el = $('apiFormatInput');
-    await putAccount(id, { apiFormat: el ? el.value : 'openai' }, t('detail.saved'));
+  // Reads the custom-upstream editor. apiKey is omitted when the field is blank
+  // so the server keeps the stored secret (its PUT ignores an empty apiKey).
+  function readUpstreamEdit() {
+    const models = $('upstreamModelsInput').value.split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+    const body = {
+      apiFormat: ($('apiFormatInput') || {}).value || 'openai',
+      baseURL: $('upstreamBaseURLInput').value.trim(),
+      models
+    };
+    const key = $('upstreamApiKeyInput').value.trim();
+    if (key) body.apiKey = key;
+    return body;
+  }
+  async function saveUpstream(id) {
+    const body = readUpstreamEdit();
+    if (!body.baseURL) return toastWarning(t('openaiCompat.baseURLRequired'));
+    if (!body.models.length) return toastWarning(t('openaiCompat.modelsRequired'));
+    await putAccount(id, body, t('detail.saved'));
+  }
+  // Probes whatever is currently in the form, not what is saved, so the admin can
+  // verify a change before committing it.
+  async function testUpstreamConnection(id) {
+    const box = $('upstreamTestResult');
+    const edit = readUpstreamEdit();
+    const payload = {
+      accountId: id,
+      baseURL: edit.baseURL,
+      apiFormat: edit.apiFormat,
+      model: edit.models[0] || ''
+    };
+    if (edit.apiKey) payload.apiKey = edit.apiKey;
+
+    box.classList.remove('hidden');
+    box.innerHTML = '<p class="help-block">' + escapeHtml(t('openaiCompat.testRunning')) + '</p>';
+    try {
+      const res = await api('/upstream/test', { method: 'POST', body: JSON.stringify(payload) });
+      const d = await res.json();
+      box.innerHTML = renderUpstreamTestResult(d);
+      const applyBtn = $('upstreamApplyModelsBtn');
+      if (applyBtn) {
+        applyBtn.addEventListener('click', () => {
+          $('upstreamModelsInput').value = (d.models || []).join('\n');
+          toastPrimary(t('openaiCompat.modelsFilled'));
+        });
+      }
+    } catch (e) {
+      box.innerHTML = '<p class="help-block error-text">' + escapeHtml(t('login.connectError')) + '</p>';
+    }
+  }
+  function renderUpstreamTestResult(d) {
+    const icon = s => s === 'ok' ? '✓' : s === 'skipped' ? '–' : '✗';
+    const label = step => {
+      if (step.step === 'listModels') return t('openaiCompat.stepListModels');
+      if (step.step === 'chat') return t('openaiCompat.stepChat');
+      return step.step;
+    };
+    let html = '<div class="proxy-import-summary">' + escapeHtml(
+      d.success ? t('openaiCompat.testOk') : t('openaiCompat.testFailed')) + '</div>';
+    for (const step of d.steps || []) {
+      const cls = step.status === 'ok' ? '' : step.status === 'skipped' ? ' muted-text' : ' error-text';
+      html += '<div class="proxy-import-row' + cls + '">' +
+        escapeHtml(icon(step.status) + ' ' + label(step)) +
+        (step.detail ? escapeHtml(' — ' + step.detail) : '') + '</div>';
+    }
+    if ((d.models || []).length) {
+      html += '<div class="proxy-import-row">' +
+        escapeHtml(t('openaiCompat.testModelsFound', d.models.length)) +
+        ' <button class="btn btn-xs btn-outline" id="upstreamApplyModelsBtn" type="button">' +
+        escapeHtml(t('openaiCompat.applyModels')) + '</button></div>';
+    }
+    if (d.reply) {
+      html += '<div class="proxy-import-row">' +
+        escapeHtml(t('openaiCompat.testReply') + ' "' + d.reply + '"') + '</div>';
+    }
+    if (!d.steps && d.error) {
+      html += '<div class="proxy-import-row error-text">' + escapeHtml(d.error) + '</div>';
+    }
+    return html;
   }
   function readPricing(prefix) {
     const number = id => Math.max(0, parseFloat($(prefix + id).value) || 0);
@@ -3059,11 +3148,49 @@
       '<input type="number" id="openaiWeight" value="1" min="1" max="10" /></div>' +
       '<div class="form-group"><label>' + escapeHtml(t('detail.proxyURL')) + '</label>' +
       '<input type="text" id="openaiProxyURL" placeholder="socks5://host:port" /></div>' +
+      '<div id="openaiTestResult" class="proxy-import-log hidden mb-3"></div>' +
       '<div class="modal-footer">' +
       '<button class="btn btn-secondary" data-modal-goto="add" type="button">' + escapeHtml(t('common.back')) + '</button>' +
+      '<button class="btn btn-outline" id="openaiTestBtn" type="button">' + escapeHtml(t('openaiCompat.testConnection')) + '</button>' +
       '<button class="btn btn-primary" id="addOpenAICompatBtn" type="button">' + escapeHtml(t('common.add')) + '</button>' +
       '</div>';
     $('addOpenAICompatBtn').addEventListener('click', addOpenAICompatible);
+    $('openaiTestBtn').addEventListener('click', testNewOpenAICompatible);
+  }
+  // Test before the account exists: everything comes from the form, so unlike the
+  // detail-modal probe there is no stored key to fall back on.
+  async function testNewOpenAICompatible() {
+    const baseURL = $('openaiBaseURL').value.trim();
+    const apiKey = $('openaiApiKey').value.trim();
+    if (!baseURL) return toastWarning(t('openaiCompat.baseURLRequired'));
+    if (!apiKey) return toastWarning(t('openaiCompat.apiKeyRequired'));
+    const models = $('openaiModels').value.split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+    const box = $('openaiTestResult');
+    box.classList.remove('hidden');
+    box.innerHTML = '<p class="help-block">' + escapeHtml(t('openaiCompat.testRunning')) + '</p>';
+    try {
+      const res = await api('/upstream/test', {
+        method: 'POST',
+        body: JSON.stringify({
+          baseURL,
+          apiKey,
+          apiFormat: $('openaiAPIFormat').value,
+          model: models[0] || '',
+          proxyURL: $('openaiProxyURL').value.trim()
+        })
+      });
+      const d = await res.json();
+      box.innerHTML = renderUpstreamTestResult(d);
+      const applyBtn = $('upstreamApplyModelsBtn');
+      if (applyBtn) {
+        applyBtn.addEventListener('click', () => {
+          $('openaiModels').value = (d.models || []).join('\n');
+          toastPrimary(t('openaiCompat.modelsFilled'));
+        });
+      }
+    } catch (e) {
+      box.innerHTML = '<p class="help-block error-text">' + escapeHtml(t('login.connectError')) + '</p>';
+    }
   }
   function modalKiro(title, body) {
     title.textContent = t('modal.kiroTitle');
@@ -4595,7 +4722,8 @@
       const a = b.dataset.detailAction;
       if (a === 'saveMachineId') saveMachineId(id);
       else if (a === 'saveWeight') saveWeight(id);
-      else if (a === 'saveAPIFormat') saveAPIFormat(id);
+      else if (a === 'saveUpstream') saveUpstream(id);
+      else if (a === 'testUpstream') testUpstreamConnection(id);
       else if (a === 'savePricing') savePricing(id);
       else if (a === 'toggleOverage') toggleOverageSwitch(id, b);
       else if (a === 'refreshOverage') refreshAccountOverage(id);

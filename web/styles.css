@@ -255,6 +255,10 @@ pre,
   color: var(--success);
 }
 
+/* .error-text is what app.js emits on failure rows; it was never defined, so
+   those rows rendered in the default colour. Alias it onto the existing token
+   rather than adding a second red. */
+.error-text,
 .danger-text {
   color: var(--destructive);
 }
@@ -2275,6 +2279,12 @@ body:has(#tabConsole:not(.hidden)) #mainPage > .container {
 }
 /* "include real keys" toggle under the export list — matches .export-row's
    checkbox so the two don't look like different controls. */
+/* Test-connection + Save sit together under the custom-upstream editor. */
+.upstream-edit-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
 .export-secrets-row {
   display: flex;
   align-items: center;

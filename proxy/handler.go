@@ -2844,6 +2844,10 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiAddAccount(w, r)
 	case path == "/accounts/batch" && r.Method == "POST":
 		h.apiBatchAccounts(w, r)
+	// Probes a custom upstream's URL/key/model before the admin saves it, so it
+	// deliberately does not live under /accounts/<id>/ — there may be no account yet.
+	case path == "/upstream/test" && r.Method == "POST":
+		h.apiTestUpstreamConnection(w, r)
 	// models/refresh 必须在通用 /refresh 前匹配，否则会被误拦截
 	case path == "/accounts/models/refresh" && r.Method == "POST":
 		h.apiRefreshAllAccountsModels(w, r)
@@ -3012,11 +3016,15 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 			"nickname":          a.Nickname,
 			"authMethod":        a.AuthMethod,
 			"provider":          a.Provider,
-			"backend":           a.EffectiveBackend(),
-			"apiFormat":         a.EffectiveAPIFormat(),
-			"baseURL":           a.BaseURL,
-			"models":            a.Models,
-			"pricing":           a.Pricing,
+			"backend":   a.EffectiveBackend(),
+			"apiFormat": a.EffectiveAPIFormat(),
+			"baseURL":   a.BaseURL,
+			"models":    a.Models,
+			// Masked only: the panel shows which upstream key is in use and sends a
+			// blank field to mean "keep it", so the cleartext secret never needs to
+			// reach the browser.
+			"apiKeyMasked": maskUpstreamApiKey(a.ApiKey),
+			"pricing":      a.Pricing,
 			"region":            a.Region,
 			"enabled":           a.Enabled,
 			"banStatus":         a.BanStatus,

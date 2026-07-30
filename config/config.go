@@ -250,6 +250,15 @@ func normalizeAccountModels(models []string) []string {
 	return out
 }
 
+// NormalizeUpstreamBaseURL validates and canonicalises a custom-upstream base
+// URL. It is exported so callers that probe a URL before an account exists (the
+// admin test-connection endpoint) enforce exactly the same rules as account
+// creation — notably https-only except for loopback, which is what keeps the
+// admin API from being used as an SSRF probe against internal hosts.
+func NormalizeUpstreamBaseURL(raw string) (string, error) {
+	return normalizeOpenAIBaseURL(raw)
+}
+
 func normalizeOpenAIBaseURL(raw string) (string, error) {
 	raw = strings.TrimRight(strings.TrimSpace(raw), "/")
 	if raw == "" {
