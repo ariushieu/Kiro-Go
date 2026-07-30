@@ -8,7 +8,26 @@ import (
 	"time"
 )
 
+// isolateConfig points the package-global config at a fresh temp file so a test
+// neither reads nor leaves behind another test's settings.
+//
+// The quota tests below all consult config.GetAllowOverUsage(), which is global
+// mutable state. Without this, a test that enables over-usage leaks the flag into
+// every test that runs after it and the failures depend on -shuffle ordering.
+func isolateConfig(t *testing.T) {
+	t.Helper()
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := config.UpdateAllowOverUsage(false); err != nil {
+			t.Fatalf("restoring allowOverUsage: %v", err)
+		}
+	})
+}
+
 func TestOverLimitAccountsAreSkippedByDefault(t *testing.T) {
+	isolateConfig(t)
 	p := &AccountPool{}
 	normal := config.Account{ID: "normal"}
 	overLimit := config.Account{ID: "over", UsageCurrent: 10, UsageLimit: 10}
@@ -27,6 +46,7 @@ func TestOverLimitAccountsAreSkippedByDefault(t *testing.T) {
 }
 
 func TestOverLimitAccountsCanBeSelectedWhenUpstreamOverageEnabled(t *testing.T) {
+	isolateConfig(t)
 	p := &AccountPool{}
 	overLimit := config.Account{
 		ID:            "over",
@@ -47,6 +67,7 @@ func TestOverLimitAccountsCanBeSelectedWhenUpstreamOverageEnabled(t *testing.T) 
 }
 
 func TestOverLimitAccountsRemainSkippedWhenUpstreamOverageDisabled(t *testing.T) {
+	isolateConfig(t)
 	p := &AccountPool{}
 	overLimit := config.Account{
 		ID:            "over",
@@ -227,6 +248,12 @@ func TestAnySupportsModel(t *testing.T) {
 	}
 }
 
+// Both cases below must ask for a routable model. "model" is not in the claude-*
+// family, so accountHasModel rejects every Kiro account and the pool returns nil
+// no matter what excluded says — which made the nil-expecting test pass for the
+// wrong reason and the other one fail outright.
+const routableTestModel = "claude-sonnet-4.5"
+
 func TestGetNextForModelExcludingSkipsExcludedAccounts(t *testing.T) {
 	p := newTestPool(
 		config.Account{ID: "a"},
@@ -234,7 +261,7 @@ func TestGetNextForModelExcludingSkipsExcludedAccounts(t *testing.T) {
 	)
 	excluded := map[string]bool{"a": true}
 	for i := 0; i < 5; i++ {
-		acc := p.GetNextForModelExcluding("model", excluded)
+		acc := p.GetNextForModelExcluding(routableTestModel, excluded)
 		if acc == nil {
 			t.Fatal("expected account b, got nil")
 		}
@@ -246,9 +273,19 @@ func TestGetNextForModelExcludingSkipsExcludedAccounts(t *testing.T) {
 
 func TestGetNextForModelExcludingReturnsNilWhenAllExcluded(t *testing.T) {
 	p := newTestPool(config.Account{ID: "only"})
-	acc := p.GetNextForModelExcluding("model", map[string]bool{"only": true})
+	acc := p.GetNextForModelExcluding(routableTestModel, map[string]bool{"only": true})
 	if acc != nil {
 		t.Fatalf("expected nil when only account is excluded, got %q", acc.ID)
+	}
+}
+
+// A model no account serves must yield nil rather than falling back to Kiro, and
+// this has to hold with an empty excluded set too: the fallback scan at the end of
+// GetNextForModelExcluding is a separate code path from the round-robin loop.
+func TestGetNextForModelExcludingRejectsUnroutableModel(t *testing.T) {
+	p := newTestPool(config.Account{ID: "a"}, config.Account{ID: "b"})
+	if acc := p.GetNextForModelExcluding("llama-3-70b", nil); acc != nil {
+		t.Fatalf("expected nil for a model no account serves, got %q", acc.ID)
 	}
 }
 
@@ -331,10 +368,7 @@ func TestGetNextForModelExcludingSkipsExcludedAccount(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestReloadKeepsOverQuotaAccountWhenAllowOverUsage(t *testing.T) {
-	cfgFile := filepath.Join(t.TempDir(), "config.json")
-	if err := config.Init(cfgFile); err != nil {
-		t.Fatalf("config.Init: %v", err)
-	}
+	isolateConfig(t)
 	if err := config.AddAccount(config.Account{
 		ID:           "over",
 		Enabled:      true,
@@ -356,10 +390,7 @@ func TestReloadKeepsOverQuotaAccountWhenAllowOverUsage(t *testing.T) {
 }
 
 func TestReloadDropsOverQuotaAccountWhenAllowOverUsageDisabled(t *testing.T) {
-	cfgFile := filepath.Join(t.TempDir(), "config.json")
-	if err := config.Init(cfgFile); err != nil {
-		t.Fatalf("config.Init: %v", err)
-	}
+	isolateConfig(t)
 	if err := config.AddAccount(config.Account{
 		ID:           "over",
 		Enabled:      true,
