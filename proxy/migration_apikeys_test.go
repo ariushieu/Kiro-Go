@@ -124,9 +124,20 @@ func (m *migrationServer) callAPI(apiKey, clientIP string) (int, string) {
 	return res.StatusCode, string(raw)
 }
 
-// limitNoticeText is the built-in blocked-key reply, used to tell "key accepted" apart
-// from "key valid but blocked" given both return HTTP 200.
-const limitNoticeText = "reached its limit or has expired"
+// limitNoticeFragment is a fragment of the built-in blocked-key reply, used to tell
+// "key accepted" apart from "key valid but blocked" given both return HTTP 200.
+//
+// Taken from the live default instead of a hardcoded literal, so rewording or
+// translating that message cannot silently turn these assertions into no-ops.
+func limitNoticeFragment(t *testing.T) string {
+	t.Helper()
+	full := config.GetLimitNoticeMessage()
+	fields := strings.Fields(full)
+	if len(fields) < 3 {
+		t.Fatalf("limit notice %q is too short to match on", full)
+	}
+	return strings.Join(fields[:3], " ")
+}
 
 // seedCustomer creates a key the way the admin panel does, over HTTP.
 func (m *migrationServer) seedCustomer(t *testing.T, payload string) string {
@@ -272,7 +283,7 @@ func TestMigrationKeysOnlyEndToEnd(t *testing.T) {
 	// "no accounts", which is expected here); an unknown key must be rejected outright.
 	if code, body := newVPS.callAPI(plainKey, ""); code == http.StatusUnauthorized {
 		t.Fatalf("migrated key rejected as unauthorized: %s", body)
-	} else if strings.Contains(body, limitNoticeText) {
+	} else if strings.Contains(body, limitNoticeFragment(t)) {
 		t.Fatalf("migrated key was treated as blocked: %s", body)
 	}
 	if code, _ := newVPS.callAPI("sk-never-existed", ""); code != http.StatusUnauthorized {
@@ -281,11 +292,11 @@ func TestMigrationKeysOnlyEndToEnd(t *testing.T) {
 
 	// The IP allowlist must still bite on the new server. A blocked key returns 200 plus
 	// the limit notice rather than an error status, so assert on the body.
-	if _, body := newVPS.callAPI(ipKey, "203.0.113.99"); !strings.Contains(body, limitNoticeText) {
+	if _, body := newVPS.callAPI(ipKey, "203.0.113.99"); !strings.Contains(body, limitNoticeFragment(t)) {
 		t.Fatalf("ip-restricted key should be blocked for an unlisted IP, got: %s", body)
 	}
 	// ...and still be served for the address it was restored with.
-	if _, body := newVPS.callAPI(ipKey, "198.51.100.7"); strings.Contains(body, limitNoticeText) {
+	if _, body := newVPS.callAPI(ipKey, "198.51.100.7"); strings.Contains(body, limitNoticeFragment(t)) {
 		t.Fatalf("ip-restricted key must be served for its allowlisted IP, got: %s", body)
 	}
 }
@@ -440,7 +451,7 @@ func TestMigrationExhaustedKeyStaysExhausted(t *testing.T) {
 	}
 	// Confirm it is genuinely blocked before the move, so the post-move assertion means
 	// something.
-	if _, body := oldVPS.callAPI(key, "198.51.100.1"); !strings.Contains(body, limitNoticeText) {
+	if _, body := oldVPS.callAPI(key, "198.51.100.1"); !strings.Contains(body, limitNoticeFragment(t)) {
 		t.Fatalf("key should already be exhausted on the old server, got: %s", body)
 	}
 
@@ -466,7 +477,7 @@ func TestMigrationExhaustedKeyStaysExhausted(t *testing.T) {
 		t.Fatalf("exhausted key came back under limit: used=%d limit=%d",
 			restored.TokensUsed, restored.TokenLimit)
 	}
-	if _, body := newVPS.callAPI(key, "198.51.100.1"); !strings.Contains(body, limitNoticeText) {
+	if _, body := newVPS.callAPI(key, "198.51.100.1"); !strings.Contains(body, limitNoticeFragment(t)) {
 		t.Fatalf("exhausted key must stay blocked after migration, got: %s", body)
 	}
 }

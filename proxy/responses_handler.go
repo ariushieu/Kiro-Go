@@ -130,7 +130,7 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 
 	// Valid-but-blocked key: render the limit-notice as a normal assistant reply.
 	if limitNoticeRequested(r.Context()) {
-		h.sendResponsesNotice(w, actualModel, req.Stream, config.GetLimitNoticeMessage(), respID, &req)
+		h.sendResponsesNotice(w, actualModel, req.Stream, limitNoticeClientMessage(), respID, &req)
 		return
 	}
 
@@ -243,7 +243,7 @@ func (h *Handler) handleResponsesNonStream(
 			return
 		}
 		h.recordFailureForApiKey(apiKeyID, "openai", model, 503, "No available accounts", startedAt)
-		h.sendOpenAIError(w, 503, "server_error", noAccountsClientMessage)
+		h.sendOpenAIError(w, 503, "server_error", noAccountsClientMessage())
 		return
 	}
 	status, clientMsg := clientFacingUpstreamError(lastErr)
@@ -736,7 +736,7 @@ func (h *Handler) handleResponsesStream(
 				"status": "failed",
 				"error": map[string]string{
 					"type":    "server_error",
-					"message": noAccountsClientMessage,
+					"message": noAccountsClientMessage(),
 				},
 			},
 		})

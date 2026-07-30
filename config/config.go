@@ -517,6 +517,15 @@ type Config struct {
 	// Empty falls back to a built-in default at render time.
 	LimitNoticeMessage string `json:"limitNoticeMessage,omitempty"`
 
+	// SupportContact is appended to the messages customers see when a request fails
+	// for a reason they cannot fix themselves (pool exhausted, upstream throttled,
+	// key expired) so they know where to ask.
+	//
+	// Empty means "not configured" and renders the built-in default — an unset field
+	// and a cleared one are the same value in Go, so there is no way to distinguish
+	// them. Set it to "-" to suppress the contact line instead.
+	SupportContact string `json:"supportContact,omitempty"`
+
 	// ForceModel, when non-empty, overrides the model of EVERY incoming request
 	// (after thinking-suffix parsing) with this Kiro model ID. It takes precedence
 	// over a per-key model binding and the client-requested model. Empty = disabled.
@@ -1343,13 +1352,66 @@ func UpdateThinkingConfig(suffix, openaiFormat, claudeFormat string) error {
 }
 
 // defaultLimitNoticeMessage is served when no custom LimitNoticeMessage is configured.
-const defaultLimitNoticeMessage = "Your API key has reached its limit or has expired. Please contact the administrator to renew it."
+// Vietnamese to match the other customer-facing messages (the contact line appended
+// to it is Vietnamese too, so an English default read as half-translated).
+const defaultLimitNoticeMessage = "API key của bạn đã hết hạn hoặc hết lượt sử dụng. Vui lòng liên hệ để gia hạn."
+
+// defaultSupportContact is used when SupportContact is unset.
+const defaultSupportContact = "t.me/ariushieu"
+
+// supportContactSuppressed is the sentinel that turns the contact line off. Needed
+// because an empty string cannot be told apart from "never configured".
+const supportContactSuppressed = "-"
+
+// GetSupportContact returns the configured support contact, or the built-in default
+// when unset. Returns "" when the admin has explicitly suppressed it.
+func GetSupportContact() string {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	// These messages used to be constants, so they were renderable before config
+	// was loaded. Keep that property: a nil cfg falls back to the default rather
+	// than panicking on an error path.
+	if cfg == nil {
+		return defaultSupportContact
+	}
+	contact := strings.TrimSpace(cfg.SupportContact)
+	if contact == "" {
+		return defaultSupportContact
+	}
+	if contact == supportContactSuppressed {
+		return ""
+	}
+	return contact
+}
+
+// SetSupportContact persists the support contact shown in customer-facing errors.
+func SetSupportContact(contact string) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	cfg.SupportContact = strings.TrimSpace(contact)
+	return Save()
+}
+
+// WithSupportContact appends the support contact to a customer-facing message.
+// Used for failures the customer cannot act on alone, so they know where to ask.
+// Returns msg unchanged when no contact is configured, or when msg already names it
+// (a custom LimitNoticeMessage may well include it already).
+func WithSupportContact(msg string) string {
+	contact := GetSupportContact()
+	if contact == "" || strings.Contains(msg, contact) {
+		return msg
+	}
+	return strings.TrimRight(msg, " ") + " Chi tiết: " + contact
+}
 
 // GetLimitNoticeMessage returns the configured limit-notice message, or the built-in
 // default when none is set.
 func GetLimitNoticeMessage() string {
 	cfgLock.RLock()
 	defer cfgLock.RUnlock()
+	if cfg == nil {
+		return defaultLimitNoticeMessage
+	}
 	if strings.TrimSpace(cfg.LimitNoticeMessage) == "" {
 		return defaultLimitNoticeMessage
 	}

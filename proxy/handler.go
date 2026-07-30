@@ -24,12 +24,30 @@ import (
 
 const tokenRefreshSkewSeconds int64 = 120
 
-// noAccountsClientMessage 是账号池无可用账号时返回给客户的 503 文案（客户视角是
-// "服务器维护中"）；管理端请求日志仍记录真实原因 "No available accounts"。
-const noAccountsClientMessage = "Server đang bảo trì, vui lòng thử lại sau."
+// noAccountsClientText / rateLimitedClientText 是给客户看的基础文案。
+// 真实原因（"No available accounts" 等）只写管理端请求日志，绝不透传。
+const noAccountsClientText = "Server đang bảo trì, vui lòng thử lại sau."
+const rateLimitedClientText = "Hệ thống đang bận, vui lòng thử lại sau ít phút."
 
-// rateLimitedClientMessage 是全部账号配额耗尽（上游 429/throttle）时给客户的 429 文案。
-const rateLimitedClientMessage = "Hệ thống đang bận, vui lòng thử lại sau ít phút."
+// noAccountsClientMessage() / rateLimitedClientMessage() 在基础文案后附上支持联系方式。
+// 这两个是函数而非常量：联系方式可在面板里改，必须每次渲染时读取。
+// 客户对这两类故障无能为力，所以要告诉他们去哪问。
+func noAccountsClientMessage() string {
+	return config.WithSupportContact(noAccountsClientText)
+}
+
+func rateLimitedClientMessage() string {
+	return config.WithSupportContact(rateLimitedClientText)
+}
+
+// limitNoticeClientMessage 是 key 被停用/过期/超额时的聊天提示，附上联系方式
+// —— 这正是客户最需要找到卖家的时刻。
+//
+// 只在渲染给客户时追加：设置接口必须返回管理员填写的原文，否则联系方式会被
+// 存回配置，越存越长。
+func limitNoticeClientMessage() string {
+	return config.WithSupportContact(config.GetLimitNoticeMessage())
+}
 
 // claudeModelNotFoundMessage / openAIModelNotFoundMessage 仿照各家 API 对未知
 // 模型的原生 404 文案，让客户端 SDK 按原样呈现。
@@ -1151,7 +1169,7 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 
 	// Valid-but-blocked key: render the limit-notice as a normal assistant reply.
 	if limitNoticeRequested(r.Context()) {
-		h.sendClaudeNotice(w, req.Model, req.Stream, config.GetLimitNoticeMessage())
+		h.sendClaudeNotice(w, req.Model, req.Stream, limitNoticeClientMessage())
 		return
 	}
 
@@ -1679,7 +1697,7 @@ func (h *Handler) handleClaudeStream(ctx context.Context, w http.ResponseWriter,
 			return
 		}
 		h.recordFailureForApiKey(apiKeyID, "claude", model, 503, "No available accounts", startedAt)
-		h.sendClaudeError(w, 503, "api_error", noAccountsClientMessage)
+		h.sendClaudeError(w, 503, "api_error", noAccountsClientMessage())
 		return
 	}
 
@@ -1988,7 +2006,7 @@ func (h *Handler) handleClaudeNonStream(ctx context.Context, w http.ResponseWrit
 			return
 		}
 		h.recordFailureForApiKey(apiKeyID, "claude", model, 503, "No available accounts", startedAt)
-		h.sendClaudeError(w, 503, "api_error", noAccountsClientMessage)
+		h.sendClaudeError(w, 503, "api_error", noAccountsClientMessage())
 		return
 	}
 
@@ -2097,7 +2115,7 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 
 	// Valid-but-blocked key: render the limit-notice as a normal assistant reply.
 	if limitNoticeRequested(r.Context()) {
-		h.sendOpenAINotice(w, req.Model, req.Stream, config.GetLimitNoticeMessage())
+		h.sendOpenAINotice(w, req.Model, req.Stream, limitNoticeClientMessage())
 		return
 	}
 
@@ -2525,7 +2543,7 @@ func (h *Handler) handleOpenAIStream(ctx context.Context, w http.ResponseWriter,
 			h.sendOpenAIError(w, 404, "invalid_request_error", openAIModelNotFoundMessage(model))
 			return
 		}
-		h.sendOpenAIError(w, 503, "server_error", noAccountsClientMessage)
+		h.sendOpenAIError(w, 503, "server_error", noAccountsClientMessage())
 		return
 	}
 
@@ -2640,7 +2658,7 @@ func (h *Handler) handleOpenAINonStream(ctx context.Context, w http.ResponseWrit
 			return
 		}
 		h.recordFailureForApiKey(apiKeyID, "openai", model, 503, "No available accounts", startedAt)
-		h.sendOpenAIError(w, 503, "server_error", noAccountsClientMessage)
+		h.sendOpenAIError(w, 503, "server_error", noAccountsClientMessage())
 		return
 	}
 
@@ -4223,6 +4241,7 @@ func (h *Handler) apiGetSettings(w http.ResponseWriter, r *http.Request) {
 		"maxPayloadBytes":    config.GetMaxPayloadBytes(),
 		"publicBaseURL":      config.GetPublicBaseURL(),
 		"limitNoticeMessage": config.GetLimitNoticeMessage(),
+		"supportContact":     config.GetSupportContact(),
 		"forceModel":         config.GetForceModel(),
 		"identityModel":      config.GetIdentityModel(),
 	})
@@ -4280,6 +4299,7 @@ func (h *Handler) apiUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		MaxPayloadBytes    *int    `json:"maxPayloadBytes,omitempty"`
 		PublicBaseURL      *string `json:"publicBaseURL,omitempty"`
 		LimitNoticeMessage *string `json:"limitNoticeMessage,omitempty"`
+		SupportContact     *string `json:"supportContact,omitempty"`
 		ForceModel         *string `json:"forceModel,omitempty"`
 		IdentityModel      *string `json:"identityModel,omitempty"`
 	}
@@ -4326,6 +4346,14 @@ func (h *Handler) apiUpdateSettings(w http.ResponseWriter, r *http.Request) {
 
 	if req.LimitNoticeMessage != nil {
 		if err := config.SetLimitNoticeMessage(strings.TrimSpace(*req.LimitNoticeMessage)); err != nil {
+			w.WriteHeader(500)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+	}
+
+	if req.SupportContact != nil {
+		if err := config.SetSupportContact(*req.SupportContact); err != nil {
 			w.WriteHeader(500)
 			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return

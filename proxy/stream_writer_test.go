@@ -325,7 +325,7 @@ func TestUpstreamTimeoutIsMaskedAsMaintenance(t *testing.T) {
 	if status != http.StatusGatewayTimeout {
 		t.Fatalf("expected 504 for an upstream stall, got %d", status)
 	}
-	if msg != noAccountsClientMessage {
+	if msg != noAccountsClientMessage() {
 		t.Fatalf("expected the maintenance message, got %q", msg)
 	}
 }

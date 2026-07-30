@@ -156,16 +156,16 @@ func statusForUpstreamError(err error) int {
 // 其余错误原样透传。真实原因始终记录在管理端请求日志里。
 func clientFacingUpstreamError(err error) (status int, message string) {
 	if err == nil {
-		return http.StatusServiceUnavailable, noAccountsClientMessage
+		return http.StatusServiceUnavailable, noAccountsClientMessage()
 	}
 	msg := err.Error()
 	switch {
 	case isQuotaErrorMessage(msg):
-		return http.StatusTooManyRequests, rateLimitedClientMessage
+		return http.StatusTooManyRequests, rateLimitedClientMessage()
 	case isUpstreamTimeoutMessage(msg):
 		// 上游卡住是内部故障：原文里带着我们的超时细节，对客户毫无意义，
 		// 一律走维护文案（504 让客户端知道可以重试）。
-		return http.StatusGatewayTimeout, noAccountsClientMessage
+		return http.StatusGatewayTimeout, noAccountsClientMessage()
 	case isOverageErrorMessage(msg),
 		isSuspensionErrorMessage(msg),
 		isProfileUnavailableErrorMessage(msg),
@@ -174,7 +174,7 @@ func clientFacingUpstreamError(err error) (status int, message string) {
 		// 自定义（非 Kiro）上游的错误串里带着第三方原文 body，同样属于内部故障，
 		// 一律伪装成维护文案，绝不透传给客户。
 		isCustomUpstreamErrorMessage(msg):
-		return http.StatusServiceUnavailable, noAccountsClientMessage
+		return http.StatusServiceUnavailable, noAccountsClientMessage()
 	default:
 		return statusForUpstreamError(err), msg
 	}

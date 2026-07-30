@@ -1523,6 +1523,7 @@
     $('maxPayloadBytes').value = String(d.maxPayloadBytes || 2000000);
     if ($('publicBaseURL')) $('publicBaseURL').value = d.publicBaseURL || '';
     if ($('limitNoticeMessage')) $('limitNoticeMessage').value = d.limitNoticeMessage || '';
+    if ($('supportContact')) $('supportContact').value = d.supportContact || '';
     populateForceModelOptions(d.forceModel || '');
     populateIdentityModelOptions(d.identityModel || '');
     await Promise.all([loadThinkingConfig(), loadEndpointConfig(), loadProxyConfig(), loadProxyPool(), loadPromptFilter(), loadApiKeys()]);
@@ -1641,6 +1642,20 @@
       const d = await res.json().catch(() => ({}));
       if (!res.ok || d.success === false) throw new Error(d.error || t('common.saveFailed'));
       toast(t('settings.limitNoticeSaved'), 'success');
+    } catch (e) {
+      toast((e && e.message) || t('common.saveFailed'), 'error');
+    }
+  }
+  async function saveSupportContact() {
+    // Blank means "not configured" and restores the default, so the field is sent
+    // as typed. Use "-" to suppress the contact line entirely.
+    const contact = $('supportContact').value.trim();
+    try {
+      const res = await api('/settings', { method: 'POST', body: JSON.stringify({ supportContact: contact }) });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok || d.success === false) throw new Error(d.error || t('common.saveFailed'));
+      toast(t('settings.supportContactSaved'), 'success');
+      loadSettings();
     } catch (e) {
       toast((e && e.message) || t('common.saveFailed'), 'error');
     }
@@ -4757,6 +4772,8 @@
     if (savePbu) savePbu.addEventListener('click', savePublicBaseURL);
     const saveLn = $('saveLimitNoticeBtn');
     if (saveLn) saveLn.addEventListener('click', saveLimitNotice);
+    const saveSc = $('saveSupportContactBtn');
+    if (saveSc) saveSc.addEventListener('click', saveSupportContact);
     const saveFm = $('saveForceModelBtn');
     if (saveFm) saveFm.addEventListener('click', saveForceModel);
     const saveIm = $('saveIdentityModelBtn');

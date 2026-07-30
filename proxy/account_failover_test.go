@@ -36,13 +36,13 @@ func TestClientFacingUpstreamError(t *testing.T) {
 		wantStatus int
 		wantMsg    string
 	}{
-		{name: "nil", err: nil, wantStatus: http.StatusServiceUnavailable, wantMsg: noAccountsClientMessage},
-		{name: "quota", err: errors.New("HTTP 429: quota exhausted"), wantStatus: http.StatusTooManyRequests, wantMsg: rateLimitedClientMessage},
-		{name: "overage", err: errors.New("HTTP 402 from Kiro IDE: OVERAGE limit exceeded"), wantStatus: http.StatusServiceUnavailable, wantMsg: noAccountsClientMessage},
-		{name: "suspension", err: errors.New("Your User ID temporarily is suspended"), wantStatus: http.StatusServiceUnavailable, wantMsg: noAccountsClientMessage},
-		{name: "profile", err: errors.New("no available Kiro profile"), wantStatus: http.StatusServiceUnavailable, wantMsg: noAccountsClientMessage},
-		{name: "proxy", err: errors.New("proxyconnect tcp: dial tcp 1.2.3.4:1080: connect: connection refused"), wantStatus: http.StatusServiceUnavailable, wantMsg: noAccountsClientMessage},
-		{name: "auth", err: errors.New("Authentication failed - token invalid or expired"), wantStatus: http.StatusServiceUnavailable, wantMsg: noAccountsClientMessage},
+		{name: "nil", err: nil, wantStatus: http.StatusServiceUnavailable, wantMsg: noAccountsClientMessage()},
+		{name: "quota", err: errors.New("HTTP 429: quota exhausted"), wantStatus: http.StatusTooManyRequests, wantMsg: rateLimitedClientMessage()},
+		{name: "overage", err: errors.New("HTTP 402 from Kiro IDE: OVERAGE limit exceeded"), wantStatus: http.StatusServiceUnavailable, wantMsg: noAccountsClientMessage()},
+		{name: "suspension", err: errors.New("Your User ID temporarily is suspended"), wantStatus: http.StatusServiceUnavailable, wantMsg: noAccountsClientMessage()},
+		{name: "profile", err: errors.New("no available Kiro profile"), wantStatus: http.StatusServiceUnavailable, wantMsg: noAccountsClientMessage()},
+		{name: "proxy", err: errors.New("proxyconnect tcp: dial tcp 1.2.3.4:1080: connect: connection refused"), wantStatus: http.StatusServiceUnavailable, wantMsg: noAccountsClientMessage()},
+		{name: "auth", err: errors.New("Authentication failed - token invalid or expired"), wantStatus: http.StatusServiceUnavailable, wantMsg: noAccountsClientMessage()},
 		{name: "passthrough", err: errors.New("Improperly formed request"), wantStatus: http.StatusInternalServerError, wantMsg: "Improperly formed request"},
 
 		// Custom (non-Kiro) upstream errors carry the third-party provider's raw body.
@@ -52,49 +52,49 @@ func TestClientFacingUpstreamError(t *testing.T) {
 			name:       "custom upstream HTTP body",
 			err:        errors.New(`HTTP 500 from OpenAI-compatible upstream: {"error":{"message":"upstream provider xyz.example.com is down"}}`),
 			wantStatus: http.StatusServiceUnavailable,
-			wantMsg:    noAccountsClientMessage,
+			wantMsg:    noAccountsClientMessage(),
 		},
 		{
 			name:       "custom upstream anthropic HTTP body",
 			err:        errors.New(`HTTP 529 from Anthropic-compatible upstream: {"type":"overloaded_error"}`),
 			wantStatus: http.StatusServiceUnavailable,
-			wantMsg:    noAccountsClientMessage,
+			wantMsg:    noAccountsClientMessage(),
 		},
 		{
 			name:       "custom upstream billing wording must not reach customer",
 			err:        errors.New("OpenAI-compatible upstream error: Your credit balance is too low to access the API"),
 			wantStatus: http.StatusServiceUnavailable,
-			wantMsg:    noAccountsClientMessage,
+			wantMsg:    noAccountsClientMessage(),
 		},
 		{
 			name:       "custom upstream anthropic sse error",
 			err:        errors.New("Anthropic-compatible upstream error: unknown upstream error"),
 			wantStatus: http.StatusServiceUnavailable,
-			wantMsg:    noAccountsClientMessage,
+			wantMsg:    noAccountsClientMessage(),
 		},
 		{
 			name:       "custom upstream malformed sse",
 			err:        errors.New("invalid OpenAI-compatible SSE chunk: unexpected end of JSON input"),
 			wantStatus: http.StatusServiceUnavailable,
-			wantMsg:    noAccountsClientMessage,
+			wantMsg:    noAccountsClientMessage(),
 		},
 		{
 			name:       "custom upstream bad baseURL",
 			err:        errors.New("invalid Anthropic-compatible baseURL"),
 			wantStatus: http.StatusServiceUnavailable,
-			wantMsg:    noAccountsClientMessage,
+			wantMsg:    noAccountsClientMessage(),
 		},
 		{
 			name:       "custom upstream misconfigured backend",
 			err:        errors.New(`unsupported custom upstream apiFormat "gemini"`),
 			wantStatus: http.StatusServiceUnavailable,
-			wantMsg:    noAccountsClientMessage,
+			wantMsg:    noAccountsClientMessage(),
 		},
 		{
 			name:       "custom upstream unknown backend",
 			err:        errors.New(`unsupported upstream backend "vertex"`),
 			wantStatus: http.StatusServiceUnavailable,
-			wantMsg:    noAccountsClientMessage,
+			wantMsg:    noAccountsClientMessage(),
 		},
 	}
 
