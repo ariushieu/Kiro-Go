@@ -531,6 +531,7 @@
   "apiKeys.requireWithoutEnabledKeyWarning": "No enabled API key found (legacy keys migrated from older configs are kept disabled). Enabling authentication now will reject every /v1/* request. Enable or create a key first — continue anyway?",
   "apiKeys.add": "Add Key",
   "apiKeys.export.button": "Export",
+  "apiKeys.export.title": "Export API Keys",
   "apiKeys.export.empty": "No API keys to export",
   "apiKeys.export.disabled": "disabled",
   "apiKeys.export.reqMeta": "{0} requests",

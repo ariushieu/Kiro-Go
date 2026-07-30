@@ -773,16 +773,16 @@
       <div class="modal-body">
         <div class="form-group">
           <label data-i18n="apiKeys.import.jsonLabel"></label>
-          <textarea id="apiKeyImportJson" class="font-mono" rows="10"
-            data-i18n-placeholder="apiKeys.import.jsonPlaceholder"></textarea>
+          <div class="input-row">
+            <textarea id="apiKeyImportJson" class="font-mono" rows="10"
+              data-i18n-placeholder="apiKeys.import.jsonPlaceholder"></textarea>
+            <label class="btn btn-outline btn-sm">
+              <i class="fa-solid fa-folder-open"></i>
+              <span data-i18n="apiKeys.import.chooseFile"></span>
+              <input type="file" accept=".json" id="apiKeyImportFile" class="file-input-hidden" />
+            </label>
+          </div>
           <small data-i18n="apiKeys.import.jsonHint"></small>
-        </div>
-        <div class="form-group">
-          <label class="btn btn-outline btn-sm" for="apiKeyImportFile">
-            <i class="fa-solid fa-folder-open"></i>
-            <span data-i18n="apiKeys.import.chooseFile"></span>
-          </label>
-          <input type="file" accept=".json" id="apiKeyImportFile" class="file-input-hidden" />
         </div>
         <div id="apiKeyImportResults" class="proxy-import-log hidden mt-3"></div>
         <div class="modal-footer">

@@ -531,6 +531,7 @@
   "apiKeys.requireWithoutEnabledKeyWarning": "Không tìm thấy API key nào đang bật (key cũ di trú từ cấu hình trước được giữ ở trạng thái tắt). Bật xác thực lúc này sẽ từ chối mọi yêu cầu /v1/*. Hãy bật hoặc tạo key trước — vẫn tiếp tục?",
   "apiKeys.add": "Thêm Key",
   "apiKeys.export.button": "Xuất",
+  "apiKeys.export.title": "Xuất API key",
   "apiKeys.export.empty": "Không có API key nào để xuất",
   "apiKeys.export.disabled": "đã tắt",
   "apiKeys.export.reqMeta": "{0} yêu cầu",

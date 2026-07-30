@@ -2263,7 +2263,27 @@ body:has(#tabApilog:not(.hidden)) #mainPage > .container {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-#exportJsonPreview textarea {
+/* "include real keys" toggle under the export list — matches .export-row's
+   checkbox so the two don't look like different controls. */
+.export-secrets-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+  font-size: 0.8125rem;
+  cursor: pointer;
+  user-select: none;
+}
+.export-secrets-row input[type="checkbox"] {
+  width: 1.05rem;
+  height: 1.05rem;
+  flex: none;
+  margin: 0;
+  accent-color: var(--accent-blue);
+  cursor: pointer;
+}
+#exportJsonPreview textarea,
+#apiKeyExportJsonPreview textarea {
   width: 100%;
   min-height: 12rem;
   max-height: 40vh;

@@ -3559,10 +3559,21 @@
     loadAccounts();
   }
 
+  // exportModal is shared by the account exporter and the API-key exporter, so
+  // retarget its title key on the way in. Setting data-i18n (not textContent)
+  // keeps the title right when applyTranslations() re-runs on a language switch.
+  function setExportModalTitle(key) {
+    const el = document.querySelector('#exportModal .modal-title');
+    if (!el) return;
+    el.dataset.i18n = key;
+    el.textContent = t(key);
+  }
+
   // Export modal
   function showExportModal() {
     if (!accountsData.length) return toastWarning(t('accounts.empty'));
     exportSelectedIds = new Set(accountsData.map(a => a.id));
+    setExportModalTitle('export.title');
     renderExportModal();
     openDialog('exportModal');
   }
@@ -3664,6 +3675,7 @@
     if (!apiKeysCache.length) return toastWarning(t('apiKeys.export.empty'));
     apiKeyExportSelectedIds = new Set(apiKeysCache.map(k => k.id));
     apiKeyExportIncludeSecrets = false;
+    setExportModalTitle('apiKeys.export.title');
     renderApiKeyExportModal();
     openDialog('exportModal');
   }
@@ -3690,11 +3702,11 @@
       }).join('') +
       '</div>' +
       '<div id="apiKeyExportJsonPreview" class="hidden mb-3"><textarea id="apiKeyExportJsonText" readonly class="font-mono"></textarea></div>' +
-      '<label class="flex items-center gap-2 mb-2">' +
+      '<label class="export-secrets-row">' +
       '<input type="checkbox" id="apiKeyExportIncludeSecrets" ' + (apiKeyExportIncludeSecrets ? 'checked' : '') + ' />' +
-      '<span data-i18n="apiKeys.export.includeSecrets">' + escapeHtml(t('apiKeys.export.includeSecrets')) + '</span>' +
+      '<span>' + escapeHtml(t('apiKeys.export.includeSecrets')) + '</span>' +
       '</label>' +
-      '<small class="help-block">' + escapeHtml(t('apiKeys.export.includeSecretsHint')) + '</small>' +
+      '<p class="help-block">' + escapeHtml(t('apiKeys.export.includeSecretsHint')) + '</p>' +
       '<div class="modal-footer">' +
       '<button class="btn btn-secondary" id="apiKeyExportCloseBtn" type="button">' + escapeHtml(t('common.cancel')) + '</button>' +
       '<button class="btn btn-outline" id="apiKeyExportShowJsonBtn" type="button">' + escapeHtml(t('export.showJson')) + '</button>' +

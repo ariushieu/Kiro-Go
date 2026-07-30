@@ -531,6 +531,7 @@
   "apiKeys.requireWithoutEnabledKeyWarning": "当前没有任何已启用的 API Key（包括迁移自旧配置的 legacy key 也是禁用的）。开启鉴权后，所有 /v1/* 请求都会被拒绝。请先启用或新建一个 Key，确定仍要继续吗？",
   "apiKeys.add": "添加 Key",
   "apiKeys.export.button": "导出",
+  "apiKeys.export.title": "导出 API 密钥",
   "apiKeys.export.empty": "没有可导出的 API Key",
   "apiKeys.export.disabled": "已禁用",
   "apiKeys.export.reqMeta": "{0} 次请求",
