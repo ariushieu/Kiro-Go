@@ -1414,8 +1414,18 @@ img.brand-icon {
   margin: 0 auto;
   padding: 1.5rem;
 }
+/* width:100% is load-bearing on these tabs: #mainPage is a column flex
+   container and .container has `margin: 0 auto`, and an auto cross-axis margin
+   suppresses the default stretch — so without it the container shrink-wraps its
+   content and max-width only ever caps, never widens. */
 body:has(#tabApilog:not(.hidden)) #mainPage > .container {
+  width: 100%;
   max-width: 1600px;
+}
+/* Console holds long log lines, so fill the standard container rather than
+   shrink-wrapping to the toolbar like the narrower tabs do. */
+body:has(#tabConsole:not(.hidden)) #mainPage > .container {
+  width: 100%;
 }
 
 /* Stats grid */
@@ -3656,6 +3666,10 @@ body:has(#tabApilog:not(.hidden)) #mainPage > .container {
   gap: 0.35rem;
   font-size: 0.8rem;
   color: var(--muted-foreground);
+  /* Flex would otherwise shrink these below their text width and wrap the
+     label onto a second line, which pushes the whole card header taller. */
+  flex: none;
+  white-space: nowrap;
 }
 .console-field select {
   background: var(--input);
