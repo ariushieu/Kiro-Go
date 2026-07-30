@@ -4733,13 +4733,25 @@ func setWebSecurityHeaders(w http.ResponseWriter) {
 	w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'; object-src 'none'; base-uri 'none'")
 }
 
+// setWebAssetCacheHeaders makes the browser revalidate the panel's HTML/JS/CSS on every
+// load. The filenames carry no version/hash, so with the default heuristic caching a
+// browser keeps serving a stale app.js after an upgrade — index.html can be refreshed
+// while app.js is not, leaving new markup wired to old code (buttons that do nothing).
+// "no-cache" still allows a conditional request: ServeFile answers 304 from ETag/
+// Last-Modified when the file is unchanged, so this costs a round trip, not a re-download.
+func setWebAssetCacheHeaders(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+}
+
 func (h *Handler) serveAdminPage(w http.ResponseWriter, r *http.Request) {
 	setWebSecurityHeaders(w)
+	setWebAssetCacheHeaders(w)
 	http.ServeFile(w, r, "web/index.html")
 }
 
 func (h *Handler) serveStaticFile(w http.ResponseWriter, r *http.Request) {
 	setWebSecurityHeaders(w)
+	setWebAssetCacheHeaders(w)
 	path := strings.TrimPrefix(r.URL.Path, config.GetAdminPath()+"/")
 	http.ServeFile(w, r, "web/"+path)
 }
@@ -4751,6 +4763,7 @@ func (h *Handler) serveStaticFile(w http.ResponseWriter, r *http.Request) {
 // behind the (possibly secret) admin prefix.
 func (h *Handler) serveSharedAsset(w http.ResponseWriter, r *http.Request) {
 	setWebSecurityHeaders(w)
+	setWebAssetCacheHeaders(w)
 	path := strings.TrimPrefix(r.URL.Path, "/assets/")
 	if path == "" || strings.HasSuffix(strings.ToLower(path), ".html") {
 		http.Error(w, "Not Found", 404)
