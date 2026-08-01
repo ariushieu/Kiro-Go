@@ -46,6 +46,18 @@ func isUpstreamTimeoutMessage(msg string) bool {
 		strings.Contains(msg, "timeout awaiting response headers")
 }
 
+// isUpstreamFirstByteTimeoutMessage matches a custom upstream (or a gateway in front
+// of it) giving up because its own origin produced no first byte in time. Cloudflare
+// and several LLM gateways emit this as "first_byte_timeout: upstream produced no
+// response within Ns". It is transient — the origin is usually cold, and a second
+// attempt lands after it has warmed up — and, unlike our own idle watchdog, it fires
+// BEFORE any content reaches us, so retrying the same upstream duplicates nothing.
+func isUpstreamFirstByteTimeoutMessage(msg string) bool {
+	msg = strings.ToLower(msg)
+	return strings.Contains(msg, "first_byte_timeout") ||
+		strings.Contains(msg, "produced no response within")
+}
+
 func isQuotaErrorMessage(msg string) bool {
 	msg = strings.ToLower(msg)
 	return strings.Contains(msg, "429") || strings.Contains(msg, "quota") || strings.Contains(msg, "throttl")
@@ -269,9 +281,9 @@ func (h *Handler) handleAccountFailure(account *config.Account, err error) {
 		switch {
 		case isClientGoneError(err):
 			// Caller left / stream went silent — not the account's fault.
-			logger.Warnf("[AccountFailover] Request abandoned on %s: %v", account.Email, err)
+			logger.Warnf("[AccountFailover] Request abandoned on %s: %v", accountEmailForLog(account), err)
 		case isUpstreamTimeoutMessage(errMsg):
-			logger.Warnf("[AccountFailover] Upstream timeout for %s: %v", account.Email, err)
+			logger.Warnf("[AccountFailover] Upstream timeout for %s: %v", accountEmailForLog(account), err)
 			h.pool.RecordError(account.ID, false)
 		case isProxyErrorMessage(errMsg):
 			logger.Warnf("[AccountFailover] Proxy/dial failure for %s: %v", account.Email, err)
@@ -295,11 +307,11 @@ func (h *Handler) handleAccountFailure(account *config.Account, err error) {
 		// The caller left or the stream went silent. Nothing about the account is
 		// known to be wrong, so do not penalise it at all — counting this as an
 		// error would push healthy accounts into cooldown whenever users cancel.
-		logger.Warnf("[AccountFailover] Request abandoned on %s: %v", account.Email, err)
+		logger.Warnf("[AccountFailover] Request abandoned on %s: %v", accountEmailForLog(account), err)
 	case isUpstreamTimeoutMessage(errMsg):
 		// Upstream stalled. Cool down so the next request rotates away, but never
 		// ban: the credentials are fine and the endpoint usually recovers.
-		logger.Warnf("[AccountFailover] Upstream timeout for %s: %v", account.Email, err)
+		logger.Warnf("[AccountFailover] Upstream timeout for %s: %v", accountEmailForLog(account), err)
 		h.pool.RecordError(account.ID, false)
 	case isProxyErrorMessage(errMsg):
 		// Proxy/dial failure — cool down and rotate; never disable the account
