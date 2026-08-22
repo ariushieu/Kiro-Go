@@ -1659,7 +1659,7 @@ func (h *Handler) handleClaudeStream(ctx context.Context, w http.ResponseWriter,
 			// account would bill a second full generation that nobody reads.
 			if isClientGoneError(err) {
 				logger.Warnf("[Claude] Aborting stream for %s: %v", accountEmailForLog(account), err)
-				h.recordFailureForApiKey(apiKeyID, "claude", upstreamModel, 0, err.Error(), startedAt)
+				h.recordFailureForApiKey(apiKeyID, "claude", model, 0, err.Error(), startedAt)
 				return
 			}
 			if !messageStarted {
@@ -1668,7 +1668,7 @@ func (h *Handler) handleClaudeStream(ctx context.Context, w http.ResponseWriter,
 			// 流已开始，无法再改状态码，但错误文案仍要走客户视角的伪装：
 			// err.Error() 可能带着上游原文（含第三方 body），只有管理端日志记录原文。
 			_, midStreamMsg := clientFacingUpstreamError(err)
-			h.recordFailureForApiKey(apiKeyID, "claude", upstreamModel, 0, err.Error(), startedAt)
+			h.recordFailureForApiKey(apiKeyID, "claude", model, 0, err.Error(), startedAt)
 			h.sendSSE(w, flusher, "error", map[string]interface{}{
 				"type":  "error",
 				"error": map[string]string{"type": "api_error", "message": midStreamMsg},
@@ -1698,7 +1698,7 @@ func (h *Handler) handleClaudeStream(ctx context.Context, w http.ResponseWriter,
 		outputTokens = estimateClaudeOutputTokens(outputContent, thinkingOutput, toolUses)
 
 		sourceCost = effectiveSourceCost(sourceCost, credits)
-		h.recordSuccessForApiKeyWithCost(apiKeyID, inputTokens, outputTokens, credits, sourceCost, upstreamModel, account, "claude", startedAt)
+		h.recordSuccessForApiKeyWithCost(apiKeyID, inputTokens, outputTokens, credits, sourceCost, model, account, "claude", startedAt)
 		h.pool.RecordSuccess(account.ID)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, sourceCost)
 		h.promptCache.Update(account.ID, cacheProfile)
@@ -1726,17 +1726,17 @@ func (h *Handler) handleClaudeStream(ctx context.Context, w http.ResponseWriter,
 
 	if lastErr == nil {
 		if !h.pool.AnySupportsModel(upstreamModel) {
-			h.recordFailureForApiKey(apiKeyID, "claude", upstreamModel, 404, "model not found: "+upstreamModel, startedAt)
+			h.recordFailureForApiKey(apiKeyID, "claude", model, 404, "model not found: "+upstreamModel, startedAt)
 			h.sendClaudeError(w, 404, "not_found_error", claudeModelNotFoundMessage(model))
 			return
 		}
-		h.recordFailureForApiKey(apiKeyID, "claude", upstreamModel, 503, "No available accounts", startedAt)
+		h.recordFailureForApiKey(apiKeyID, "claude", model, 503, "No available accounts", startedAt)
 		h.sendClaudeError(w, 503, "api_error", noAccountsClientMessage())
 		return
 	}
 
 	status, clientMsg := clientFacingUpstreamError(lastErr)
-	h.recordFailureForApiKey(apiKeyID, "claude", upstreamModel, status, lastErr.Error(), startedAt)
+	h.recordFailureForApiKey(apiKeyID, "claude", model, status, lastErr.Error(), startedAt)
 	// Once any byte has left (a heartbeat counts), the status line is committed and
 	// WriteHeader would be a no-op that leaves the client parsing a truncated SSE
 	// stream. Report the failure as an SSE error event instead.
@@ -1815,7 +1815,8 @@ func (h *Handler) recordSuccess(inputTokens, outputTokens int, credits float64) 
 // recordSuccessForApiKey is recordSuccess + per-API-key usage attribution.
 // When apiKeyID is empty (legacy single-key path or unauthenticated path), only the
 // global counters are updated. Persistence errors are logged but do not propagate.
-// model is recorded in the per-request log for the admin API Log view.
+// model MUST be the client-facing label, never the routed upstream model: the
+// same log feeds the public /check page for that key.
 func (h *Handler) recordSuccessForApiKey(apiKeyID string, inputTokens, outputTokens int, credits float64, model string, account *config.Account, endpoint string, startedAt time.Time) {
 	h.recordSuccessForApiKeyWithCost(apiKeyID, inputTokens, outputTokens, credits, credits, model, account, endpoint, startedAt)
 }
@@ -1885,8 +1886,9 @@ func durationMs(startedAt time.Time) int64 {
 	return time.Since(startedAt).Milliseconds()
 }
 
-// recordFailureForApiKey is recordFailure + a failure entry in the per-request log so the
-// admin API Log view shows what went wrong (endpoint, model, status code, error detail).
+// recordFailureForApiKey is recordFailure + a failure entry in the per-request log.
+// model MUST be the client-facing label because customers can read this entry
+// through /v1/key/logs; upstream details belong only in Error/admin diagnostics.
 func (h *Handler) recordFailureForApiKey(apiKeyID, endpoint, model string, statusCode int, errMsg string, startedAt time.Time) {
 	h.recordFailure()
 	if apiKeyID != "" && h.usage != nil {
@@ -1970,7 +1972,7 @@ func (h *Handler) handleClaudeNonStream(ctx context.Context, w http.ResponseWrit
 			// for a response nobody will read.
 			if isClientGoneError(err) {
 				logger.Warnf("[Claude] Aborting request for %s: %v", accountEmailForLog(account), err)
-				h.recordFailureForApiKey(apiKeyID, "claude", upstreamModel, 0, err.Error(), startedAt)
+				h.recordFailureForApiKey(apiKeyID, "claude", model, 0, err.Error(), startedAt)
 				return
 			}
 			continue
@@ -1994,7 +1996,7 @@ func (h *Handler) handleClaudeNonStream(ctx context.Context, w http.ResponseWrit
 		outputTokens = estimateClaudeOutputTokens(finalContent, rawThinkingContent, toolUses)
 
 		sourceCost = effectiveSourceCost(sourceCost, credits)
-		h.recordSuccessForApiKeyWithCost(apiKeyID, inputTokens, outputTokens, credits, sourceCost, upstreamModel, account, "claude", startedAt)
+		h.recordSuccessForApiKeyWithCost(apiKeyID, inputTokens, outputTokens, credits, sourceCost, model, account, "claude", startedAt)
 		h.pool.RecordSuccess(account.ID)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, sourceCost)
 		h.promptCache.Update(account.ID, cacheProfile)
@@ -2035,18 +2037,18 @@ func (h *Handler) handleClaudeNonStream(ctx context.Context, w http.ResponseWrit
 
 	if lastErr == nil {
 		if !h.pool.AnySupportsModel(upstreamModel) {
-			h.recordFailureForApiKey(apiKeyID, "claude", upstreamModel, 404, "model not found: "+upstreamModel, startedAt)
+			h.recordFailureForApiKey(apiKeyID, "claude", model, 404, "model not found: "+upstreamModel, startedAt)
 			h.sendClaudeError(w, 404, "not_found_error", claudeModelNotFoundMessage(model))
 			return
 		}
-		h.recordFailureForApiKey(apiKeyID, "claude", upstreamModel, 503, "No available accounts", startedAt)
+		h.recordFailureForApiKey(apiKeyID, "claude", model, 503, "No available accounts", startedAt)
 		h.sendClaudeError(w, 503, "api_error", noAccountsClientMessage())
 		return
 	}
 
 	status, clientMsg := clientFacingUpstreamError(lastErr)
 	applyRetryAfterHeader(w, lastErr)
-	h.recordFailureForApiKey(apiKeyID, "claude", upstreamModel, status, lastErr.Error(), startedAt)
+	h.recordFailureForApiKey(apiKeyID, "claude", model, status, lastErr.Error(), startedAt)
 	h.sendClaudeError(w, status, "api_error", clientMsg)
 }
 
@@ -2508,13 +2510,13 @@ func (h *Handler) handleOpenAIStream(ctx context.Context, w http.ResponseWriter,
 			// Client gone / stream stalled: do not retry onto another account.
 			if isClientGoneError(err) {
 				logger.Warnf("[OpenAI] Aborting stream for %s: %v", accountEmailForLog(account), err)
-				h.recordFailureForApiKey(apiKeyID, "openai", upstreamModel, 0, err.Error(), startedAt)
+				h.recordFailureForApiKey(apiKeyID, "openai", model, 0, err.Error(), startedAt)
 				return
 			}
 			if !responseStarted {
 				continue
 			}
-			h.recordFailureForApiKey(apiKeyID, "openai", upstreamModel, 0, err.Error(), startedAt)
+			h.recordFailureForApiKey(apiKeyID, "openai", model, 0, err.Error(), startedAt)
 			return
 		}
 
@@ -2543,7 +2545,7 @@ func (h *Handler) handleOpenAIStream(ctx context.Context, w http.ResponseWriter,
 		}
 
 		sourceCost = effectiveSourceCost(sourceCost, credits)
-		h.recordSuccessForApiKeyWithCost(apiKeyID, inputTokens, outputTokens, credits, sourceCost, upstreamModel, account, "openai", startedAt)
+		h.recordSuccessForApiKeyWithCost(apiKeyID, inputTokens, outputTokens, credits, sourceCost, model, account, "openai", startedAt)
 		h.pool.RecordSuccess(account.ID)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, sourceCost)
 		logSuspiciousReq("openai", upstreamModel, inputTokens, outputTokens, len(toolCalls) > 0)
@@ -2656,7 +2658,7 @@ func (h *Handler) handleOpenAINonStream(ctx context.Context, w http.ResponseWrit
 			// Client gone / stream stalled: do not retry onto another account.
 			if isClientGoneError(err) {
 				logger.Warnf("[OpenAI] Aborting request for %s: %v", accountEmailForLog(account), err)
-				h.recordFailureForApiKey(apiKeyID, "openai", upstreamModel, 0, err.Error(), startedAt)
+				h.recordFailureForApiKey(apiKeyID, "openai", model, 0, err.Error(), startedAt)
 				return
 			}
 			continue
@@ -2677,7 +2679,7 @@ func (h *Handler) handleOpenAINonStream(ctx context.Context, w http.ResponseWrit
 		outputTokens = estimateOpenAIOutputTokens(finalContent, reasoningContent, toolUses)
 
 		sourceCost = effectiveSourceCost(sourceCost, credits)
-		h.recordSuccessForApiKeyWithCost(apiKeyID, inputTokens, outputTokens, credits, sourceCost, upstreamModel, account, "openai", startedAt)
+		h.recordSuccessForApiKeyWithCost(apiKeyID, inputTokens, outputTokens, credits, sourceCost, model, account, "openai", startedAt)
 		h.pool.RecordSuccess(account.ID)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, sourceCost)
 		logSuspiciousReq("openai", upstreamModel, inputTokens, outputTokens, len(toolUses) > 0)
@@ -2691,18 +2693,18 @@ func (h *Handler) handleOpenAINonStream(ctx context.Context, w http.ResponseWrit
 
 	if lastErr == nil {
 		if !h.pool.AnySupportsModel(upstreamModel) {
-			h.recordFailureForApiKey(apiKeyID, "openai", upstreamModel, 404, "model not found: "+upstreamModel, startedAt)
+			h.recordFailureForApiKey(apiKeyID, "openai", model, 404, "model not found: "+upstreamModel, startedAt)
 			h.sendOpenAIError(w, 404, "invalid_request_error", openAIModelNotFoundMessage(model))
 			return
 		}
-		h.recordFailureForApiKey(apiKeyID, "openai", upstreamModel, 503, "No available accounts", startedAt)
+		h.recordFailureForApiKey(apiKeyID, "openai", model, 503, "No available accounts", startedAt)
 		h.sendOpenAIError(w, 503, "server_error", noAccountsClientMessage())
 		return
 	}
 
 	status, clientMsg := clientFacingUpstreamError(lastErr)
 	applyRetryAfterHeader(w, lastErr)
-	h.recordFailureForApiKey(apiKeyID, "openai", upstreamModel, status, lastErr.Error(), startedAt)
+	h.recordFailureForApiKey(apiKeyID, "openai", model, status, lastErr.Error(), startedAt)
 	h.sendOpenAIError(w, status, errorTypeForOpenAIStatus(status), clientMsg)
 }
 

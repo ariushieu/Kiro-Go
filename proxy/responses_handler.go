@@ -201,7 +201,7 @@ func (h *Handler) handleResponsesNonStream(
 			// Client gone / stream stalled: retrying bills another generation nobody reads.
 			if isClientGoneError(err) {
 				logger.Warnf("[Responses] Aborting request for %s: %v", accountEmailForLog(account), err)
-				h.recordFailureForApiKey(apiKeyID, "responses", upstreamModel, 0, err.Error(), startedAt)
+				h.recordFailureForApiKey(apiKeyID, "responses", model, 0, err.Error(), startedAt)
 				return
 			}
 			continue
@@ -220,7 +220,7 @@ func (h *Handler) handleResponsesNonStream(
 		outputTokens = estimateOpenAIOutputTokens(finalContent, reasoningContent, toolUses)
 
 		sourceCost = effectiveSourceCost(sourceCost, credits)
-		h.recordSuccessForApiKeyWithCost(apiKeyID, inputTokens, outputTokens, credits, sourceCost, upstreamModel, account, "openai", startedAt)
+		h.recordSuccessForApiKeyWithCost(apiKeyID, inputTokens, outputTokens, credits, sourceCost, model, account, "openai", startedAt)
 		h.pool.RecordSuccess(account.ID)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, sourceCost)
 
@@ -242,17 +242,17 @@ func (h *Handler) handleResponsesNonStream(
 
 	if lastErr == nil {
 		if !h.pool.AnySupportsModel(upstreamModel) {
-			h.recordFailureForApiKey(apiKeyID, "openai", upstreamModel, 404, "model not found: "+upstreamModel, startedAt)
+			h.recordFailureForApiKey(apiKeyID, "openai", model, 404, "model not found: "+upstreamModel, startedAt)
 			h.sendOpenAIError(w, 404, "invalid_request_error", openAIModelNotFoundMessage(model))
 			return
 		}
-		h.recordFailureForApiKey(apiKeyID, "openai", upstreamModel, 503, "No available accounts", startedAt)
+		h.recordFailureForApiKey(apiKeyID, "openai", model, 503, "No available accounts", startedAt)
 		h.sendOpenAIError(w, 503, "server_error", noAccountsClientMessage())
 		return
 	}
 	status, clientMsg := clientFacingUpstreamError(lastErr)
 	applyRetryAfterHeader(w, lastErr)
-	h.recordFailureForApiKey(apiKeyID, "openai", upstreamModel, status, lastErr.Error(), startedAt)
+	h.recordFailureForApiKey(apiKeyID, "openai", model, status, lastErr.Error(), startedAt)
 	h.sendOpenAIError(w, status, errorTypeForOpenAIStatus(status), clientMsg)
 }
 
@@ -624,7 +624,7 @@ func (h *Handler) handleResponsesStream(
 				lastErr = err
 				h.handleAccountFailure(account, err)
 				logger.Warnf("[Responses] Aborting stream for %s: %v", accountEmailForLog(account), err)
-				h.recordFailureForApiKey(apiKeyID, "responses", upstreamModel, 0, err.Error(), startedAt)
+				h.recordFailureForApiKey(apiKeyID, "responses", model, 0, err.Error(), startedAt)
 				return
 			}
 			if !responseStarted {
@@ -646,7 +646,7 @@ func (h *Handler) handleResponsesStream(
 					},
 				},
 			})
-			h.recordFailureForApiKey(apiKeyID, "openai", upstreamModel, 0, err.Error(), startedAt)
+			h.recordFailureForApiKey(apiKeyID, "openai", model, 0, err.Error(), startedAt)
 			return
 		}
 
@@ -691,7 +691,7 @@ func (h *Handler) handleResponsesStream(
 		outputTokens = estimateOpenAIOutputTokens(finalContent, reasoning, toolUses)
 
 		sourceCost = effectiveSourceCost(sourceCost, credits)
-		h.recordSuccessForApiKeyWithCost(apiKeyID, inputTokens, outputTokens, credits, sourceCost, upstreamModel, account, "openai", startedAt)
+		h.recordSuccessForApiKeyWithCost(apiKeyID, inputTokens, outputTokens, credits, sourceCost, model, account, "openai", startedAt)
 		h.pool.RecordSuccess(account.ID)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, sourceCost)
 
@@ -718,7 +718,7 @@ func (h *Handler) handleResponsesStream(
 
 	if lastErr == nil {
 		if !h.pool.AnySupportsModel(upstreamModel) {
-			h.recordFailureForApiKey(apiKeyID, "openai", upstreamModel, 404, "model not found: "+upstreamModel, startedAt)
+			h.recordFailureForApiKey(apiKeyID, "openai", model, 404, "model not found: "+upstreamModel, startedAt)
 			send("response.failed", map[string]interface{}{
 				"type": "response.failed",
 				"response": map[string]interface{}{
@@ -732,7 +732,7 @@ func (h *Handler) handleResponsesStream(
 			})
 			return
 		}
-		h.recordFailureForApiKey(apiKeyID, "openai", upstreamModel, 503, "No available accounts", startedAt)
+		h.recordFailureForApiKey(apiKeyID, "openai", model, 503, "No available accounts", startedAt)
 		send("response.failed", map[string]interface{}{
 			"type": "response.failed",
 			"response": map[string]interface{}{
@@ -747,7 +747,7 @@ func (h *Handler) handleResponsesStream(
 		return
 	}
 	status, clientMsg := clientFacingUpstreamError(lastErr)
-	h.recordFailureForApiKey(apiKeyID, "openai", upstreamModel, status, lastErr.Error(), startedAt)
+	h.recordFailureForApiKey(apiKeyID, "openai", model, status, lastErr.Error(), startedAt)
 	send("response.failed", map[string]interface{}{
 		"type": "response.failed",
 		"response": map[string]interface{}{

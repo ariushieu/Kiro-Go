@@ -162,8 +162,16 @@ func TestRefreshModelsCacheDiscoversCustomUpstreamModels(t *testing.T) {
 
 func TestForceModelKeepsClientVisibleModelLabel(t *testing.T) {
 	mustInitConfig(t)
+	requestLog.reset()
+	t.Cleanup(requestLog.reset)
 	if err := config.SetForceModel("real-upstream-model"); err != nil {
 		t.Fatalf("set force model: %v", err)
+	}
+	key, err := config.AddApiKey(config.ApiKeyEntry{
+		Name: "transparent", Key: "sk-transparent", Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("add API key: %v", err)
 	}
 
 	var upstreamModel string
@@ -195,9 +203,13 @@ func TestForceModelKeepsClientVisibleModelLabel(t *testing.T) {
 
 	p := accountpool.GetPool()
 	p.Reload()
-	h := &Handler{pool: p, promptCache: newPromptCacheTracker(defaultPromptCacheTTL)}
+	h := &Handler{
+		pool: p, promptCache: newPromptCacheTracker(defaultPromptCacheTTL),
+		usage: newUsageStats(),
+	}
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
 		`{"model":"client-visible-label","messages":[{"role":"user","content":"hi"}]}`))
+	req = withApiKeyContext(req, &key)
 	rec := httptest.NewRecorder()
 	h.handleOpenAIChat(rec, req)
 
@@ -213,6 +225,41 @@ func TestForceModelKeepsClientVisibleModelLabel(t *testing.T) {
 	}
 	if response["model"] != "client-visible-label" {
 		t.Fatalf("client saw model %#v, want original label", response["model"])
+	}
+
+	usage := h.usage.snapshot(key.ID)
+	if len(usage.ByModel) != 1 || usage.ByModel[0].Model != "client-visible-label" {
+		t.Fatalf("self-service model breakdown leaked upstream model: %#v", usage.ByModel)
+	}
+	infoReq := httptest.NewRequest(http.MethodGet, "/v1/key/info", nil)
+	infoReq.Header.Set("Authorization", "Bearer "+key.Key)
+	infoRec := httptest.NewRecorder()
+	h.apiKeySelfInfo(infoRec, infoReq)
+	if infoRec.Code != http.StatusOK {
+		t.Fatalf("self-service info failed: status=%d body=%s", infoRec.Code, infoRec.Body.String())
+	}
+	var info apiKeySelfInfo
+	if err := json.Unmarshal(infoRec.Body.Bytes(), &info); err != nil {
+		t.Fatalf("decode self-service info: %v", err)
+	}
+	if len(info.ByModel) != 1 || info.ByModel[0].Model != "client-visible-label" {
+		t.Fatalf("/v1/key/info leaked upstream model: %#v", info.ByModel)
+	}
+	logsReq := httptest.NewRequest(http.MethodGet, "/v1/key/logs", nil)
+	logsReq.Header.Set("Authorization", "Bearer "+key.Key)
+	logsRec := httptest.NewRecorder()
+	h.apiKeySelfLogs(logsRec, logsReq)
+	if logsRec.Code != http.StatusOK {
+		t.Fatalf("self-service logs failed: status=%d body=%s", logsRec.Code, logsRec.Body.String())
+	}
+	var logs struct {
+		Logs []apiKeySelfLogEntry `json:"logs"`
+	}
+	if err := json.Unmarshal(logsRec.Body.Bytes(), &logs); err != nil {
+		t.Fatalf("decode self-service logs: %v", err)
+	}
+	if len(logs.Logs) != 1 || logs.Logs[0].Model != "client-visible-label" {
+		t.Fatalf("self-service request log leaked upstream model: %#v", logs.Logs)
 	}
 }
 

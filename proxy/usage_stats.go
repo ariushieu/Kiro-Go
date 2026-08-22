@@ -75,7 +75,8 @@ func (u *usageStats) getOrInit(id string) *keyUsage {
 	return ku
 }
 
-// recordSuccess tallies a successful request against a key+model. An empty apiKeyID
+// recordSuccess tallies a successful request against a key+client-visible model.
+// Never pass the routed upstream model: this data is returned by /check. An empty apiKeyID
 // (legacy single-key or unauthenticated path) is ignored. Model is normalised to
 // "unknown" when empty so the breakdown never has a blank row.
 func (u *usageStats) recordSuccess(apiKeyID, model string, inTok, cacheTok, outTok int64) {

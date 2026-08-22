@@ -19,7 +19,7 @@ type RequestLogEntry struct {
 	APIKeyID     string  `json:"apiKeyId,omitempty"`
 	APIKeyName   string  `json:"apiKeyName,omitempty"`
 	APIKeyMasked string  `json:"apiKeyMasked,omitempty"`
-	Model        string  `json:"model,omitempty"`
+	Model        string  `json:"model,omitempty"` // client-facing request label; never the routed upstream model
 	AccountID    string  `json:"accountId,omitempty"`
 	AccountEmail string  `json:"accountEmail,omitempty"`
 	InputTokens  int     `json:"inputTokens"`
