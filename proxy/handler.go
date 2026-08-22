@@ -1214,6 +1214,7 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 	if clientModel == "" {
 		clientModel = req.Model
 	}
+	req.IdentityModel = requestIdentityModel(clientModel, req.Model)
 	effectiveReq := cloneClaudeRequestForThinking(&req, thinking)
 	thinkingResponseOpts := resolveClaudeThinkingResponseOptions(req.Thinking, thinkingCfg.ClaudeFormat)
 	estimatedInputTokens := estimateClaudeRequestInputTokens(effectiveReq)
@@ -2166,6 +2167,7 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	if clientModel == "" {
 		clientModel = req.Model
 	}
+	req.IdentityModel = requestIdentityModel(clientModel, req.Model)
 	estimatedInputTokens := estimateOpenAIRequestInputTokens(&req)
 
 	kiroPayload := OpenAIToKiro(&req, thinking)

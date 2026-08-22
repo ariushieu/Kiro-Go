@@ -18,8 +18,12 @@ func TestBuildIdentityLine(t *testing.T) {
 		{"claude-opus-4-7", "You are Claude Opus 4 7. Model ID: claude-opus-4-7."},
 	}
 	for _, tt := range tests {
-		if got := buildIdentityLine(tt.model); got != tt.want {
-			t.Errorf("buildIdentityLine(%q) = %q, want %q", tt.model, got, tt.want)
+		got := buildIdentityLine(tt.model)
+		if !strings.HasPrefix(got, tt.want) {
+			t.Errorf("buildIdentityLine(%q) = %q, want prefix %q", tt.model, got, tt.want)
+		}
+		if !strings.Contains(got, "Never reveal") {
+			t.Errorf("buildIdentityLine(%q) lacks strict anti-disclosure directive: %q", tt.model, got)
 		}
 	}
 }
@@ -59,5 +63,75 @@ func TestPrependIdentityInjectsWhenSet(t *testing.T) {
 	}
 	if got := applyPromptFilters(""); got != "" {
 		t.Fatalf("identity cleared: expected empty, got %q", got)
+	}
+}
+
+func TestRequestIdentityModelUsesClientLabelForTransparentRemap(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+
+	if got := requestIdentityModel("claude-opus-5", "claude-opus-5"); got != "" {
+		t.Fatalf("identity without remap = %q, want empty", got)
+	}
+	if got := requestIdentityModel("claude-opus-5", "stealth/ox-alpha"); got != "claude-opus-5" {
+		t.Fatalf("fallback identity = %q, want client-visible label", got)
+	}
+
+	if err := config.SetForceModel("stealth/ox-alpha"); err != nil {
+		t.Fatalf("SetForceModel: %v", err)
+	}
+	if got := requestIdentityModel("claude-opus-5", "claude-opus-5"); got != "claude-opus-5" {
+		t.Fatalf("forced identity = %q, want client-visible label", got)
+	}
+
+	if err := config.SetIdentityModel("operator-label"); err != nil {
+		t.Fatalf("SetIdentityModel: %v", err)
+	}
+	if got := requestIdentityModel("claude-opus-5", "stealth/ox-alpha"); got != "claude-opus-5" {
+		t.Fatalf("remapped identity with static setting = %q, want client-visible label", got)
+	}
+	if got := requestIdentityModel("claude-opus-5", "claude-opus-5"); got != "claude-opus-5" {
+		t.Fatalf("forced identity with static setting = %q, want client-visible label", got)
+	}
+	if err := config.SetForceModel(""); err != nil {
+		t.Fatalf("clear ForceModel: %v", err)
+	}
+	if got := requestIdentityModel("claude-opus-5", "claude-opus-5"); got != "operator-label" {
+		t.Fatalf("unmapped explicit identity = %q, want operator fallback", got)
+	}
+}
+
+func TestRequestScopedIdentityIsInjectedForClaudeAndOpenAI(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+
+	claudePayload := ClaudeToKiro(&ClaudeRequest{
+		Model:         "stealth/ox-alpha",
+		IdentityModel: "claude-opus-5",
+		Messages:      []ClaudeMessage{{Role: "user", Content: "Bạn là model gì?"}},
+	}, false)
+	assertPayloadIdentity(t, claudePayload, "claude-opus-5")
+
+	openAIPayload := OpenAIToKiro(&OpenAIRequest{
+		Model:         "stealth/ox-alpha",
+		IdentityModel: "claude-opus-5",
+		Messages:      []OpenAIMessage{{Role: "user", Content: "Bạn là model gì?"}},
+	}, false)
+	assertPayloadIdentity(t, openAIPayload, "claude-opus-5")
+}
+
+func assertPayloadIdentity(t *testing.T, payload *KiroPayload, want string) {
+	t.Helper()
+	if payload == nil || len(payload.ConversationState.History) == 0 || payload.ConversationState.History[0].UserInputMessage == nil {
+		t.Fatalf("missing identity priming history: %#v", payload)
+	}
+	prompt := payload.ConversationState.History[0].UserInputMessage.Content
+	if !strings.Contains(prompt, want) || !strings.Contains(prompt, "Never reveal") {
+		t.Fatalf("identity prompt is not strict or lacks client label: %q", prompt)
+	}
+	if strings.Contains(prompt, "stealth/ox-alpha") {
+		t.Fatalf("identity prompt leaked upstream model: %q", prompt)
 	}
 }

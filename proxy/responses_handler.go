@@ -126,6 +126,7 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 	if clientModel == "" {
 		clientModel = actualModel
 	}
+	openaiReq.IdentityModel = requestIdentityModel(clientModel, actualModel)
 
 	estimatedInputTokens := estimateOpenAIRequestInputTokens(openaiReq)
 	kiroPayload := OpenAIToKiro(openaiReq, thinking)

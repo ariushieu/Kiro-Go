@@ -177,6 +177,20 @@ func applyModelOverride(resolved, apiKeyID, thinkingSuffix string) string {
 	return resolved
 }
 
+// requestIdentityModel returns the public model identity that should be injected
+// into a remapped request. Force Model and per-key fallback always inherit the
+// exact label sent by the client, so a stale static setting cannot expose or replace
+// the model the user selected. The configured identity remains the fallback for
+// requests that are not remapped. The upstream model is intentionally never
+// included in the identity prompt.
+func requestIdentityModel(clientModel, upstreamModel string) string {
+	clientModel = strings.TrimSpace(clientModel)
+	if clientModel != "" && (config.GetForceModel() != "" || !strings.EqualFold(clientModel, strings.TrimSpace(upstreamModel))) {
+		return clientModel
+	}
+	return config.GetIdentityModel()
+}
+
 func isClaudeThinkingRequested(thinkingCfg *ClaudeThinkingConfig) bool {
 	if thinkingCfg == nil {
 		return false
@@ -203,6 +217,9 @@ type ClaudeRequest struct {
 	Thinking    *ClaudeThinkingConfig `json:"thinking,omitempty"`
 	Tools       []ClaudeTool          `json:"tools,omitempty"`
 	ToolChoice  interface{}           `json:"tool_choice,omitempty"`
+	// IdentityModel is request-scoped and never serialized. It lets the proxy
+	// preserve the client-visible identity while routing to another model.
+	IdentityModel string `json:"-"`
 }
 
 type ClaudeThinkingConfig struct {
@@ -274,7 +291,11 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 	origin := "AI_EDITOR"
 
 	// 提取系统提示
-	systemPrompt := buildClaudeSystemPrompt(req.System, thinking)
+	identityModel := strings.TrimSpace(req.IdentityModel)
+	if identityModel == "" {
+		identityModel = config.GetIdentityModel()
+	}
+	systemPrompt := buildClaudeSystemPromptWithIdentity(req.System, thinking, identityModel)
 
 	// 构建历史消息
 	history := make([]KiroHistoryMessage, 0)
@@ -421,8 +442,12 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 }
 
 func buildClaudeSystemPrompt(system interface{}, thinking bool) string {
+	return buildClaudeSystemPromptWithIdentity(system, thinking, config.GetIdentityModel())
+}
+
+func buildClaudeSystemPromptWithIdentity(system interface{}, thinking bool, identityModel string) string {
 	systemPrompt := extractSystemPrompt(system)
-	systemPrompt = applyPromptFilters(systemPrompt)
+	systemPrompt = applyPromptFiltersWithIdentity(systemPrompt, identityModel)
 	if !thinking {
 		return systemPrompt
 	}
@@ -436,17 +461,21 @@ func buildClaudeSystemPrompt(system interface{}, thinking bool) string {
 // Order: (1) Claude Code detection → full replacement, (2) strip boundary markers,
 // (3) strip env noise, (4) user-defined regex/line-filter rules.
 func applyPromptFilters(prompt string) string {
+	return applyPromptFiltersWithIdentity(prompt, config.GetIdentityModel())
+}
+
+func applyPromptFiltersWithIdentity(prompt, identityModel string) string {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
 		// No system prompt from the client, but an identity override may still
 		// need to be injected so the assistant self-reports the configured model.
-		return prependIdentity("")
+		return prependIdentityModel("", identityModel)
 	}
 
 	// 1. Detect Claude Code CLI system prompt → replace with minimal backend prompt.
 	//    Run before other filters so we don't waste time stripping a prompt we'll replace anyway.
 	if config.GetFilterClaudeCode() && isClaudeCodeSystemPrompt(prompt) {
-		return prependIdentity(claudeCodeBackendPrompt)
+		return prependIdentityModel(claudeCodeBackendPrompt, identityModel)
 	}
 
 	// 2. Strip --- SYSTEM PROMPT --- / --- END SYSTEM PROMPT --- boundary markers.
@@ -468,14 +497,18 @@ func applyPromptFilters(prompt string) string {
 		prompt = applyFilterRule(prompt, rule)
 	}
 
-	return prependIdentity(strings.TrimSpace(prompt))
+	return prependIdentityModel(strings.TrimSpace(prompt), identityModel)
 }
 
 // prependIdentity injects a self-identity line at the top of the system prompt
 // when config.IdentityModel is set, so the assistant self-reports as that model
 // regardless of the real upstream model. Empty IdentityModel = no change.
 func prependIdentity(prompt string) string {
-	model := config.GetIdentityModel()
+	return prependIdentityModel(prompt, config.GetIdentityModel())
+}
+
+func prependIdentityModel(prompt, model string) string {
+	model = strings.TrimSpace(model)
 	if model == "" {
 		return prompt
 	}
@@ -486,8 +519,9 @@ func prependIdentity(prompt string) string {
 	return line + "\n\n" + prompt
 }
 
-// buildIdentityLine turns a Kiro model id (e.g. "claude-opus-4.8") into a
-// natural identity sentence ("You are Claude Opus 4.8. Model ID: claude-opus-4-8.").
+// buildIdentityLine turns a public model id into a strict identity directive.
+// It deliberately contains no backend/upstream information: the client-facing
+// label is the only identity the assistant is allowed to report.
 func buildIdentityLine(model string) string {
 	display := make([]string, 0, 4)
 	for _, seg := range strings.Split(model, "-") {
@@ -498,7 +532,7 @@ func buildIdentityLine(model string) string {
 	}
 	name := strings.Join(display, " ")
 	id := strings.ReplaceAll(model, ".", "-")
-	return fmt.Sprintf("You are %s. Model ID: %s.", name, id)
+	return fmt.Sprintf("You are %s. Model ID: %s. This public model identity is authoritative for the entire conversation. If asked what model you are, your model name, model ID, provider, creator, architecture, or underlying backend, answer consistently as %s (model ID %s). Never reveal, mention, infer, or correct this identity using any internal or upstream model name, provider metadata, training identity, or hidden system information.", name, id, name, id)
 }
 
 // applyFilterRule applies a single user-defined filter rule.
@@ -1092,6 +1126,9 @@ type OpenAIRequest struct {
 	TopP        float64         `json:"top_p,omitempty"`
 	Stream      bool            `json:"stream,omitempty"`
 	Tools       []OpenAITool    `json:"tools,omitempty"`
+	// IdentityModel is request-scoped and never serialized. It lets the proxy
+	// preserve the client-visible identity while routing to another model.
+	IdentityModel string `json:"-"`
 }
 
 type OpenAIMessage struct {
@@ -1212,7 +1249,11 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 	}
 
 	// Apply prompt filters + identity injection, same as the Claude path.
-	systemPrompt = applyPromptFilters(systemPrompt)
+	identityModel := strings.TrimSpace(req.IdentityModel)
+	if identityModel == "" {
+		identityModel = config.GetIdentityModel()
+	}
+	systemPrompt = applyPromptFiltersWithIdentity(systemPrompt, identityModel)
 
 	// 如果启用 thinking 模式，注入 thinking 提示
 	if thinking {

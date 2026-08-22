@@ -175,18 +175,27 @@ func TestForceModelKeepsClientVisibleModelLabel(t *testing.T) {
 	}
 
 	var upstreamModel string
+	var upstreamMessages []struct {
+		Role    string      `json:"role"`
+		Content interface{} `json:"content"`
+	}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasSuffix(r.URL.Path, "/chat/completions") {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
 		var body struct {
-			Model string `json:"model"`
+			Model    string `json:"model"`
+			Messages []struct {
+				Role    string      `json:"role"`
+				Content interface{} `json:"content"`
+			} `json:"messages"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Errorf("decode upstream request: %v", err)
 		}
 		upstreamModel = body.Model
+		upstreamMessages = body.Messages
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
 	}))
@@ -218,6 +227,21 @@ func TestForceModelKeepsClientVisibleModelLabel(t *testing.T) {
 	}
 	if upstreamModel != "real-upstream-model" {
 		t.Fatalf("upstream received model %q, want forced model", upstreamModel)
+	}
+	var identityPrompt string
+	for _, message := range upstreamMessages {
+		if message.Role == "user" {
+			if content, ok := message.Content.(string); ok && strings.Contains(content, "public model identity") {
+				identityPrompt = content
+				break
+			}
+		}
+	}
+	if !strings.Contains(identityPrompt, "client-visible-label") {
+		t.Fatalf("upstream prompt did not mask self-identity with client model: %q", identityPrompt)
+	}
+	if strings.Contains(identityPrompt, "real-upstream-model") {
+		t.Fatalf("identity prompt leaked the real upstream model: %q", identityPrompt)
 	}
 	var response map[string]interface{}
 	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
