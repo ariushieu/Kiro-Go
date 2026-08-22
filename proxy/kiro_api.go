@@ -219,38 +219,60 @@ func ListAvailableModels(account *config.Account) ([]ModelInfo, error) {
 		return nil, fmt.Errorf("resolve profileArn: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/ListAvailableModels?origin=AI_EDITOR&maxResults=50", kiroRestAPIBase)
-	url = regionalizeURL(url, account)
-	url = withProfileArnQuery(url, account)
+	models := make([]ModelInfo, 0, 64)
+	seen := make(map[string]bool)
+	nextToken := ""
+	for page := 0; page < 100; page++ {
+		endpoint := fmt.Sprintf("%s/ListAvailableModels?origin=AI_EDITOR&maxResults=50", kiroRestAPIBase)
+		if nextToken != "" {
+			endpoint += "&nextToken=" + neturl.QueryEscape(nextToken)
+		}
+		endpoint = regionalizeURL(endpoint, account)
+		endpoint = withProfileArnQuery(endpoint, account)
 
-	resp, err := doRESTWithProxySwap(account, func() (*http.Request, error) {
-		req, err := http.NewRequest("GET", url, nil)
+		resp, err := doRESTWithProxySwap(account, func() (*http.Request, error) {
+			req, err := http.NewRequest("GET", endpoint, nil)
+			if err != nil {
+				return nil, err
+			}
+			setKiroHeaders(req, account)
+			if account.AuthMethod == "external_idp" {
+				req.Header.Set("TokenType", "EXTERNAL_IDP")
+			}
+			return req, nil
+		})
 		if err != nil {
 			return nil, err
 		}
-		setKiroHeaders(req, account)
-		if account.AuthMethod == "external_idp" {
-			req.Header.Set("TokenType", "EXTERNAL_IDP")
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
 		}
-		return req, nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+		var result struct {
+			Models    []ModelInfo `json:"models"`
+			NextToken string      `json:"nextToken"`
+		}
+		decodeErr := json.NewDecoder(resp.Body).Decode(&result)
+		resp.Body.Close()
+		if decodeErr != nil {
+			return nil, decodeErr
+		}
+		for _, model := range result.Models {
+			key := strings.ToLower(strings.TrimSpace(model.ModelId))
+			if key == "" || seen[key] {
+				continue
+			}
+			seen[key] = true
+			models = append(models, model)
+		}
+		nextToken = strings.TrimSpace(result.NextToken)
+		if nextToken == "" {
+			return models, nil
+		}
 	}
-
-	var result struct {
-		Models []ModelInfo `json:"models"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
-	}
-	return result.Models, nil
+	return nil, fmt.Errorf("ListAvailableModels exceeded pagination limit")
 }
 
 // ResolveProfileArn returns the account profile ARN, fetching and caching it

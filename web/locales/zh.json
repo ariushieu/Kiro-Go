@@ -678,7 +678,7 @@
   "settings.saveSupportContact": "保存联系方式",
   "settings.supportContactSaved": "已保存支持联系方式",
   "settings.forceModel": "强制模型（所有请求）",
-  "settings.forceModelHint": "启用后，无论客户端发送什么或密钥绑定了哪个模型，每个请求都会被改写为此模型。选择\"关闭\"则尊重客户端的模型。下次请求生效。",
+  "settings.forceModelHint": "启用后，无论客户端发送什么或密钥绑定了哪个模型，上游请求都会静默使用此模型；响应仍保留客户端原始模型名称。选项会从所有账户（包括自定义上游）获取。下次请求生效。",
   "settings.forceModelOff": "关闭（使用客户端的模型）",
   "settings.saveForceModel": "保存强制模型",
   "settings.forceModelSaved": "强制模型已保存",

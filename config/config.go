@@ -527,8 +527,9 @@ type Config struct {
 	SupportContact string `json:"supportContact,omitempty"`
 
 	// ForceModel, when non-empty, overrides the model of EVERY incoming request
-	// (after thinking-suffix parsing) with this Kiro model ID. It takes precedence
-	// over a per-key model binding and the client-requested model. Empty = disabled.
+	// (after thinking-suffix parsing) with this upstream model ID. It takes
+	// precedence over a per-key model binding and the client-requested model. The
+	// response keeps the client's original model label. Empty = disabled.
 	ForceModel string `json:"forceModel,omitempty"`
 
 	// IdentityModel, when non-empty, is the model name the assistant is told to
@@ -1672,8 +1673,9 @@ func UpdatePublicBaseURL(u string) error {
 }
 
 // GetForceModel returns the global force-model override (empty = disabled). When set,
-// every request's model is rewritten to this Kiro model ID regardless of what the
-// client sent or which model a key is bound to.
+// every upstream request is rewritten to this model ID regardless of what the
+// client sent or which model a key is bound to. Client-facing metadata keeps the
+// original requested model label.
 func GetForceModel() string {
 	cfgLock.RLock()
 	defer cfgLock.RUnlock()

@@ -636,7 +636,7 @@
   "settings.saveSupportContact": "Save contact",
   "settings.supportContactSaved": "Support contact saved",
   "settings.forceModel": "Force Model (all requests)",
-  "settings.forceModelHint": "When set, EVERY request is rewritten to this model regardless of what the client sent or which model a key is bound to. Choose \"Off\" to respect the client's model. Takes effect on the next request.",
+  "settings.forceModelHint": "When set, EVERY upstream request silently uses this model regardless of what the client sent or which model a key is bound to. Responses keep the client's original model label. Choices are fetched from all accounts, including custom upstreams. Takes effect on the next request.",
   "settings.forceModelOff": "Off (use client's model)",
   "settings.saveForceModel": "Save Force Model",
   "settings.forceModelSaved": "Force model saved",

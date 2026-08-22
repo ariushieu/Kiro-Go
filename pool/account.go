@@ -212,15 +212,19 @@ func (p *AccountPool) GetModelList(accountID string) []string {
 }
 
 // accountHasModel checks model support according to the upstream backend.
-// Kiro keeps its discovered model cache; OpenAI-compatible accounts use the
-// explicit patterns persisted on the account (exact IDs, "*", or a suffix
-// wildcard such as "gpt-*").
+// Both Kiro and custom upstreams can have a discovered model cache. Custom
+// upstreams additionally keep supporting the explicit patterns persisted on
+// the account (exact IDs, "*", or a suffix wildcard such as "gpt-*") so a
+// provider without /v1/models remains routable.
 func (p *AccountPool) accountHasModel(account *config.Account, model string) bool {
 	if account == nil {
 		return false
 	}
 	requested := strings.ToLower(strings.TrimSpace(model))
 	if account.EffectiveBackend() == config.BackendOpenAICompatible {
+		if list, ok := p.modelLists[account.ID]; ok && list[requested] {
+			return true
+		}
 		for _, pattern := range account.Models {
 			if modelPatternMatches(pattern, requested) {
 				return true
@@ -251,6 +255,9 @@ func (p *AccountPool) hasOpenAICompatibleModel(model string) bool {
 		account := &p.accounts[i]
 		if account.EffectiveBackend() != config.BackendOpenAICompatible || !account.Enabled {
 			continue
+		}
+		if list, ok := p.modelLists[account.ID]; ok && list[model] {
+			return true
 		}
 		for _, pattern := range account.Models {
 			if modelPatternMatches(pattern, model) {

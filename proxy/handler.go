@@ -724,7 +724,7 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 添加别名模型
-	models = append(models,
+	models = appendUniqueModelResponses(models,
 		buildModelInfo("auto", "kiro-proxy", true),
 		buildModelInfo("gpt-4o", "kiro-proxy", true),
 		buildModelInfo("gpt-4", "kiro-proxy", true),
@@ -744,15 +744,34 @@ func buildAnthropicModelsResponse(cached []ModelInfo, thinkingSuffix string) []m
 	}
 
 	models := make([]map[string]interface{}, 0, len(cached)*2)
-	if len(cached) > 0 {
-		for _, m := range cached {
-			supportsImage := modelSupportsImage(m.InputTypes)
-			models = append(models, buildModelInfo(m.ModelId, "anthropic", supportsImage))
-			// 自动生成 thinking 变体
-			models = append(models, buildModelInfo(m.ModelId+thinkingSuffix, "anthropic", supportsImage))
+	for _, m := range cached {
+		if strings.TrimSpace(m.ModelId) == "" {
+			continue
+		}
+		supportsImage := modelSupportsImage(m.InputTypes)
+		models = appendUniqueModelResponses(models, buildModelInfo(m.ModelId, "upstream", supportsImage))
+		// 自动生成 thinking 变体
+		if thinkingSuffix != "" {
+			models = appendUniqueModelResponses(models, buildModelInfo(m.ModelId+thinkingSuffix, "upstream", supportsImage))
 		}
 	}
 	return models
+}
+
+func appendUniqueModelResponses(existing []map[string]interface{}, incoming ...map[string]interface{}) []map[string]interface{} {
+	seen := make(map[string]bool, len(existing)+len(incoming))
+	for _, model := range existing {
+		seen[strings.ToLower(strings.TrimSpace(fmt.Sprint(model["id"])))] = true
+	}
+	for _, model := range incoming {
+		id := strings.ToLower(strings.TrimSpace(fmt.Sprint(model["id"])))
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		existing = append(existing, model)
+	}
+	return existing
 }
 
 func fallbackAnthropicModels(thinkingSuffix string) []map[string]interface{} {
@@ -817,7 +836,10 @@ func buildModelInfo(id, ownedBy string, supportsImage bool) map[string]interface
 	}
 }
 
-// refreshModelsCache 从 Kiro API 拉取模型列表并缓存
+// refreshModelsCache fetches and merges the live model catalogue from every
+// enabled account. Custom upstreams are queried through their /v1/models
+// endpoint and fall back to their configured model patterns when the endpoint
+// is unavailable.
 func (h *Handler) refreshModelsCache() {
 	accounts := config.GetEnabledAccounts()
 	if len(accounts) == 0 {
@@ -827,30 +849,17 @@ func (h *Handler) refreshModelsCache() {
 	aggregated := make([]ModelInfo, 0)
 	for i := range accounts {
 		account := &accounts[i]
-		if account.EffectiveBackend() != config.BackendKiro {
-			models := configuredAccountModels(account)
-			h.pool.SetModelList(account.ID, account.Models)
-			aggregated = mergeUniqueModels(aggregated, models)
-			continue
-		}
-		if err := h.ensureValidToken(account); err != nil {
-			logger.Warnf("[ModelsCache] Skip %s token refresh failed: %v", account.Email, err)
-			h.handleAccountFailure(account, err)
-			continue
-		}
-
-		models, err := ListAvailableModels(account)
+		models, err := h.loadAccountModels(context.Background(), account)
 		if err != nil {
 			logger.Warnf("[ModelsCache] Failed to refresh for %s: %v", account.Email, err)
-			h.handleAccountFailure(account, err)
+			if account.EffectiveBackend() == config.BackendKiro {
+				h.handleAccountFailure(account, err)
+			}
+		}
+		if len(models) == 0 {
 			continue
 		}
-		// 缓存每账号可用模型，用于路由时过滤
-		modelIDs := make([]string, 0, len(models))
-		for _, m := range models {
-			modelIDs = append(modelIDs, m.ModelId)
-		}
-		h.pool.SetModelList(account.ID, modelIDs)
+		h.pool.SetModelList(account.ID, modelIDsFromInfo(models))
 		aggregated = mergeUniqueModels(aggregated, models)
 	}
 
@@ -866,51 +875,72 @@ func (h *Handler) refreshModelsCache() {
 // fetchAndCacheAccountModels 为单个账号拉取并写入模型缓存。
 // 同时更新 pool 的路由缓存与全局聚合模型列表。
 func (h *Handler) fetchAndCacheAccountModels(account *config.Account) error {
-	if account.EffectiveBackend() != config.BackendKiro {
-		models := configuredAccountModels(account)
-		h.pool.SetModelList(account.ID, account.Models)
+	models, err := h.loadAccountModels(context.Background(), account)
+	if len(models) > 0 {
+		h.pool.SetModelList(account.ID, modelIDsFromInfo(models))
+
+		// 合并到聚合缓存
 		h.modelsCacheMu.Lock()
 		h.cachedModels = mergeUniqueModels(h.cachedModels, models)
 		h.modelsCacheTime = time.Now().Unix()
 		h.modelsCacheMu.Unlock()
-		return nil
 	}
-	if err := h.ensureValidToken(account); err != nil {
-		return fmt.Errorf("token refresh failed: %w", err)
-	}
-	models, err := ListAvailableModels(account)
 	if err != nil {
 		return err
 	}
-	modelIDs := make([]string, 0, len(models))
-	for _, m := range models {
-		modelIDs = append(modelIDs, m.ModelId)
-	}
-	h.pool.SetModelList(account.ID, modelIDs)
-
-	// 合并到聚合缓存
-	h.modelsCacheMu.Lock()
-	h.cachedModels = mergeUniqueModels(h.cachedModels, models)
-	h.modelsCacheTime = time.Now().Unix()
-	h.modelsCacheMu.Unlock()
 
 	logger.Infof("[ModelsCache] Refreshed %d models for account %s", len(models), account.Email)
 	return nil
+}
+
+func (h *Handler) loadAccountModels(ctx context.Context, account *config.Account) ([]ModelInfo, error) {
+	if account == nil {
+		return nil, fmt.Errorf("missing account")
+	}
+	if account.EffectiveBackend() != config.BackendKiro {
+		listed, err := ListCustomUpstreamModels(ctx, account)
+		models := modelInfoFromIDs(listed, "Discovered custom upstream model")
+		models = mergeUniqueModels(models, configuredAccountModels(account))
+		return models, err
+	}
+	if err := h.ensureValidToken(account); err != nil {
+		return nil, fmt.Errorf("token refresh failed: %w", err)
+	}
+	return ListAvailableModels(account)
+}
+
+func modelIDsFromInfo(models []ModelInfo) []string {
+	ids := make([]string, 0, len(models))
+	for _, model := range models {
+		if id := strings.TrimSpace(model.ModelId); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+func modelInfoFromIDs(ids []string, description string) []ModelInfo {
+	models := make([]ModelInfo, 0, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		// Wildcards are routing rules, not model IDs, and must never be
+		// advertised to clients as if they were callable names.
+		if id == "" || strings.Contains(id, "*") {
+			continue
+		}
+		models = append(models, ModelInfo{
+			ModelId: id, ModelName: id, Description: description,
+			InputTypes: []string{"TEXT", "IMAGE"}, RateMultiplier: 1,
+		})
+	}
+	return models
 }
 
 func configuredAccountModels(account *config.Account) []ModelInfo {
 	if account == nil {
 		return nil
 	}
-	models := make([]ModelInfo, 0, len(account.Models))
-	for _, id := range account.Models {
-		models = append(models, ModelInfo{
-			ModelId: id, ModelName: id,
-			Description: "Configured OpenAI-compatible upstream model",
-			InputTypes:  []string{"TEXT", "IMAGE"}, RateMultiplier: 1,
-		})
-	}
-	return models
+	return modelInfoFromIDs(account.Models, "Configured custom upstream model")
 }
 
 // apiRefreshAccountModels POST /admin/api/accounts/{id}/models/refresh
@@ -1177,9 +1207,13 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 
 	// 解析模型和 thinking 模式
 	thinkingCfg := config.GetThinkingConfig()
+	clientModel := strings.TrimSpace(req.Model)
 	actualModel, thinking := resolveClaudeThinkingMode(req.Model, req.Thinking, thinkingCfg.Suffix)
 	// Apply global/per-key model override (ForceModel > per-key Model > client model).
 	req.Model = applyModelOverride(actualModel, apiKeyID, thinkingCfg.Suffix)
+	if clientModel == "" {
+		clientModel = req.Model
+	}
 	effectiveReq := cloneClaudeRequestForThinking(&req, thinking)
 	thinkingResponseOpts := resolveClaudeThinkingResponseOptions(req.Thinking, thinkingCfg.ClaudeFormat)
 	estimatedInputTokens := estimateClaudeRequestInputTokens(effectiveReq)
@@ -1190,9 +1224,9 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 
 	// Stream or non-stream
 	if req.Stream {
-		h.handleClaudeStream(r.Context(), w, kiroPayload, req.Model, thinking, thinkingResponseOpts, estimatedInputTokens, cacheProfile, apiKeyID)
+		h.handleClaudeStream(r.Context(), w, kiroPayload, clientModel, req.Model, thinking, thinkingResponseOpts, estimatedInputTokens, cacheProfile, apiKeyID)
 	} else {
-		h.handleClaudeNonStream(r.Context(), w, kiroPayload, req.Model, thinking, thinkingResponseOpts, estimatedInputTokens, cacheProfile, apiKeyID)
+		h.handleClaudeNonStream(r.Context(), w, kiroPayload, clientModel, req.Model, thinking, thinkingResponseOpts, estimatedInputTokens, cacheProfile, apiKeyID)
 	}
 }
 
@@ -1229,7 +1263,7 @@ func (h *Handler) nextAccountForKey(apiKeyID, model string, excluded map[string]
 }
 
 // handleClaudeStream Claude 流式响应
-func (h *Handler) handleClaudeStream(ctx context.Context, w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID string) {
+func (h *Handler) handleClaudeStream(ctx context.Context, w http.ResponseWriter, payload *KiroPayload, model, upstreamModel string, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID string) {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -1282,7 +1316,7 @@ func (h *Handler) handleClaudeStream(ctx context.Context, w http.ResponseWriter,
 	}
 
 	for attempt := 0; attempt < maxAccountRetryAttempts; attempt++ {
-		account := h.nextAccountForKey(apiKeyID, model, excluded)
+		account := h.nextAccountForKey(apiKeyID, upstreamModel, excluded)
 		if account == nil {
 			break
 		}
@@ -1607,7 +1641,7 @@ func (h *Handler) handleClaudeStream(ctx context.Context, w http.ResponseWriter,
 			},
 			OnSourceCost: func(c float64) { sourceCost = c },
 			OnContextUsage: func(pct float64) {
-				realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
+				realInputTokens = int(pct * float64(getContextWindowSize(upstreamModel)) / 100.0)
 			},
 		}
 
@@ -1616,7 +1650,7 @@ func (h *Handler) handleClaudeStream(ctx context.Context, w http.ResponseWriter,
 		// answer with a real 503 instead of a 200 that already sent a ping.
 		sw.arm()
 
-		err := CallUpstreamAPI(ctx, account, model, payload, callback)
+		err := CallUpstreamAPI(ctx, account, upstreamModel, payload, callback)
 		if err != nil {
 			lastErr = err
 			excluded[account.ID] = true
@@ -1625,7 +1659,7 @@ func (h *Handler) handleClaudeStream(ctx context.Context, w http.ResponseWriter,
 			// account would bill a second full generation that nobody reads.
 			if isClientGoneError(err) {
 				logger.Warnf("[Claude] Aborting stream for %s: %v", accountEmailForLog(account), err)
-				h.recordFailureForApiKey(apiKeyID, "claude", model, 0, err.Error(), startedAt)
+				h.recordFailureForApiKey(apiKeyID, "claude", upstreamModel, 0, err.Error(), startedAt)
 				return
 			}
 			if !messageStarted {
@@ -1634,7 +1668,7 @@ func (h *Handler) handleClaudeStream(ctx context.Context, w http.ResponseWriter,
 			// 流已开始，无法再改状态码，但错误文案仍要走客户视角的伪装：
 			// err.Error() 可能带着上游原文（含第三方 body），只有管理端日志记录原文。
 			_, midStreamMsg := clientFacingUpstreamError(err)
-			h.recordFailureForApiKey(apiKeyID, "claude", model, 0, err.Error(), startedAt)
+			h.recordFailureForApiKey(apiKeyID, "claude", upstreamModel, 0, err.Error(), startedAt)
 			h.sendSSE(w, flusher, "error", map[string]interface{}{
 				"type":  "error",
 				"error": map[string]string{"type": "api_error", "message": midStreamMsg},
@@ -1664,11 +1698,11 @@ func (h *Handler) handleClaudeStream(ctx context.Context, w http.ResponseWriter,
 		outputTokens = estimateClaudeOutputTokens(outputContent, thinkingOutput, toolUses)
 
 		sourceCost = effectiveSourceCost(sourceCost, credits)
-		h.recordSuccessForApiKeyWithCost(apiKeyID, inputTokens, outputTokens, credits, sourceCost, model, account, "claude", startedAt)
+		h.recordSuccessForApiKeyWithCost(apiKeyID, inputTokens, outputTokens, credits, sourceCost, upstreamModel, account, "claude", startedAt)
 		h.pool.RecordSuccess(account.ID)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, sourceCost)
 		h.promptCache.Update(account.ID, cacheProfile)
-		logSuspiciousReq("claude", model, inputTokens, outputTokens, len(toolUses) > 0)
+		logSuspiciousReq("claude", upstreamModel, inputTokens, outputTokens, len(toolUses) > 0)
 
 		stopReason := "end_turn"
 		if len(toolUses) > 0 {
@@ -1691,18 +1725,18 @@ func (h *Handler) handleClaudeStream(ctx context.Context, w http.ResponseWriter,
 	}
 
 	if lastErr == nil {
-		if !h.pool.AnySupportsModel(model) {
-			h.recordFailureForApiKey(apiKeyID, "claude", model, 404, "model not found: "+model, startedAt)
+		if !h.pool.AnySupportsModel(upstreamModel) {
+			h.recordFailureForApiKey(apiKeyID, "claude", upstreamModel, 404, "model not found: "+upstreamModel, startedAt)
 			h.sendClaudeError(w, 404, "not_found_error", claudeModelNotFoundMessage(model))
 			return
 		}
-		h.recordFailureForApiKey(apiKeyID, "claude", model, 503, "No available accounts", startedAt)
+		h.recordFailureForApiKey(apiKeyID, "claude", upstreamModel, 503, "No available accounts", startedAt)
 		h.sendClaudeError(w, 503, "api_error", noAccountsClientMessage())
 		return
 	}
 
 	status, clientMsg := clientFacingUpstreamError(lastErr)
-	h.recordFailureForApiKey(apiKeyID, "claude", model, status, lastErr.Error(), startedAt)
+	h.recordFailureForApiKey(apiKeyID, "claude", upstreamModel, status, lastErr.Error(), startedAt)
 	// Once any byte has left (a heartbeat counts), the status line is committed and
 	// WriteHeader would be a no-op that leaves the client parsing a truncated SSE
 	// stream. Report the failure as an SSE error event instead.
@@ -1878,13 +1912,13 @@ func (h *Handler) recordFailure() {
 }
 
 // handleClaudeNonStream Claude 非流式响应
-func (h *Handler) handleClaudeNonStream(ctx context.Context, w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID string) {
+func (h *Handler) handleClaudeNonStream(ctx context.Context, w http.ResponseWriter, payload *KiroPayload, model, upstreamModel string, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID string) {
 	startedAt := time.Now()
 	excluded := make(map[string]bool)
 	var lastErr error
 
 	for attempt := 0; attempt < maxAccountRetryAttempts; attempt++ {
-		account := h.nextAccountForKey(apiKeyID, model, excluded)
+		account := h.nextAccountForKey(apiKeyID, upstreamModel, excluded)
 		if account == nil {
 			break
 		}
@@ -1923,11 +1957,11 @@ func (h *Handler) handleClaudeNonStream(ctx context.Context, w http.ResponseWrit
 			},
 			OnSourceCost: func(c float64) { sourceCost = c },
 			OnContextUsage: func(pct float64) {
-				realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
+				realInputTokens = int(pct * float64(getContextWindowSize(upstreamModel)) / 100.0)
 			},
 		}
 
-		err := CallUpstreamAPI(ctx, account, model, payload, callback)
+		err := CallUpstreamAPI(ctx, account, upstreamModel, payload, callback)
 		if err != nil {
 			lastErr = err
 			excluded[account.ID] = true
@@ -1936,7 +1970,7 @@ func (h *Handler) handleClaudeNonStream(ctx context.Context, w http.ResponseWrit
 			// for a response nobody will read.
 			if isClientGoneError(err) {
 				logger.Warnf("[Claude] Aborting request for %s: %v", accountEmailForLog(account), err)
-				h.recordFailureForApiKey(apiKeyID, "claude", model, 0, err.Error(), startedAt)
+				h.recordFailureForApiKey(apiKeyID, "claude", upstreamModel, 0, err.Error(), startedAt)
 				return
 			}
 			continue
@@ -1960,11 +1994,11 @@ func (h *Handler) handleClaudeNonStream(ctx context.Context, w http.ResponseWrit
 		outputTokens = estimateClaudeOutputTokens(finalContent, rawThinkingContent, toolUses)
 
 		sourceCost = effectiveSourceCost(sourceCost, credits)
-		h.recordSuccessForApiKeyWithCost(apiKeyID, inputTokens, outputTokens, credits, sourceCost, model, account, "claude", startedAt)
+		h.recordSuccessForApiKeyWithCost(apiKeyID, inputTokens, outputTokens, credits, sourceCost, upstreamModel, account, "claude", startedAt)
 		h.pool.RecordSuccess(account.ID)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, sourceCost)
 		h.promptCache.Update(account.ID, cacheProfile)
-		logSuspiciousReq("claude", model, inputTokens, outputTokens, len(toolUses) > 0)
+		logSuspiciousReq("claude", upstreamModel, inputTokens, outputTokens, len(toolUses) > 0)
 
 		responseThinkingContent := rawThinkingContent
 		includeEmptyThinkingBlock := thinking && thinkingOpts.OmitDisplay && rawThinkingContent != ""
@@ -2000,19 +2034,19 @@ func (h *Handler) handleClaudeNonStream(ctx context.Context, w http.ResponseWrit
 	}
 
 	if lastErr == nil {
-		if !h.pool.AnySupportsModel(model) {
-			h.recordFailureForApiKey(apiKeyID, "claude", model, 404, "model not found: "+model, startedAt)
+		if !h.pool.AnySupportsModel(upstreamModel) {
+			h.recordFailureForApiKey(apiKeyID, "claude", upstreamModel, 404, "model not found: "+upstreamModel, startedAt)
 			h.sendClaudeError(w, 404, "not_found_error", claudeModelNotFoundMessage(model))
 			return
 		}
-		h.recordFailureForApiKey(apiKeyID, "claude", model, 503, "No available accounts", startedAt)
+		h.recordFailureForApiKey(apiKeyID, "claude", upstreamModel, 503, "No available accounts", startedAt)
 		h.sendClaudeError(w, 503, "api_error", noAccountsClientMessage())
 		return
 	}
 
 	status, clientMsg := clientFacingUpstreamError(lastErr)
 	applyRetryAfterHeader(w, lastErr)
-	h.recordFailureForApiKey(apiKeyID, "claude", model, status, lastErr.Error(), startedAt)
+	h.recordFailureForApiKey(apiKeyID, "claude", upstreamModel, status, lastErr.Error(), startedAt)
 	h.sendClaudeError(w, status, "api_error", clientMsg)
 }
 
@@ -2123,22 +2157,26 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 
 	// 解析模型和 thinking 模式
 	thinkingCfg := config.GetThinkingConfig()
+	clientModel := strings.TrimSpace(req.Model)
 	actualModel, thinking := ParseClientModelAndThinking(req.Model, thinkingCfg.Suffix)
 	// Apply global/per-key model override (ForceModel > per-key Model > client model).
 	req.Model = applyModelOverride(actualModel, apiKeyID, thinkingCfg.Suffix)
+	if clientModel == "" {
+		clientModel = req.Model
+	}
 	estimatedInputTokens := estimateOpenAIRequestInputTokens(&req)
 
 	kiroPayload := OpenAIToKiro(&req, thinking)
 
 	if req.Stream {
-		h.handleOpenAIStream(r.Context(), w, kiroPayload, req.Model, thinking, estimatedInputTokens, apiKeyID)
+		h.handleOpenAIStream(r.Context(), w, kiroPayload, clientModel, req.Model, thinking, estimatedInputTokens, apiKeyID)
 	} else {
-		h.handleOpenAINonStream(r.Context(), w, kiroPayload, req.Model, thinking, estimatedInputTokens, apiKeyID)
+		h.handleOpenAINonStream(r.Context(), w, kiroPayload, clientModel, req.Model, thinking, estimatedInputTokens, apiKeyID)
 	}
 }
 
 // handleOpenAIStream OpenAI 流式响应
-func (h *Handler) handleOpenAIStream(ctx context.Context, w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, apiKeyID string) {
+func (h *Handler) handleOpenAIStream(ctx context.Context, w http.ResponseWriter, payload *KiroPayload, model, upstreamModel string, thinking bool, estimatedInputTokens int, apiKeyID string) {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -2166,7 +2204,7 @@ func (h *Handler) handleOpenAIStream(ctx context.Context, w http.ResponseWriter,
 	var lastErr error
 
 	for attempt := 0; attempt < maxAccountRetryAttempts; attempt++ {
-		account := h.nextAccountForKey(apiKeyID, model, excluded)
+		account := h.nextAccountForKey(apiKeyID, upstreamModel, excluded)
 		if account == nil {
 			break
 		}
@@ -2455,14 +2493,14 @@ func (h *Handler) handleOpenAIStream(ctx context.Context, w http.ResponseWriter,
 			},
 			OnSourceCost: func(c float64) { sourceCost = c },
 			OnContextUsage: func(pct float64) {
-				realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
+				realInputTokens = int(pct * float64(getContextWindowSize(upstreamModel)) / 100.0)
 			},
 		}
 
 		// Committed to streaming: let the heartbeat cover the upstream's silence.
 		sw.arm()
 
-		err := CallUpstreamAPI(ctx, account, model, payload, callback)
+		err := CallUpstreamAPI(ctx, account, upstreamModel, payload, callback)
 		if err != nil {
 			lastErr = err
 			excluded[account.ID] = true
@@ -2470,13 +2508,13 @@ func (h *Handler) handleOpenAIStream(ctx context.Context, w http.ResponseWriter,
 			// Client gone / stream stalled: do not retry onto another account.
 			if isClientGoneError(err) {
 				logger.Warnf("[OpenAI] Aborting stream for %s: %v", accountEmailForLog(account), err)
-				h.recordFailureForApiKey(apiKeyID, "openai", model, 0, err.Error(), startedAt)
+				h.recordFailureForApiKey(apiKeyID, "openai", upstreamModel, 0, err.Error(), startedAt)
 				return
 			}
 			if !responseStarted {
 				continue
 			}
-			h.recordFailureForApiKey(apiKeyID, "openai", model, 0, err.Error(), startedAt)
+			h.recordFailureForApiKey(apiKeyID, "openai", upstreamModel, 0, err.Error(), startedAt)
 			return
 		}
 
@@ -2505,10 +2543,10 @@ func (h *Handler) handleOpenAIStream(ctx context.Context, w http.ResponseWriter,
 		}
 
 		sourceCost = effectiveSourceCost(sourceCost, credits)
-		h.recordSuccessForApiKeyWithCost(apiKeyID, inputTokens, outputTokens, credits, sourceCost, model, account, "openai", startedAt)
+		h.recordSuccessForApiKeyWithCost(apiKeyID, inputTokens, outputTokens, credits, sourceCost, upstreamModel, account, "openai", startedAt)
 		h.pool.RecordSuccess(account.ID)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, sourceCost)
-		logSuspiciousReq("openai", model, inputTokens, outputTokens, len(toolCalls) > 0)
+		logSuspiciousReq("openai", upstreamModel, inputTokens, outputTokens, len(toolCalls) > 0)
 
 		finishReason := "stop"
 		if len(toolCalls) > 0 {
@@ -2539,7 +2577,7 @@ func (h *Handler) handleOpenAIStream(ctx context.Context, w http.ResponseWriter,
 	}
 
 	if lastErr == nil {
-		if !h.pool.AnySupportsModel(model) {
+		if !h.pool.AnySupportsModel(upstreamModel) {
 			h.sendOpenAIError(w, 404, "invalid_request_error", openAIModelNotFoundMessage(model))
 			return
 		}
@@ -2569,13 +2607,13 @@ func (h *Handler) handleOpenAIStream(ctx context.Context, w http.ResponseWriter,
 }
 
 // handleOpenAINonStream OpenAI 非流式响应
-func (h *Handler) handleOpenAINonStream(ctx context.Context, w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, apiKeyID string) {
+func (h *Handler) handleOpenAINonStream(ctx context.Context, w http.ResponseWriter, payload *KiroPayload, model, upstreamModel string, thinking bool, estimatedInputTokens int, apiKeyID string) {
 	startedAt := time.Now()
 	excluded := make(map[string]bool)
 	var lastErr error
 
 	for attempt := 0; attempt < maxAccountRetryAttempts; attempt++ {
-		account := h.nextAccountForKey(apiKeyID, model, excluded)
+		account := h.nextAccountForKey(apiKeyID, upstreamModel, excluded)
 		if account == nil {
 			break
 		}
@@ -2606,11 +2644,11 @@ func (h *Handler) handleOpenAINonStream(ctx context.Context, w http.ResponseWrit
 			OnCredits:    func(c float64) { credits = c },
 			OnSourceCost: func(c float64) { sourceCost = c },
 			OnContextUsage: func(pct float64) {
-				realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
+				realInputTokens = int(pct * float64(getContextWindowSize(upstreamModel)) / 100.0)
 			},
 		}
 
-		err := CallUpstreamAPI(ctx, account, model, payload, callback)
+		err := CallUpstreamAPI(ctx, account, upstreamModel, payload, callback)
 		if err != nil {
 			lastErr = err
 			excluded[account.ID] = true
@@ -2618,7 +2656,7 @@ func (h *Handler) handleOpenAINonStream(ctx context.Context, w http.ResponseWrit
 			// Client gone / stream stalled: do not retry onto another account.
 			if isClientGoneError(err) {
 				logger.Warnf("[OpenAI] Aborting request for %s: %v", accountEmailForLog(account), err)
-				h.recordFailureForApiKey(apiKeyID, "openai", model, 0, err.Error(), startedAt)
+				h.recordFailureForApiKey(apiKeyID, "openai", upstreamModel, 0, err.Error(), startedAt)
 				return
 			}
 			continue
@@ -2639,10 +2677,10 @@ func (h *Handler) handleOpenAINonStream(ctx context.Context, w http.ResponseWrit
 		outputTokens = estimateOpenAIOutputTokens(finalContent, reasoningContent, toolUses)
 
 		sourceCost = effectiveSourceCost(sourceCost, credits)
-		h.recordSuccessForApiKeyWithCost(apiKeyID, inputTokens, outputTokens, credits, sourceCost, model, account, "openai", startedAt)
+		h.recordSuccessForApiKeyWithCost(apiKeyID, inputTokens, outputTokens, credits, sourceCost, upstreamModel, account, "openai", startedAt)
 		h.pool.RecordSuccess(account.ID)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, sourceCost)
-		logSuspiciousReq("openai", model, inputTokens, outputTokens, len(toolUses) > 0)
+		logSuspiciousReq("openai", upstreamModel, inputTokens, outputTokens, len(toolUses) > 0)
 
 		thinkingFormat := config.GetThinkingConfig().OpenAIFormat
 		resp := KiroToOpenAIResponseWithReasoning(finalContent, reasoningContent, toolUses, inputTokens, outputTokens, model, thinkingFormat)
@@ -2652,19 +2690,19 @@ func (h *Handler) handleOpenAINonStream(ctx context.Context, w http.ResponseWrit
 	}
 
 	if lastErr == nil {
-		if !h.pool.AnySupportsModel(model) {
-			h.recordFailureForApiKey(apiKeyID, "openai", model, 404, "model not found: "+model, startedAt)
+		if !h.pool.AnySupportsModel(upstreamModel) {
+			h.recordFailureForApiKey(apiKeyID, "openai", upstreamModel, 404, "model not found: "+upstreamModel, startedAt)
 			h.sendOpenAIError(w, 404, "invalid_request_error", openAIModelNotFoundMessage(model))
 			return
 		}
-		h.recordFailureForApiKey(apiKeyID, "openai", model, 503, "No available accounts", startedAt)
+		h.recordFailureForApiKey(apiKeyID, "openai", upstreamModel, 503, "No available accounts", startedAt)
 		h.sendOpenAIError(w, 503, "server_error", noAccountsClientMessage())
 		return
 	}
 
 	status, clientMsg := clientFacingUpstreamError(lastErr)
 	applyRetryAfterHeader(w, lastErr)
-	h.recordFailureForApiKey(apiKeyID, "openai", model, status, lastErr.Error(), startedAt)
+	h.recordFailureForApiKey(apiKeyID, "openai", upstreamModel, status, lastErr.Error(), startedAt)
 	h.sendOpenAIError(w, status, errorTypeForOpenAIStatus(status), clientMsg)
 }
 
@@ -3032,21 +3070,21 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 		stats := statsMap[a.ID]
 
 		result[i] = map[string]interface{}{
-			"id":                a.ID,
-			"email":             a.Email,
-			"userId":            a.UserId,
-			"nickname":          a.Nickname,
-			"authMethod":        a.AuthMethod,
-			"provider":          a.Provider,
-			"backend":   a.EffectiveBackend(),
-			"apiFormat": a.EffectiveAPIFormat(),
-			"baseURL":   a.BaseURL,
-			"models":    a.Models,
+			"id":         a.ID,
+			"email":      a.Email,
+			"userId":     a.UserId,
+			"nickname":   a.Nickname,
+			"authMethod": a.AuthMethod,
+			"provider":   a.Provider,
+			"backend":    a.EffectiveBackend(),
+			"apiFormat":  a.EffectiveAPIFormat(),
+			"baseURL":    a.BaseURL,
+			"models":     a.Models,
 			// Masked only: the panel shows which upstream key is in use and sends a
 			// blank field to mean "keep it", so the cleartext secret never needs to
 			// reach the browser.
-			"apiKeyMasked": maskUpstreamApiKey(a.ApiKey),
-			"pricing":      a.Pricing,
+			"apiKeyMasked":      maskUpstreamApiKey(a.ApiKey),
+			"pricing":           a.Pricing,
 			"region":            a.Region,
 			"enabled":           a.Enabled,
 			"banStatus":         a.BanStatus,
@@ -4232,6 +4270,18 @@ func (h *Handler) apiGetStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) apiGetSettings(w http.ResponseWriter, r *http.Request) {
+	h.modelsCacheMu.RLock()
+	available := append([]ModelInfo(nil), h.cachedModels...)
+	h.modelsCacheMu.RUnlock()
+	// Configured custom models are available immediately, before the background
+	// live catalogue fetch has completed. Wildcard routing rules are filtered by
+	// configuredAccountModels and therefore never appear as dropdown choices.
+	for _, account := range config.GetEnabledAccounts() {
+		if account.EffectiveBackend() != config.BackendKiro {
+			available = mergeUniqueModels(available, configuredAccountModels(&account))
+		}
+	}
+	availableModels := modelIDsFromInfo(available)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"apiKey":             config.GetApiKey(),
 		"requireApiKey":      config.IsApiKeyRequired(),
@@ -4244,6 +4294,7 @@ func (h *Handler) apiGetSettings(w http.ResponseWriter, r *http.Request) {
 		"supportContact":     config.GetSupportContact(),
 		"forceModel":         config.GetForceModel(),
 		"identityModel":      config.GetIdentityModel(),
+		"availableModels":    availableModels,
 	})
 }
 
@@ -4702,14 +4753,7 @@ func (h *Handler) apiGetAccountModels(w http.ResponseWriter, r *http.Request, id
 		json.NewEncoder(w).Encode(map[string]string{"error": "Account not found"})
 		return
 	}
-	if account.EffectiveBackend() != config.BackendKiro {
-		models := configuredAccountModels(account)
-		h.pool.SetModelList(id, account.Models)
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "models": models})
-		return
-	}
-
-	models, err := ListAvailableModels(account)
+	models, err := h.loadAccountModels(r.Context(), account)
 	if err != nil {
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
@@ -4717,11 +4761,7 @@ func (h *Handler) apiGetAccountModels(w http.ResponseWriter, r *http.Request, id
 	}
 
 	// 同步更新路由缓存
-	modelIDs := make([]string, 0, len(models))
-	for _, m := range models {
-		modelIDs = append(modelIDs, m.ModelId)
-	}
-	h.pool.SetModelList(id, modelIDs)
+	h.pool.SetModelList(id, modelIDsFromInfo(models))
 	h.modelsCacheMu.Lock()
 	h.cachedModels = mergeUniqueModels(h.cachedModels, models)
 	h.modelsCacheTime = time.Now().Unix()
@@ -4735,16 +4775,15 @@ func (h *Handler) apiGetAccountModels(w http.ResponseWriter, r *http.Request, id
 
 // apiGetAccountModelsCached 返回账号已缓存的模型列表（不实时拉取）
 func (h *Handler) apiGetAccountModelsCached(w http.ResponseWriter, r *http.Request, id string) {
-	for _, account := range config.GetAccounts() {
-		if account.ID == id && account.EffectiveBackend() != config.BackendKiro {
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success": true,
-				"models":  account.Models,
-			})
-			return
+	models := h.pool.GetModelList(id)
+	if len(models) == 0 {
+		for _, account := range config.GetAccounts() {
+			if account.ID == id && account.EffectiveBackend() != config.BackendKiro {
+				models = modelIDsFromInfo(configuredAccountModels(&account))
+				break
+			}
 		}
 	}
-	models := h.pool.GetModelList(id)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
 		"models":  models,

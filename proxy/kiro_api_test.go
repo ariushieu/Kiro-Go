@@ -89,6 +89,48 @@ func TestResolveProfileArnFetchesAndCachesProfile(t *testing.T) {
 	}
 }
 
+func TestListAvailableModelsFetchesAllPages(t *testing.T) {
+	account := &config.Account{
+		ID:          "models-pages",
+		AccessToken: "access-token",
+		ProfileArn:  "arn:aws:codewhisperer:us-east-1:1:profile/test",
+		Region:      "us-east-1",
+	}
+	requests := 0
+	kiroRestHttpStore.Store(&http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			requests++
+			if req.URL.Path != "/ListAvailableModels" {
+				t.Fatalf("unexpected path %s", req.URL.Path)
+			}
+			body := `{"models":[{"modelId":"first"},{"modelId":"shared"}],"nextToken":"page-2"}`
+			if token := req.URL.Query().Get("nextToken"); token != "" {
+				if token != "page-2" {
+					t.Fatalf("unexpected nextToken %q", token)
+				}
+				body = `{"models":[{"modelId":"shared"},{"modelId":"second"}]}`
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(body)),
+				Header:     make(http.Header),
+			}, nil
+		}),
+	})
+	t.Cleanup(func() { InitKiroHttpClient("") })
+
+	models, err := ListAvailableModels(account)
+	if err != nil {
+		t.Fatalf("list models: %v", err)
+	}
+	if requests != 2 {
+		t.Fatalf("expected two pages, got %d requests", requests)
+	}
+	if got := modelIDsFromInfo(models); strings.Join(got, ",") != "first,shared,second" {
+		t.Fatalf("unexpected merged models: %v", got)
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {

@@ -153,6 +153,10 @@ Nếu client gửi lên một tên model không tồn tại ở thượng nguồ
 - **Model theo từng Key**: đặt model cho từng Key trong modal API Key.
 
 Thứ tự ưu tiên: Force Model toàn cục > Model theo Key > model client gửi lên.
+Proxy chỉ đổi model khi gọi upstream; trường `model` trả về vẫn giữ tên client đã gửi,
+vì vậy việc fallback hoàn toàn trong suốt với client. Danh sách chọn model được hợp nhất
+từ tất cả tài khoản Kiro và endpoint `/v1/models` của các custom upstream; nếu upstream
+không hỗ trợ endpoint này thì dùng danh sách model đã cấu hình trên tài khoản.
 
 ### Proxy outbound & pool proxy
 

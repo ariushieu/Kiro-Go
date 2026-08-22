@@ -109,6 +109,8 @@ When any API key is enabled, requests must carry a valid key (`Authorization: Be
 - **Per-key Model** (API-key modal): same idea, scoped to one key. Force Model takes precedence.
 - **Identity Model**: only changes how the assistant answers "what model are you?" — it does not change the upstream model.
 
+Overrides are transparent: only the upstream request is rewritten, while response metadata keeps the model label sent by the client. Model choices are merged from every Kiro account and each custom upstream's `/v1/models`; configured account models are used when a custom endpoint cannot list them.
+
 ### Thinking mode
 
 Append a suffix (default `-thinking`) to the model name, e.g. `claude-sonnet-4.5-thinking`. Claude requests with a top-level `thinking` config (`{"type":"enabled","budget_tokens":2048}` or `{"type":"adaptive"}`) also enable it. Output format is configurable in Settings → Thinking Mode.

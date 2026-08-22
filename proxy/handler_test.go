@@ -99,7 +99,7 @@ func TestClaudeNonStreamRetriesNextAccountAfterPreResponseFailure(t *testing.T) 
 	}
 
 	rec := httptest.NewRecorder()
-	h.handleClaudeNonStream(context.Background(), rec, payload, "claude-sonnet-4.5", false, claudeThinkingResponseOptions{}, 1, nil, "")
+	h.handleClaudeNonStream(context.Background(), rec, payload, "claude-sonnet-4.5", "claude-sonnet-4.5", false, claudeThinkingResponseOptions{}, 1, nil, "")
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected retry to succeed, status=%d body=%s", rec.Code, rec.Body.String())
@@ -121,6 +121,98 @@ func TestClaudeNonStreamRetriesNextAccountAfterPreResponseFailure(t *testing.T) 
 	}
 	if len(resp.Content) == 0 || resp.Content[0].Text != "retried successfully" {
 		t.Fatalf("expected retried response content, got %#v", resp.Content)
+	}
+}
+
+func TestRefreshModelsCacheDiscoversCustomUpstreamModels(t *testing.T) {
+	mustInitConfig(t)
+	upstream := fakeUpstream(t, "sk-models", []string{"remote-only-model", "configured-model"})
+	if err := config.AddAccount(config.Account{
+		ID: "custom-model-catalogue", Enabled: true,
+		Backend: config.BackendOpenAICompatible, APIFormat: config.APIFormatOpenAI,
+		BaseURL: upstream.URL + "/v1", ApiKey: "sk-models",
+		Models: []string{"configured-model", "vendor-*"},
+	}); err != nil {
+		t.Fatalf("add custom upstream: %v", err)
+	}
+
+	p := accountpool.GetPool()
+	p.Reload()
+	h := &Handler{pool: p}
+	h.refreshModelsCache()
+
+	if !p.AnySupportsModel("remote-only-model") {
+		t.Fatal("discovered custom-upstream model was not added to routing cache")
+	}
+	if !p.AnySupportsModel("vendor-fallback") {
+		t.Fatal("configured wildcard stopped working after live model discovery")
+	}
+
+	h.modelsCacheMu.RLock()
+	ids := modelIDsFromInfo(h.cachedModels)
+	h.modelsCacheMu.RUnlock()
+	joined := "," + strings.Join(ids, ",") + ","
+	if !strings.Contains(joined, ",remote-only-model,") || !strings.Contains(joined, ",configured-model,") {
+		t.Fatalf("aggregate catalogue does not contain discovered and configured models: %v", ids)
+	}
+	if strings.Contains(joined, "vendor-*") {
+		t.Fatalf("routing wildcard leaked into advertised model IDs: %v", ids)
+	}
+}
+
+func TestForceModelKeepsClientVisibleModelLabel(t *testing.T) {
+	mustInitConfig(t)
+	if err := config.SetForceModel("real-upstream-model"); err != nil {
+		t.Fatalf("set force model: %v", err)
+	}
+
+	var upstreamModel string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/chat/completions") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var body struct {
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode upstream request: %v", err)
+		}
+		upstreamModel = body.Model
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+	}))
+	defer upstream.Close()
+
+	if err := config.AddAccount(config.Account{
+		ID: "transparent-force-model", Enabled: true,
+		Backend: config.BackendOpenAICompatible, APIFormat: config.APIFormatOpenAI,
+		BaseURL: upstream.URL + "/v1", ApiKey: "sk-upstream",
+		Models: []string{"real-upstream-model"},
+	}); err != nil {
+		t.Fatalf("add custom upstream: %v", err)
+	}
+
+	p := accountpool.GetPool()
+	p.Reload()
+	h := &Handler{pool: p, promptCache: newPromptCacheTracker(defaultPromptCacheTTL)}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+		`{"model":"client-visible-label","messages":[{"role":"user","content":"hi"}]}`))
+	rec := httptest.NewRecorder()
+	h.handleOpenAIChat(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("request failed: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if upstreamModel != "real-upstream-model" {
+		t.Fatalf("upstream received model %q, want forced model", upstreamModel)
+	}
+	var response map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode client response: %v", err)
+	}
+	if response["model"] != "client-visible-label" {
+		t.Fatalf("client saw model %#v, want original label", response["model"])
 	}
 }
 

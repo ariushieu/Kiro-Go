@@ -118,10 +118,14 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 	}
 
 	thinkingCfg := config.GetThinkingConfig()
+	clientModel := strings.TrimSpace(req.Model)
 	actualModel, thinking := ParseClientModelAndThinking(req.Model, thinkingCfg.Suffix)
 	// Apply global/per-key model override (ForceModel > per-key Model > client model).
 	actualModel = applyModelOverride(actualModel, apiKeyID, thinkingCfg.Suffix)
 	openaiReq.Model = actualModel
+	if clientModel == "" {
+		clientModel = actualModel
+	}
 
 	estimatedInputTokens := estimateOpenAIRequestInputTokens(openaiReq)
 	kiroPayload := OpenAIToKiro(openaiReq, thinking)
@@ -130,23 +134,23 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 
 	// Valid-but-blocked key: render the limit-notice as a normal assistant reply.
 	if limitNoticeRequested(r.Context()) {
-		h.sendResponsesNotice(w, actualModel, req.Stream, limitNoticeClientMessage(), respID, &req)
+		h.sendResponsesNotice(w, clientModel, req.Stream, limitNoticeClientMessage(), respID, &req)
 		return
 	}
 
 	if req.Stream {
-		h.handleResponsesStream(r.Context(), w, kiroPayload, actualModel, thinking, estimatedInputTokens,
+		h.handleResponsesStream(r.Context(), w, kiroPayload, clientModel, actualModel, thinking, estimatedInputTokens,
 			apiKeyID, respID, &req, storedInputCopy, storeResponse)
 		return
 	}
 
-	h.handleResponsesNonStream(r.Context(), w, kiroPayload, actualModel, thinking, estimatedInputTokens,
+	h.handleResponsesNonStream(r.Context(), w, kiroPayload, clientModel, actualModel, thinking, estimatedInputTokens,
 		apiKeyID, respID, &req, storedInputCopy, storeResponse)
 }
 
 func (h *Handler) handleResponsesNonStream(
 	ctx context.Context,
-	w http.ResponseWriter, payload *KiroPayload, model string, thinking bool,
+	w http.ResponseWriter, payload *KiroPayload, model, upstreamModel string, thinking bool,
 	estimatedInputTokens int, apiKeyID, respID string,
 	req *ResponsesRequest, storedInput json.RawMessage, storeResponse bool,
 ) {
@@ -155,7 +159,7 @@ func (h *Handler) handleResponsesNonStream(
 	var lastErr error
 
 	for attempt := 0; attempt < maxAccountRetryAttempts; attempt++ {
-		account := h.nextAccountForKey(apiKeyID, model, excluded)
+		account := h.nextAccountForKey(apiKeyID, upstreamModel, excluded)
 		if account == nil {
 			break
 		}
@@ -185,11 +189,11 @@ func (h *Handler) handleResponsesNonStream(
 			OnCredits:    func(c float64) { credits = c },
 			OnSourceCost: func(c float64) { sourceCost = c },
 			OnContextUsage: func(pct float64) {
-				realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
+				realInputTokens = int(pct * float64(getContextWindowSize(upstreamModel)) / 100.0)
 			},
 		}
 
-		err := CallUpstreamAPI(ctx, account, model, payload, callback)
+		err := CallUpstreamAPI(ctx, account, upstreamModel, payload, callback)
 		if err != nil {
 			lastErr = err
 			excluded[account.ID] = true
@@ -197,7 +201,7 @@ func (h *Handler) handleResponsesNonStream(
 			// Client gone / stream stalled: retrying bills another generation nobody reads.
 			if isClientGoneError(err) {
 				logger.Warnf("[Responses] Aborting request for %s: %v", accountEmailForLog(account), err)
-				h.recordFailureForApiKey(apiKeyID, "responses", model, 0, err.Error(), startedAt)
+				h.recordFailureForApiKey(apiKeyID, "responses", upstreamModel, 0, err.Error(), startedAt)
 				return
 			}
 			continue
@@ -216,7 +220,7 @@ func (h *Handler) handleResponsesNonStream(
 		outputTokens = estimateOpenAIOutputTokens(finalContent, reasoningContent, toolUses)
 
 		sourceCost = effectiveSourceCost(sourceCost, credits)
-		h.recordSuccessForApiKeyWithCost(apiKeyID, inputTokens, outputTokens, credits, sourceCost, model, account, "openai", startedAt)
+		h.recordSuccessForApiKeyWithCost(apiKeyID, inputTokens, outputTokens, credits, sourceCost, upstreamModel, account, "openai", startedAt)
 		h.pool.RecordSuccess(account.ID)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, sourceCost)
 
@@ -237,18 +241,18 @@ func (h *Handler) handleResponsesNonStream(
 	}
 
 	if lastErr == nil {
-		if !h.pool.AnySupportsModel(model) {
-			h.recordFailureForApiKey(apiKeyID, "openai", model, 404, "model not found: "+model, startedAt)
+		if !h.pool.AnySupportsModel(upstreamModel) {
+			h.recordFailureForApiKey(apiKeyID, "openai", upstreamModel, 404, "model not found: "+upstreamModel, startedAt)
 			h.sendOpenAIError(w, 404, "invalid_request_error", openAIModelNotFoundMessage(model))
 			return
 		}
-		h.recordFailureForApiKey(apiKeyID, "openai", model, 503, "No available accounts", startedAt)
+		h.recordFailureForApiKey(apiKeyID, "openai", upstreamModel, 503, "No available accounts", startedAt)
 		h.sendOpenAIError(w, 503, "server_error", noAccountsClientMessage())
 		return
 	}
 	status, clientMsg := clientFacingUpstreamError(lastErr)
 	applyRetryAfterHeader(w, lastErr)
-	h.recordFailureForApiKey(apiKeyID, "openai", model, status, lastErr.Error(), startedAt)
+	h.recordFailureForApiKey(apiKeyID, "openai", upstreamModel, status, lastErr.Error(), startedAt)
 	h.sendOpenAIError(w, status, errorTypeForOpenAIStatus(status), clientMsg)
 }
 
@@ -401,7 +405,7 @@ func (h *Handler) sendResponsesNotice(w http.ResponseWriter, model string, strea
 
 func (h *Handler) handleResponsesStream(
 	ctx context.Context,
-	w http.ResponseWriter, payload *KiroPayload, model string, thinking bool,
+	w http.ResponseWriter, payload *KiroPayload, model, upstreamModel string, thinking bool,
 	estimatedInputTokens int, apiKeyID, respID string,
 	req *ResponsesRequest, storedInput json.RawMessage, storeResponse bool,
 ) {
@@ -458,7 +462,7 @@ func (h *Handler) handleResponsesStream(
 	responseStarted := false
 
 	for attempt := 0; attempt < maxAccountRetryAttempts; attempt++ {
-		account := h.nextAccountForKey(apiKeyID, model, excluded)
+		account := h.nextAccountForKey(apiKeyID, upstreamModel, excluded)
 		if account == nil {
 			break
 		}
@@ -608,11 +612,11 @@ func (h *Handler) handleResponsesStream(
 			OnCredits:    func(c float64) { credits = c },
 			OnSourceCost: func(c float64) { sourceCost = c },
 			OnContextUsage: func(pct float64) {
-				realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
+				realInputTokens = int(pct * float64(getContextWindowSize(upstreamModel)) / 100.0)
 			},
 		}
 
-		err := CallUpstreamAPI(ctx, account, model, payload, callback)
+		err := CallUpstreamAPI(ctx, account, upstreamModel, payload, callback)
 		if err != nil {
 			// Client gone / stream stalled: do not retry onto another account,
 			// regardless of whether we had started streaming.
@@ -620,7 +624,7 @@ func (h *Handler) handleResponsesStream(
 				lastErr = err
 				h.handleAccountFailure(account, err)
 				logger.Warnf("[Responses] Aborting stream for %s: %v", accountEmailForLog(account), err)
-				h.recordFailureForApiKey(apiKeyID, "responses", model, 0, err.Error(), startedAt)
+				h.recordFailureForApiKey(apiKeyID, "responses", upstreamModel, 0, err.Error(), startedAt)
 				return
 			}
 			if !responseStarted {
@@ -642,7 +646,7 @@ func (h *Handler) handleResponsesStream(
 					},
 				},
 			})
-			h.recordFailureForApiKey(apiKeyID, "openai", model, 0, err.Error(), startedAt)
+			h.recordFailureForApiKey(apiKeyID, "openai", upstreamModel, 0, err.Error(), startedAt)
 			return
 		}
 
@@ -687,7 +691,7 @@ func (h *Handler) handleResponsesStream(
 		outputTokens = estimateOpenAIOutputTokens(finalContent, reasoning, toolUses)
 
 		sourceCost = effectiveSourceCost(sourceCost, credits)
-		h.recordSuccessForApiKeyWithCost(apiKeyID, inputTokens, outputTokens, credits, sourceCost, model, account, "openai", startedAt)
+		h.recordSuccessForApiKeyWithCost(apiKeyID, inputTokens, outputTokens, credits, sourceCost, upstreamModel, account, "openai", startedAt)
 		h.pool.RecordSuccess(account.ID)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, sourceCost)
 
@@ -713,8 +717,8 @@ func (h *Handler) handleResponsesStream(
 	}
 
 	if lastErr == nil {
-		if !h.pool.AnySupportsModel(model) {
-			h.recordFailureForApiKey(apiKeyID, "openai", model, 404, "model not found: "+model, startedAt)
+		if !h.pool.AnySupportsModel(upstreamModel) {
+			h.recordFailureForApiKey(apiKeyID, "openai", upstreamModel, 404, "model not found: "+upstreamModel, startedAt)
 			send("response.failed", map[string]interface{}{
 				"type": "response.failed",
 				"response": map[string]interface{}{
@@ -728,7 +732,7 @@ func (h *Handler) handleResponsesStream(
 			})
 			return
 		}
-		h.recordFailureForApiKey(apiKeyID, "openai", model, 503, "No available accounts", startedAt)
+		h.recordFailureForApiKey(apiKeyID, "openai", upstreamModel, 503, "No available accounts", startedAt)
 		send("response.failed", map[string]interface{}{
 			"type": "response.failed",
 			"response": map[string]interface{}{
@@ -743,7 +747,7 @@ func (h *Handler) handleResponsesStream(
 		return
 	}
 	status, clientMsg := clientFacingUpstreamError(lastErr)
-	h.recordFailureForApiKey(apiKeyID, "openai", model, status, lastErr.Error(), startedAt)
+	h.recordFailureForApiKey(apiKeyID, "openai", upstreamModel, status, lastErr.Error(), startedAt)
 	send("response.failed", map[string]interface{}{
 		"type": "response.failed",
 		"response": map[string]interface{}{

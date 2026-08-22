@@ -17,13 +17,15 @@
   const dict = { en: null, zh: null };
   let accountsData = [];
   const selectedAccounts = new Set();
-  // Canonical Kiro model IDs offered in the Force-Model and per-key model dropdowns.
-  // Keep in sync with the model list advertised at /v1/models (handler.go buildModelInfo).
-  const KIRO_MODEL_OPTIONS = [
+  // Safe defaults shown before the first live catalogue refresh. Once the server
+  // has fetched account catalogues, MODEL_OPTIONS is replaced with their union
+  // (including custom upstreams) while retaining these compatibility choices.
+  const DEFAULT_MODEL_OPTIONS = [
     'claude-opus-4.8', 'claude-opus-4.7', 'claude-opus-4.6', 'claude-opus-4.5',
     'claude-sonnet-4.6', 'claude-sonnet-4.5', 'claude-sonnet-4',
     'claude-haiku-4.5'
   ];
+  let MODEL_OPTIONS = DEFAULT_MODEL_OPTIONS.slice();
   let filterKeyword = '';
   let filterStatus = 'all';
   let privacyModeEnabled = true;
@@ -1098,6 +1100,7 @@
       const d = await res.json();
       dismiss();
       toast(t('models.refreshAllDone', d.refreshed || 0), 'success');
+      await refreshAvailableModelOptions();
     } catch (e) {
       dismiss();
       toast(t('common.failed'), 'error');
@@ -1109,7 +1112,10 @@
       const res = await api('/accounts/' + id + '/models/refresh', { method: 'POST' });
       const d = await res.json();
       dismiss();
-      if (d.success) toast(t('detail.refreshModelCache') + ' · ' + (d.count || 0), 'success');
+      if (d.success) {
+        toast(t('detail.refreshModelCache') + ' · ' + (d.count || 0), 'success');
+        await refreshAvailableModelOptions();
+      }
       else toast(t('common.failed') + (d.error ? ': ' + d.error : ''), 'error');
     } catch (e) {
       dismiss();
@@ -1524,9 +1530,24 @@
     if ($('publicBaseURL')) $('publicBaseURL').value = d.publicBaseURL || '';
     if ($('limitNoticeMessage')) $('limitNoticeMessage').value = d.limitNoticeMessage || '';
     if ($('supportContact')) $('supportContact').value = d.supportContact || '';
+    updateAvailableModelOptions(d.availableModels);
     populateForceModelOptions(d.forceModel || '');
     populateIdentityModelOptions(d.identityModel || '');
     await Promise.all([loadThinkingConfig(), loadEndpointConfig(), loadProxyConfig(), loadProxyPool(), loadPromptFilter(), loadApiKeys()]);
+    refreshCustomSelects();
+  }
+  function updateAvailableModelOptions(models) {
+    const live = Array.isArray(models) ? models.map(m => String(m || '').trim()).filter(Boolean) : [];
+    MODEL_OPTIONS = Array.from(new Set(live.concat(DEFAULT_MODEL_OPTIONS)));
+  }
+  async function refreshAvailableModelOptions() {
+    const res = await api('/settings');
+    const d = await res.json();
+    updateAvailableModelOptions(d.availableModels);
+    const forceSelected = $('forceModel') ? $('forceModel').value : (d.forceModel || '');
+    const identitySelected = $('identityModel') ? $('identityModel').value : (d.identityModel || '');
+    populateForceModelOptions(forceSelected);
+    populateIdentityModelOptions(identitySelected);
     refreshCustomSelects();
   }
   async function loadThinkingConfig() {
@@ -1665,7 +1686,7 @@
   function populateForceModelOptions(selected) {
     const sel = $('forceModel');
     if (!sel) return;
-    const opts = KIRO_MODEL_OPTIONS.slice();
+    const opts = MODEL_OPTIONS.slice();
     if (selected && !opts.includes(selected)) opts.unshift(selected);
     let html = '<option value="">' + escapeHtml(t('settings.forceModelOff')) + '</option>';
     html += opts.map(m => '<option value="' + escapeAttr(m) + '"' + (m === selected ? ' selected' : '') + '>' + escapeHtml(m) + '</option>').join('');
@@ -1690,7 +1711,7 @@
   function populateIdentityModelOptions(selected) {
     const sel = $('identityModel');
     if (!sel) return;
-    const opts = KIRO_MODEL_OPTIONS.slice();
+    const opts = MODEL_OPTIONS.slice();
     if (selected && !opts.includes(selected)) opts.unshift(selected);
     let html = '<option value="">' + escapeHtml(t('settings.identityModelOff')) + '</option>';
     html += opts.map(m => '<option value="' + escapeAttr(m) + '"' + (m === selected ? ' selected' : '') + '>' + escapeHtml(m) + '</option>').join('');
@@ -2206,7 +2227,7 @@
   function renderModelPicker(containerId, selectedSet) {
     const box = $(containerId);
     if (!box) return;
-    const opts = KIRO_MODEL_OPTIONS.slice();
+    const opts = MODEL_OPTIONS.slice();
     selectedSet.forEach(m => { if (m && !opts.includes(m)) opts.unshift(m); });
     box.innerHTML = opts.map(m => {
       const val = escapeAttr(m);

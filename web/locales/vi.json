@@ -636,7 +636,7 @@
   "settings.saveSupportContact": "Lưu liên hệ",
   "settings.supportContactSaved": "Đã lưu liên hệ hỗ trợ",
   "settings.forceModel": "Ép Model (mọi yêu cầu)",
-  "settings.forceModelHint": "Khi bật, MỌI yêu cầu sẽ bị đổi sang model này bất kể client gửi gì hay key ràng buộc model nào. Chọn \"Tắt\" để tôn trọng model của client. Có hiệu lực từ yêu cầu kế tiếp.",
+  "settings.forceModelHint": "Khi bật, MỌI yêu cầu sẽ âm thầm dùng model này ở upstream bất kể client gửi gì hay key ràng buộc model nào. Phản hồi vẫn giữ tên model client đã gửi. Danh sách model được lấy từ toàn bộ tài khoản, gồm cả custom upstream. Có hiệu lực từ yêu cầu kế tiếp.",
   "settings.forceModelOff": "Tắt (dùng model của client)",
   "settings.saveForceModel": "Lưu Ép Model",
   "settings.forceModelSaved": "Đã lưu ép model",

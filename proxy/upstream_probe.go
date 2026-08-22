@@ -128,6 +128,7 @@ func ListCustomUpstreamModels(ctx context.Context, account *config.Account) ([]s
 // so a probe fails for the same reasons a real request would.
 func applyUpstreamAuthHeaders(req *http.Request, account *config.Account) {
 	if account.EffectiveAPIFormat() == config.APIFormatAnthropic {
+		req.Header.Set("Authorization", "Bearer "+account.ApiKey)
 		req.Header.Set("x-api-key", account.ApiKey)
 		req.Header.Set("anthropic-version", "2023-06-01")
 		return

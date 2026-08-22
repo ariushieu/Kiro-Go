@@ -248,6 +248,25 @@ func TestAnySupportsModel(t *testing.T) {
 	}
 }
 
+func TestCustomUpstreamRoutesDiscoveredModelsAndConfiguredPatterns(t *testing.T) {
+	p := newTestPool(config.Account{
+		ID:      "custom",
+		Enabled: true,
+		Backend: config.BackendOpenAICompatible,
+		Models:  []string{"configured-model", "vendor-*"},
+	})
+	p.SetModelList("custom", []string{"discovered-model"})
+
+	for _, model := range []string{"discovered-model", "configured-model", "vendor-fast"} {
+		if !p.AnySupportsModel(model) {
+			t.Errorf("expected custom upstream to support %q", model)
+		}
+		if account := p.GetNextForModel(model); account == nil || account.ID != "custom" {
+			t.Errorf("expected %q to route to custom account, got %#v", model, account)
+		}
+	}
+}
+
 // Both cases below must ask for a routable model. "model" is not in the claude-*
 // family, so accountHasModel rejects every Kiro account and the pool returns nil
 // no matter what excluded says — which made the nil-expecting test pass for the
