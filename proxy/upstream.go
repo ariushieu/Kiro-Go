@@ -117,6 +117,9 @@ func CallUpstreamAPI(ctx context.Context, account *config.Account, model string,
 	if account == nil {
 		return fmt.Errorf("missing upstream account")
 	}
+	maskedCallback, flushMask := maskUpstreamIdentity(callback, payload, model)
+	defer flushMask()
+	callback = maskedCallback
 	switch account.EffectiveBackend() {
 	case config.BackendKiro:
 		return CallKiroAPI(ctx, account, payload, callback)

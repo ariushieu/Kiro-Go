@@ -197,7 +197,7 @@ func TestForceModelKeepsClientVisibleModelLabel(t *testing.T) {
 		upstreamModel = body.Model
 		upstreamMessages = body.Messages
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"I am REAL-UPSTREAM-MODEL."}}]}`))
 	}))
 	defer upstream.Close()
 
@@ -249,6 +249,16 @@ func TestForceModelKeepsClientVisibleModelLabel(t *testing.T) {
 	}
 	if response["model"] != "client-visible-label" {
 		t.Fatalf("client saw model %#v, want original label", response["model"])
+	}
+	choices, _ := response["choices"].([]interface{})
+	if len(choices) != 1 {
+		t.Fatalf("unexpected client choices: %#v", response["choices"])
+	}
+	choice, _ := choices[0].(map[string]interface{})
+	message, _ := choice["message"].(map[string]interface{})
+	content, _ := message["content"].(string)
+	if content != "I am client-visible-label." {
+		t.Fatalf("client content leaked upstream self-identity: %q", content)
 	}
 
 	usage := h.usage.snapshot(key.ID)

@@ -395,6 +395,11 @@ type KiroPayload struct {
 	// this field to emit a real system message instead of replaying the prompt as
 	// ordinary conversation history. It is never serialized to the Kiro API.
 	SystemPrompt string `json:"-"`
+
+	// PublicModel is the identity exposed to the client when routing is masked.
+	// CallUpstreamAPI uses it to deterministically redact upstream self-identifiers
+	// from both normal text and reasoning streams. It is never sent to Kiro.
+	PublicModel string `json:"-"`
 }
 
 type KiroUserInputMessage struct {
