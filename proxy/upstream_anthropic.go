@@ -32,6 +32,7 @@ const defaultAnthropicUpstreamMaxTokens = 32000
 
 type anthropicCompatibleRequest struct {
 	Model       string          `json:"model"`
+	System      string          `json:"system,omitempty"`
 	Messages    []ClaudeMessage `json:"messages"`
 	MaxTokens   int             `json:"max_tokens"`
 	Temperature float64         `json:"temperature,omitempty"`
@@ -173,8 +174,9 @@ func kiroPayloadToAnthropic(model string, payload *KiroPayload) (*anthropicCompa
 		req.Temperature = cfg.Temperature
 		req.TopP = cfg.TopP
 	}
+	req.System = strings.TrimSpace(payload.SystemPrompt)
 
-	for _, history := range payload.ConversationState.History {
+	for _, history := range customUpstreamHistory(payload) {
 		if history.UserInputMessage != nil {
 			req.Messages = append(req.Messages, anthropicMessageForUser(*history.UserInputMessage))
 		}

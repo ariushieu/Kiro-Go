@@ -389,6 +389,12 @@ type KiroPayload struct {
 	// in tool_use responses so the client can match them to its tool registry.
 	// Not serialized to the Kiro API request body.
 	ToolNameMap map[string]string `json:"-"`
+
+	// SystemPrompt preserves the translated system instructions separately from
+	// Kiro's synthetic user/assistant priming pair. Custom upstream adapters use
+	// this field to emit a real system message instead of replaying the prompt as
+	// ordinary conversation history. It is never serialized to the Kiro API.
+	SystemPrompt string `json:"-"`
 }
 
 type KiroUserInputMessage struct {

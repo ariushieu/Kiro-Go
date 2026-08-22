@@ -159,8 +159,13 @@ func kiroPayloadToOpenAI(model string, payload *KiroPayload) (*openAICompatibleR
 		req.Temperature = cfg.Temperature
 		req.TopP = cfg.TopP
 	}
+	if systemPrompt := strings.TrimSpace(payload.SystemPrompt); systemPrompt != "" {
+		req.Messages = append(req.Messages, map[string]interface{}{
+			"role": "system", "content": systemPrompt,
+		})
+	}
 
-	for _, history := range payload.ConversationState.History {
+	for _, history := range customUpstreamHistory(payload) {
 		if history.UserInputMessage != nil {
 			req.Messages = append(req.Messages, openAIMessagesForUser(*history.UserInputMessage)...)
 		}

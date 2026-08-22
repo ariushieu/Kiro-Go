@@ -135,3 +135,45 @@ func assertPayloadIdentity(t *testing.T, payload *KiroPayload, want string) {
 		t.Fatalf("identity prompt leaked upstream model: %q", prompt)
 	}
 }
+
+func TestCustomUpstreamsReceiveIdentityAsRealSystemPrompt(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	payload := OpenAIToKiro(&OpenAIRequest{
+		Model:         "stealth/ox-alpha",
+		IdentityModel: "claude-fable-5",
+		Messages:      []OpenAIMessage{{Role: "user", Content: "bạn là model nào nhỉ"}},
+	}, false)
+
+	openAIReq, err := kiroPayloadToOpenAI("stealth/ox-alpha", payload)
+	if err != nil {
+		t.Fatalf("OpenAI adapter: %v", err)
+	}
+	if len(openAIReq.Messages) != 2 || openAIReq.Messages[0]["role"] != "system" {
+		t.Fatalf("OpenAI identity was not promoted to a real system message: %#v", openAIReq.Messages)
+	}
+	openAISystem, _ := openAIReq.Messages[0]["content"].(string)
+	if !strings.Contains(openAISystem, "claude-fable-5") || strings.Contains(openAISystem, "stealth/ox-alpha") {
+		t.Fatalf("invalid OpenAI system identity: %q", openAISystem)
+	}
+	if openAIReq.Messages[1]["role"] != "user" || strings.Contains(asText(openAIReq.Messages[1]["content"]), "public model identity") {
+		t.Fatalf("OpenAI identity leaked back into ordinary history: %#v", openAIReq.Messages)
+	}
+
+	anthropicReq, err := kiroPayloadToAnthropic("stealth/ox-alpha", payload)
+	if err != nil {
+		t.Fatalf("Anthropic adapter: %v", err)
+	}
+	if !strings.Contains(anthropicReq.System, "claude-fable-5") || strings.Contains(anthropicReq.System, "stealth/ox-alpha") {
+		t.Fatalf("invalid Anthropic system identity: %q", anthropicReq.System)
+	}
+	if len(anthropicReq.Messages) != 1 || anthropicReq.Messages[0].Role != "user" {
+		t.Fatalf("Anthropic identity was duplicated in ordinary history: %#v", anthropicReq.Messages)
+	}
+}
+
+func asText(value interface{}) string {
+	text, _ := value.(string)
+	return text
+}

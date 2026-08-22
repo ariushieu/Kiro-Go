@@ -5,9 +5,31 @@ import (
 	"fmt"
 	"kiro-go/config"
 	"kiro-go/logger"
+	"strings"
 	"sync/atomic"
 	"time"
 )
+
+// customUpstreamHistory removes the synthetic system-priming pair used by the
+// native Kiro protocol. OpenAI/Anthropic custom upstreams receive the same text
+// through their real system field, where it has the intended instruction priority.
+func customUpstreamHistory(payload *KiroPayload) []KiroHistoryMessage {
+	if payload == nil {
+		return nil
+	}
+	history := payload.ConversationState.History
+	if strings.TrimSpace(payload.SystemPrompt) == "" || len(history) < 2 {
+		return history
+	}
+	first := history[0].UserInputMessage
+	second := history[1].AssistantResponseMessage
+	if first != nil && second != nil &&
+		strings.TrimSpace(first.Content) == strings.TrimSpace(payload.SystemPrompt) &&
+		strings.TrimSpace(second.Content) == "I will follow these instructions." {
+		return history[2:]
+	}
+	return history
+}
 
 // Custom-upstream first-byte-timeout retries. A gateway in front of a custom
 // upstream (Cloudflare, LiteLLM, one-api, …) gives up when its own origin is slow

@@ -230,7 +230,7 @@ func TestForceModelKeepsClientVisibleModelLabel(t *testing.T) {
 	}
 	var identityPrompt string
 	for _, message := range upstreamMessages {
-		if message.Role == "user" {
+		if message.Role == "system" {
 			if content, ok := message.Content.(string); ok && strings.Contains(content, "public model identity") {
 				identityPrompt = content
 				break
