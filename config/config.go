@@ -480,16 +480,15 @@ type Config struct {
 	// 0 means "use DefaultCreditRate".
 	CreditRate float64 `json:"creditRate,omitempty"`
 
-	// SourceCreditsSeeded records that the one-time backfill of
-	// ApiKeyEntry.SourceCreditsUsed has run. Keys that predate that field carry a
-	// CreditsUsed accumulated when charge always equalled cost, so the backfill
-	// copies one into the other and their reported margin starts at zero.
+	// SourceCreditsBackfill is the generation of the SourceCreditsUsed margin-baseline
+	// reset that has already run against this config. A generation counter rather than
+	// a bool so that correcting the backfill re-runs it on servers that applied an
+	// earlier, narrower version; see currentSourceCreditsBackfill.
 	//
-	// An explicit flag rather than inferring "SourceCreditsUsed == 0 && CreditsUsed
-	// != 0": that condition also matches a key legitimately reset and then charged
-	// for a request whose upstream cost was zero, and re-seeding one of those would
-	// silently overstate the margin an operator prices against.
-	SourceCreditsSeeded bool `json:"sourceCreditsSeeded,omitempty"`
+	// Versioned rather than inferred from the data, because after the reset a key's
+	// margin is legitimately non-zero and indistinguishable from the state the reset
+	// is meant to correct — re-running it would silently wipe real earned margin.
+	SourceCreditsBackfill int `json:"sourceCreditsBackfill,omitempty"`
 
 	// Proxy configuration: optional outbound proxy for Kiro API requests
 	// Format: "socks5://host:port", "socks5://user:pass@host:port",
@@ -754,20 +753,30 @@ func Load() error {
 		}
 	}
 
-	// Migration: backfill SourceCreditsUsed for keys that predate it. Those keys
-	// accumulated CreditsUsed while charge always equalled cost, so copying one into
-	// the other makes their margin read 0 rather than the whole historical charge —
-	// otherwise a key billed 311 credits before the upgrade reports 311 of "margin"
-	// against a real cost of only what has accrued since. Guarded by a config flag so
-	// it runs exactly once; see Config.SourceCreditsSeeded.
-	if !cfg.SourceCreditsSeeded {
+	// Migration: reset the margin baseline for keys whose SourceCreditsUsed only
+	// started counting partway through their life.
+	//
+	// A key that was already serving traffic when SourceCreditsUsed was introduced has
+	// a CreditsUsed covering its whole history against a source cost covering only the
+	// part since, so the derived margin reports the entire pre-upgrade charge as
+	// profit. The split cannot be reconstructed — the charge and the cost of those
+	// early requests were never recorded apart — so the baseline is reset to zero
+	// margin and only traffic from here on is counted. That understates profit rather
+	// than inventing it, and every request after this point is exact.
+	//
+	// The condition is "source < credits", not "source == 0": a key that served even
+	// one request after the upgrade already has a non-zero source cost, and those are
+	// precisely the keys showing the wrong number. Running this over a key with real
+	// margin is intended — at the moment of the upgrade that margin is a mix of real
+	// markup and pre-upgrade backlog, and is not trustworthy either.
+	if cfg.SourceCreditsBackfill < currentSourceCreditsBackfill {
 		for i := range cfg.ApiKeys {
 			k := &cfg.ApiKeys[i]
-			if k.SourceCreditsUsed == 0 && k.CreditsUsed != 0 {
+			if k.SourceCreditsUsed < k.CreditsUsed {
 				k.SourceCreditsUsed = k.CreditsUsed
 			}
 		}
-		cfg.SourceCreditsSeeded = true
+		cfg.SourceCreditsBackfill = currentSourceCreditsBackfill
 		if err := saveLocked(); err != nil {
 			return err
 		}
@@ -1707,6 +1716,15 @@ func UpdateMaxPayloadBytes(n int) error {
 	cfg.MaxPayloadBytes = n
 	return Save()
 }
+
+// currentSourceCreditsBackfill is the generation of the margin-baseline reset this
+// build expects to have been applied. Bump it when the backfill's rule changes, so
+// configs that ran an earlier generation are corrected on next load.
+//
+//	1 — seeded only keys with SourceCreditsUsed == 0, which missed every key that had
+//	    already served a request under the new build (i.e. all the affected ones)
+//	2 — resets any key whose source cost trails its charge
+const currentSourceCreditsBackfill = 2
 
 // DefaultCreditRate is the credit multiplier used when the setting is unset (0):
 // bill exactly what the request cost.

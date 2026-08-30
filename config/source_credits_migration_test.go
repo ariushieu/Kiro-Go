@@ -62,11 +62,34 @@ func TestSourceCreditsBackfillSeedsPreExistingKeys(t *testing.T) {
 	}
 }
 
-// Once seeded, the flag stops the backfill from running again. This is the case the
-// flag exists for: a key reset to zero and then charged for a request whose upstream
-// cost was zero would match a naive "source==0 && credits!=0" test and be re-seeded,
-// silently reporting margin the operator never actually earned.
-func TestSourceCreditsBackfillRunsOnlyOnce(t *testing.T) {
+// The case that motivated the fix, and that generation 1 missed: a key already
+// serving traffic when SourceCreditsUsed appeared has a non-zero source cost covering
+// only part of its life, so a "source == 0" test skips it and it keeps reporting its
+// whole pre-upgrade charge as margin. These are the real numbers off key Ki3.
+func TestSourceCreditsBackfillResetsPartiallyTrackedKey(t *testing.T) {
+	seedConfigFile(t, []map[string]interface{}{{
+		"id":                "k1",
+		"name":              "Ki3",
+		"key":               "sk-partial",
+		"enabled":           true,
+		"creditsUsed":       32.0631,
+		"sourceCreditsUsed": 8.9285,
+		"requestsCount":     22,
+	}}, nil)
+
+	got := GetApiKeyEntry("k1")
+	if got.SourceCreditsUsed != 32.0631 {
+		t.Fatalf("expected baseline reset to 32.0631, got %v", got.SourceCreditsUsed)
+	}
+	if margin := got.CreditsUsed - got.SourceCreditsUsed; margin != 0 {
+		t.Fatalf("expected zero margin after reset, got %v", margin)
+	}
+}
+
+// After the reset, real margin accrues and must survive a restart. This is why the
+// backfill is gated on a stored generation instead of the data: post-reset state
+// (source < credits) looks exactly like the state the reset corrects.
+func TestSourceCreditsBackfillPreservesEarnedMargin(t *testing.T) {
 	cfgFile := seedConfigFile(t, []map[string]interface{}{{
 		"id":          "k1",
 		"key":         "sk-old",
@@ -75,42 +98,56 @@ func TestSourceCreditsBackfillRunsOnlyOnce(t *testing.T) {
 	}}, nil)
 
 	if got := GetApiKeyEntry("k1").SourceCreditsUsed; got != 100 {
-		t.Fatalf("first load should seed 100, got %v", got)
+		t.Fatalf("first load should reset baseline to 100, got %v", got)
 	}
 
-	// Simulate the narrow post-reset case, then reload from the same file.
-	cfgLock.Lock()
-	for i := range cfg.ApiKeys {
-		if cfg.ApiKeys[i].ID == "k1" {
-			cfg.ApiKeys[i].SourceCreditsUsed = 0
-		}
+	// Earn real margin: charged 130 against a real cost of 100. The counters are a hot
+	// path and only mark the config dirty, so flush before reloading from disk.
+	if err := RecordApiKeyUsageWithCost("k1", 0, 30, 0); err != nil {
+		t.Fatalf("record usage: %v", err)
 	}
-	err := saveLocked()
-	cfgLock.Unlock()
-	if err != nil {
-		t.Fatalf("clear source credits: %v", err)
+	if err := FlushDirty(); err != nil {
+		t.Fatalf("flush: %v", err)
 	}
 
 	if err := Init(cfgFile); err != nil {
 		t.Fatalf("reload: %v", err)
 	}
 
-	if got := GetApiKeyEntry("k1").SourceCreditsUsed; got != 0 {
-		t.Fatalf("backfill must not re-run, expected 0 got %v", got)
+	got := GetApiKeyEntry("k1")
+	if got.CreditsUsed != 130 || got.SourceCreditsUsed != 100 {
+		t.Fatalf("restart wiped earned margin: charged %v source %v", got.CreditsUsed, got.SourceCreditsUsed)
 	}
 }
 
-// A fresh install has nothing to backfill but must still record that the migration
-// ran, so a key created later and legitimately holding a zero source cost is never
-// retroactively seeded.
+// A config that ran generation 1 must still get the corrected reset, otherwise the
+// servers that hit the bug are exactly the ones the fix skips.
+func TestSourceCreditsBackfillUpgradesFromGenerationOne(t *testing.T) {
+	seedConfigFile(t, []map[string]interface{}{{
+		"id":                "k1",
+		"key":               "sk-gen1",
+		"enabled":           true,
+		"creditsUsed":       311.6727,
+		"sourceCreditsUsed": 5.7779,
+	}}, map[string]interface{}{
+		"sourceCreditsBackfill": 1,
+	})
+
+	if got := GetApiKeyEntry("k1").SourceCreditsUsed; got != 311.6727 {
+		t.Fatalf("generation 1 config must be corrected, got %v", got)
+	}
+}
+
+// A fresh install has nothing to reset but must still record the generation, so a key
+// created later and earning real margin is never retroactively flattened.
 func TestSourceCreditsBackfillMarksFreshInstall(t *testing.T) {
 	seedConfigFile(t, nil, nil)
 
 	cfgLock.RLock()
-	seeded := cfg.SourceCreditsSeeded
+	gen := cfg.SourceCreditsBackfill
 	cfgLock.RUnlock()
 
-	if !seeded {
-		t.Fatalf("expected SourceCreditsSeeded to be set on a fresh install")
+	if gen != currentSourceCreditsBackfill {
+		t.Fatalf("expected generation %d on a fresh install, got %d", currentSourceCreditsBackfill, gen)
 	}
 }
