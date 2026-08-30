@@ -1527,6 +1527,7 @@
     $('requireApiKey').checked = d.requireApiKey;
     $('allowOverUsage').checked = d.allowOverUsage || false;
     $('maxPayloadBytes').value = String(d.maxPayloadBytes || 2000000);
+    if ($('creditRate')) $('creditRate').value = String(d.creditRate || 1);
     if ($('publicBaseURL')) $('publicBaseURL').value = d.publicBaseURL || '';
     if ($('limitNoticeMessage')) $('limitNoticeMessage').value = d.limitNoticeMessage || '';
     if ($('supportContact')) $('supportContact').value = d.supportContact || '';
@@ -1879,7 +1880,15 @@
   async function saveOverUsageConfig() {
     const allowOverUsage = $('allowOverUsage').checked;
     const maxPayloadBytes = parseInt($('maxPayloadBytes').value, 10);
-    await api('/settings', { method: 'POST', body: JSON.stringify({ allowOverUsage, maxPayloadBytes }) });
+    const body = { allowOverUsage, maxPayloadBytes };
+    if ($('creditRate')) {
+      const creditRate = parseFloat($('creditRate').value);
+      if (!isFinite(creditRate) || creditRate < 1 || creditRate > 10) {
+        return toast(t('settings.creditRateInvalid'), 'warning');
+      }
+      body.creditRate = creditRate;
+    }
+    await api('/settings', { method: 'POST', body: JSON.stringify(body) });
     toast(t('settings.overUsageSaved'), 'success');
   }
   async function changePassword() {
@@ -2071,6 +2080,14 @@
       const tokensLine = usageLine(t('apiKeys.tokens'), item.tokensUsed || 0, item.tokenLimit || 0);
       const creditsLine = usageLine(t('apiKeys.credits'), item.creditsUsed || 0, item.creditLimit || 0);
       const requestsLine = '<div class="text-xs muted-text">' + escapeHtml(t('apiKeys.requests')) + ': ' + escapeHtml(formatNumber(item.requestsCount || 0)) + '</div>';
+      // Admin-only cost basis: real upstream spend vs what the customer was charged.
+      // Shown only once a rate is actually in effect, so a 1.0 setup looks unchanged.
+      const charged = item.creditsUsed || 0;
+      const sourceSpend = item.sourceCreditsUsed || 0;
+      const marginLine = (charged > 0 && Math.abs(charged - sourceSpend) > 1e-9)
+        ? '<div class="text-xs muted-text">' + escapeHtml(t('apiKeys.realCost')) + ': ' + escapeHtml(formatNumber(sourceSpend)) +
+          ' · ' + escapeHtml(t('apiKeys.margin')) + ': ' + escapeHtml(formatNumber(charged - sourceSpend)) + '</div>'
+        : '';
       // Lifetime grand total — survives "Reset Usage", only cleared by "Reset All".
       const lifetimeLine = '<div class="text-xs muted-text">' + escapeHtml(t('apiKeys.lifetime')) + ': ' +
         escapeHtml(formatNumber(item.lifetimeTokens || 0)) + ' ' + escapeHtml(t('apiKeys.tokens')) + ' · ' +
@@ -2122,6 +2139,7 @@
           tokensLine +
           creditsLine +
           requestsLine +
+          marginLine +
           lifetimeLine +
           rpmLine +
           ipLine +

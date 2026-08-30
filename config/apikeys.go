@@ -381,7 +381,18 @@ func HasApiKeys() bool {
 // RecordApiKeyUsage atomically adds tokens and credits to the entry's counters,
 // updates LastUsedAt, and increments RequestsCount. This is a hot-path call, so it
 // only marks the config dirty; the backgroundStatsSaver persists via FlushDirty.
+//
+// Records the charge as its own source cost, i.e. no resale margin. Callers that
+// know the real upstream spend should use RecordApiKeyUsageWithCost instead.
 func RecordApiKeyUsage(id string, tokens int64, credits float64) error {
+	return RecordApiKeyUsageWithCost(id, tokens, credits, credits)
+}
+
+// RecordApiKeyUsageWithCost is RecordApiKeyUsage with the customer charge and the
+// real upstream spend tracked separately, so an operator can reconcile a billing
+// period against actual cost. credits drives the customer's quota; sourceCredits
+// is admin-only bookkeeping and never gates anything.
+func RecordApiKeyUsageWithCost(id string, tokens int64, credits, sourceCredits float64) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
 	if cfg == nil {
@@ -396,6 +407,9 @@ func RecordApiKeyUsage(id string, tokens int64, credits float64) error {
 			if credits > 0 {
 				cfg.ApiKeys[i].CreditsUsed += credits
 				cfg.ApiKeys[i].LifetimeCredits += credits
+			}
+			if sourceCredits > 0 {
+				cfg.ApiKeys[i].SourceCreditsUsed += sourceCredits
 			}
 			cfg.ApiKeys[i].RequestsCount++
 			cfg.ApiKeys[i].LifetimeRequests++
@@ -421,6 +435,7 @@ func ResetApiKeyUsage(id string) error {
 		if cfg.ApiKeys[i].ID == id {
 			cfg.ApiKeys[i].TokensUsed = 0
 			cfg.ApiKeys[i].CreditsUsed = 0
+			cfg.ApiKeys[i].SourceCreditsUsed = 0
 			cfg.ApiKeys[i].RequestsCount = 0
 			return saveLocked()
 		}
@@ -442,6 +457,7 @@ func ResetApiKeyUsageAll(id string) error {
 		if cfg.ApiKeys[i].ID == id {
 			cfg.ApiKeys[i].TokensUsed = 0
 			cfg.ApiKeys[i].CreditsUsed = 0
+			cfg.ApiKeys[i].SourceCreditsUsed = 0
 			cfg.ApiKeys[i].RequestsCount = 0
 			cfg.ApiKeys[i].LifetimeTokens = 0
 			cfg.ApiKeys[i].LifetimeCredits = 0

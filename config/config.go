@@ -396,9 +396,22 @@ type ApiKeyEntry struct {
 	Models []string `json:"models,omitempty"`
 
 	// Current-period usage (cleared by "Reset Usage" for a fresh quota cycle).
+	// CreditsUsed is what the customer was CHARGED — it is the number their quota
+	// is measured against and the only one their portal ever sees.
 	TokensUsed    int64   `json:"tokensUsed,omitempty"`
 	CreditsUsed   float64 `json:"creditsUsed,omitempty"`
 	RequestsCount int64   `json:"requestsCount,omitempty"`
+
+	// SourceCreditsUsed is the real upstream spend behind CreditsUsed, before the
+	// CreditRate multiplier. Admin-only: it is the operator's cost basis, so it must
+	// never appear in a customer-facing payload (apiKeySelfInfo, apiKeySelfLogEntry,
+	// apiKeyBalanceInfo) — TestSourceCreditsNeverLeakToCustomer guards that.
+	//
+	// Persisted rather than derived, because the per-request source cost otherwise
+	// lives only in the 1000-entry in-memory request log and is lost on restart,
+	// leaving no way to reconcile a month's real cost against what was billed.
+	// Cleared alongside CreditsUsed by both reset paths.
+	SourceCreditsUsed float64 `json:"sourceCreditsUsed,omitempty"`
 
 	// Lifetime usage. Same additions as the current-period counters, but "Reset Usage"
 	// NEVER touches these — they only grow, so an operator always sees the true grand
@@ -453,6 +466,19 @@ type Config struct {
 	// at runtime without a restart. Do not set >~2.15MB: AWS rejects oversized
 	// bodies with 400 CONTENT_LENGTH_EXCEEDS_THRESHOLD and there is no shrink-retry.
 	MaxPayloadBytes int `json:"maxPayloadBytes,omitempty"`
+
+	// CreditRate is the resale multiplier applied to the customer-facing credit
+	// charge, and to that number only: 1.0 debits exactly what the request cost,
+	// 1.5 debits half again as much. It never touches token counters (clients can
+	// count those themselves, so inflating them contradicts the usage block this
+	// proxy returns) nor the recorded source cost, which stays the real upstream
+	// spend so RequestLogEntry.Profit remains the true margin.
+	//
+	// Read per-request, so a change applies to the next request on every existing
+	// key. On accounts already carrying UpstreamPricing.Markup this multiplies on
+	// top of that markup — the two are independent knobs.
+	// 0 means "use DefaultCreditRate".
+	CreditRate float64 `json:"creditRate,omitempty"`
 
 	// Proxy configuration: optional outbound proxy for Kiro API requests
 	// Format: "socks5://host:port", "socks5://user:pass@host:port",
@@ -1649,6 +1675,50 @@ func UpdateMaxPayloadBytes(n int) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
 	cfg.MaxPayloadBytes = n
+	return Save()
+}
+
+// DefaultCreditRate is the credit multiplier used when the setting is unset (0):
+// bill exactly what the request cost.
+const DefaultCreditRate = 1.0
+
+// MaxCreditRate bounds the multiplier. A typo like 15 instead of 1.5 would drain
+// a customer's key in a handful of requests before anyone noticed, so the setter
+// refuses it outright rather than clamping silently.
+const MaxCreditRate = 10.0
+
+// normalizeCreditRate rejects NaN/Inf and anything below 1, which would debit a
+// customer less than the request actually cost.
+func normalizeCreditRate(rate float64) float64 {
+	if math.IsNaN(rate) || math.IsInf(rate, 0) || rate < 1 {
+		return DefaultCreditRate
+	}
+	return rate
+}
+
+// GetCreditRate returns the resale multiplier for customer credit charges,
+// falling back to DefaultCreditRate when unset or invalid.
+func GetCreditRate() float64 {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil {
+		return DefaultCreditRate
+	}
+	return normalizeCreditRate(cfg.CreditRate)
+}
+
+// UpdateCreditRate sets the credit multiplier and persists the change. Rates
+// below 1 (charging less than cost) and above MaxCreditRate are rejected.
+func UpdateCreditRate(rate float64) error {
+	if math.IsNaN(rate) || math.IsInf(rate, 0) {
+		return fmt.Errorf("credit rate must be a number")
+	}
+	if rate < 1 || rate > MaxCreditRate {
+		return fmt.Errorf("credit rate must be between 1 and %g, got %g", MaxCreditRate, rate)
+	}
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	cfg.CreditRate = rate
 	return Save()
 }
 

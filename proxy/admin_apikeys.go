@@ -31,10 +31,13 @@ type apiKeyView struct {
 	TokensUsed    int64   `json:"tokensUsed"`
 	CreditsUsed   float64 `json:"creditsUsed"`
 	RequestsCount int64   `json:"requestsCount"`
-	RPMLimit      int      `json:"rpmLimit,omitempty"`
-	IPLimit       int      `json:"ipLimit,omitempty"`
-	IPAllowlist   []string `json:"ipAllowlist,omitempty"`
-	TPMLimit      int      `json:"tpmLimit,omitempty"`
+	// SourceCreditsUsed is the real upstream spend behind CreditsUsed. Admin-only —
+	// this endpoint is password-gated; the customer's /v1/key/info never carries it.
+	SourceCreditsUsed float64  `json:"sourceCreditsUsed"`
+	RPMLimit          int      `json:"rpmLimit,omitempty"`
+	IPLimit           int      `json:"ipLimit,omitempty"`
+	IPAllowlist       []string `json:"ipAllowlist,omitempty"`
+	TPMLimit          int      `json:"tpmLimit,omitempty"`
 
 	// BoundAccountIDs restricts routing to a fixed set of accounts (empty = shared pool).
 	BoundAccountIDs []string `json:"boundAccountIds,omitempty"`
@@ -51,23 +54,24 @@ type apiKeyView struct {
 
 func toApiKeyView(e config.ApiKeyEntry) apiKeyView {
 	return apiKeyView{
-		ID:            e.ID,
-		Name:          e.Name,
-		KeyMasked:     config.MaskApiKey(e.Key),
-		Enabled:       e.Enabled,
-		Migrated:      e.Migrated,
-		CreatedAt:     e.CreatedAt,
-		LastUsedAt:    e.LastUsedAt,
-		ExpiresAt:     e.ExpiresAt,
-		TokenLimit:    e.TokenLimit,
-		CreditLimit:   e.CreditLimit,
-		TokensUsed:    e.TokensUsed,
-		CreditsUsed:   e.CreditsUsed,
-		RequestsCount: e.RequestsCount,
-		RPMLimit:      e.RPMLimit,
-		IPLimit:       e.IPLimit,
-		IPAllowlist:   e.IPAllowlist,
-		TPMLimit:      e.TPMLimit,
+		ID:                e.ID,
+		Name:              e.Name,
+		KeyMasked:         config.MaskApiKey(e.Key),
+		Enabled:           e.Enabled,
+		Migrated:          e.Migrated,
+		CreatedAt:         e.CreatedAt,
+		LastUsedAt:        e.LastUsedAt,
+		ExpiresAt:         e.ExpiresAt,
+		TokenLimit:        e.TokenLimit,
+		CreditLimit:       e.CreditLimit,
+		TokensUsed:        e.TokensUsed,
+		CreditsUsed:       e.CreditsUsed,
+		RequestsCount:     e.RequestsCount,
+		SourceCreditsUsed: e.SourceCreditsUsed,
+		RPMLimit:          e.RPMLimit,
+		IPLimit:           e.IPLimit,
+		IPAllowlist:       e.IPAllowlist,
+		TPMLimit:          e.TPMLimit,
 
 		BoundAccountIDs: e.BoundAccountIDs,
 		Models:          e.Models,
@@ -466,6 +470,7 @@ type apiKeyExportView struct {
 	RequestsCount     int64    `json:"requestsCount"`
 	TokensUsed        int64    `json:"tokensUsed"`
 	CreditsUsed       float64  `json:"creditsUsed"`
+	SourceCreditsUsed float64  `json:"sourceCreditsUsed"`
 	TokenLimit        int64    `json:"tokenLimit"`
 	CreditLimit       float64  `json:"creditLimit"`
 	ExpiresAt         int64    `json:"expiresAt"`
@@ -505,6 +510,7 @@ func toApiKeyExportView(e config.ApiKeyEntry, includeSecrets bool) apiKeyExportV
 		RequestsCount:     e.RequestsCount,
 		TokensUsed:        e.TokensUsed,
 		CreditsUsed:       e.CreditsUsed,
+		SourceCreditsUsed: e.SourceCreditsUsed,
 		TokenLimit:        e.TokenLimit,
 		CreditLimit:       e.CreditLimit,
 		ExpiresAt:         e.ExpiresAt,
@@ -603,12 +609,13 @@ type apiKeyImportEntry struct {
 
 	// Usage counters are carried over so a restored key resumes its quota rather
 	// than handing the customer a fresh allowance.
-	TokensUsed       int64   `json:"tokensUsed,omitempty"`
-	CreditsUsed      float64 `json:"creditsUsed,omitempty"`
-	RequestsCount    int64   `json:"requestsCount,omitempty"`
-	LifetimeTokens   int64   `json:"lifetimeTokens,omitempty"`
-	LifetimeCredits  float64 `json:"lifetimeCredits,omitempty"`
-	LifetimeRequests int64   `json:"lifetimeRequests,omitempty"`
+	TokensUsed        int64   `json:"tokensUsed,omitempty"`
+	CreditsUsed       float64 `json:"creditsUsed,omitempty"`
+	SourceCreditsUsed float64 `json:"sourceCreditsUsed,omitempty"`
+	RequestsCount     int64   `json:"requestsCount,omitempty"`
+	LifetimeTokens    int64   `json:"lifetimeTokens,omitempty"`
+	LifetimeCredits   float64 `json:"lifetimeCredits,omitempty"`
+	LifetimeRequests  int64   `json:"lifetimeRequests,omitempty"`
 }
 
 // decodeApiKeyImport accepts both shapes an operator is likely to paste:
@@ -703,12 +710,13 @@ func (h *Handler) apiRestoreApiKeys(w http.ResponseWriter, r *http.Request) {
 			TPMLimit:         e.TPMLimit,
 			BoundAccountIDs:  e.BoundAccountIDs,
 			Models:           mergeModelList(e.Models, e.Model),
-			TokensUsed:       e.TokensUsed,
-			CreditsUsed:      e.CreditsUsed,
-			RequestsCount:    e.RequestsCount,
-			LifetimeTokens:   e.LifetimeTokens,
-			LifetimeCredits:  e.LifetimeCredits,
-			LifetimeRequests: e.LifetimeRequests,
+			TokensUsed:        e.TokensUsed,
+			CreditsUsed:       e.CreditsUsed,
+			SourceCreditsUsed: e.SourceCreditsUsed,
+			RequestsCount:     e.RequestsCount,
+			LifetimeTokens:    e.LifetimeTokens,
+			LifetimeCredits:   e.LifetimeCredits,
+			LifetimeRequests:  e.LifetimeRequests,
 		})
 	}
 

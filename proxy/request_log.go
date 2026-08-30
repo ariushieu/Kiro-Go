@@ -136,23 +136,29 @@ func (h *Handler) apiClearRequestLogs(w http.ResponseWriter, r *http.Request) {
 }
 
 // apiKeyUsageView is the per-key usage summary returned by apiGetUsageSummary.
+// Admin-only (password-gated), which is what lets it carry SourceCreditsUsed and
+// Margin — the operator's cost basis, deliberately absent from apiKeySelfInfo.
 type apiKeyUsageView struct {
-	ID            string  `json:"id"`
-	Name          string  `json:"name,omitempty"`
-	KeyMasked     string  `json:"keyMasked"`
-	Enabled       bool    `json:"enabled"`
-	TokenLimit    int64   `json:"tokenLimit"`
-	CreditLimit   float64 `json:"creditLimit"`
-	TokensUsed    int64   `json:"tokensUsed"`
-	CreditsUsed   float64 `json:"creditsUsed"`
-	RequestsCount int64   `json:"requestsCount"`
-	TokensRemain  int64   `json:"tokensRemain"`  // -1 = unlimited
-	CreditsRemain float64 `json:"creditsRemain"` // -1 = unlimited
-	OverToken     bool    `json:"overToken"`
-	OverCredit    bool    `json:"overCredit"`
-	Expired       bool    `json:"expired"`
-	LastUsedAt    int64   `json:"lastUsedAt,omitempty"`
-	ExpiresAt     int64   `json:"expiresAt,omitempty"`
+	ID          string  `json:"id"`
+	Name        string  `json:"name,omitempty"`
+	KeyMasked   string  `json:"keyMasked"`
+	Enabled     bool    `json:"enabled"`
+	TokenLimit  int64   `json:"tokenLimit"`
+	CreditLimit float64 `json:"creditLimit"`
+	TokensUsed  int64   `json:"tokensUsed"`
+	// CreditsUsed is what the customer was charged; SourceCreditsUsed is what it
+	// actually cost upstream. Margin is the difference, in credits.
+	CreditsUsed       float64 `json:"creditsUsed"`
+	SourceCreditsUsed float64 `json:"sourceCreditsUsed"`
+	Margin            float64 `json:"margin"`
+	RequestsCount     int64   `json:"requestsCount"`
+	TokensRemain      int64   `json:"tokensRemain"`  // -1 = unlimited
+	CreditsRemain     float64 `json:"creditsRemain"` // -1 = unlimited
+	OverToken         bool    `json:"overToken"`
+	OverCredit        bool    `json:"overCredit"`
+	Expired           bool    `json:"expired"`
+	LastUsedAt        int64   `json:"lastUsedAt,omitempty"`
+	ExpiresAt         int64   `json:"expiresAt,omitempty"`
 }
 
 // apiGetUsageSummary GET /admin/api/usage-summary - per-key credit/token usage vs limits.
@@ -163,7 +169,7 @@ func (h *Handler) apiGetUsageSummary(w http.ResponseWriter, r *http.Request) {
 	out := make([]apiKeyUsageView, 0, len(entries))
 
 	var totalTokens, totalLimitTokens int64
-	var totalCredits, totalLimitCredits float64
+	var totalCredits, totalLimitCredits, totalSourceCredits float64
 	var totalRequests int64
 
 	for _, e := range entries {
@@ -183,26 +189,29 @@ func (h *Handler) apiGetUsageSummary(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		out = append(out, apiKeyUsageView{
-			ID:            e.ID,
-			Name:          e.Name,
-			KeyMasked:     config.MaskApiKey(e.Key),
-			Enabled:       e.Enabled,
-			TokenLimit:    e.TokenLimit,
-			CreditLimit:   e.CreditLimit,
-			TokensUsed:    e.TokensUsed,
-			CreditsUsed:   e.CreditsUsed,
-			RequestsCount: e.RequestsCount,
-			TokensRemain:  tokensRemain,
-			CreditsRemain: creditsRemain,
-			OverToken:     overToken,
-			OverCredit:    overCredit,
-			Expired:       config.ApiKeyExpired(e),
-			LastUsedAt:    e.LastUsedAt,
-			ExpiresAt:     e.ExpiresAt,
+			ID:                e.ID,
+			Name:              e.Name,
+			KeyMasked:         config.MaskApiKey(e.Key),
+			Enabled:           e.Enabled,
+			TokenLimit:        e.TokenLimit,
+			CreditLimit:       e.CreditLimit,
+			TokensUsed:        e.TokensUsed,
+			CreditsUsed:       e.CreditsUsed,
+			SourceCreditsUsed: e.SourceCreditsUsed,
+			Margin:            e.CreditsUsed - e.SourceCreditsUsed,
+			RequestsCount:     e.RequestsCount,
+			TokensRemain:      tokensRemain,
+			CreditsRemain:     creditsRemain,
+			OverToken:         overToken,
+			OverCredit:        overCredit,
+			Expired:           config.ApiKeyExpired(e),
+			LastUsedAt:        e.LastUsedAt,
+			ExpiresAt:         e.ExpiresAt,
 		})
 		totalTokens += e.TokensUsed
 		totalLimitTokens += e.TokenLimit
 		totalCredits += e.CreditsUsed
+		totalSourceCredits += e.SourceCreditsUsed
 		totalLimitCredits += e.CreditLimit
 		totalRequests += e.RequestsCount
 	}
@@ -210,12 +219,15 @@ func (h *Handler) apiGetUsageSummary(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"keys": out,
 		"totals": map[string]interface{}{
-			"tokensUsed":   totalTokens,
-			"tokenLimit":   totalLimitTokens,
-			"creditsUsed":  totalCredits,
-			"creditLimit":  totalLimitCredits,
-			"requests":     totalRequests,
-			"requestCount": totalRequests,
+			"tokensUsed":        totalTokens,
+			"tokenLimit":        totalLimitTokens,
+			"creditsUsed":       totalCredits,
+			"sourceCreditsUsed": totalSourceCredits,
+			"margin":            totalCredits - totalSourceCredits,
+			"creditRate":        config.GetCreditRate(),
+			"creditLimit":       totalLimitCredits,
+			"requests":          totalRequests,
+			"requestCount":      totalRequests,
 		},
 	})
 }

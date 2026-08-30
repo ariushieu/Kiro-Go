@@ -10,6 +10,7 @@ import (
 	"kiro-go/config"
 	"kiro-go/logger"
 	"kiro-go/pool"
+	"math"
 	"net"
 	"net/http"
 	"runtime/debug"
@@ -1824,12 +1825,21 @@ func (h *Handler) recordSuccessForApiKey(apiKeyID string, inputTokens, outputTok
 
 // recordSuccessForApiKeyWithCost keeps customer charge separate from the actual
 // custom-upstream cost. Legacy Kiro callers use the same value for both.
+//
+// The resale multiplier is applied here, once, and deliberately only to credits:
+// this is the single funnel every success path reaches, so the key ledger, the
+// global credit counter and the request log all see the same charged number and
+// stay reconcilable — the /check page shows both a per-request log and the running
+// total, and a multiplier applied to one but not the other would show up there as
+// a discrepancy. sourceCost is left at the real upstream spend so Profit below
+// stays the true margin, and token counters are never scaled.
 func (h *Handler) recordSuccessForApiKeyWithCost(apiKeyID string, inputTokens, outputTokens int, credits, sourceCost float64, model string, account *config.Account, endpoint string, startedAt time.Time) {
+	credits = chargeWithCreditRate(credits)
 	h.recordSuccess(inputTokens, outputTokens, credits)
 
 	keyName, keyMasked := apiKeyLabels(apiKeyID)
 	if apiKeyID != "" {
-		if err := config.RecordApiKeyUsage(apiKeyID, int64(inputTokens+outputTokens), credits); err != nil {
+		if err := config.RecordApiKeyUsageWithCost(apiKeyID, int64(inputTokens+outputTokens), credits, sourceCost); err != nil {
 			logger.Warnf("[ApiKey] failed to record usage for key %s: %v", apiKeyID, err)
 		}
 		if h.usage != nil {
@@ -1860,6 +1870,16 @@ func (h *Handler) recordSuccessForApiKeyWithCost(apiKeyID string, inputTokens, o
 		Profit:       credits - sourceCost,
 		DurationMs:   durationMs(startedAt),
 	})
+}
+
+// chargeWithCreditRate scales a customer credit charge by the configured resale
+// multiplier. Non-positive charges are returned untouched: a request that cost
+// nothing must stay free rather than become a rounding artifact.
+func chargeWithCreditRate(credits float64) float64 {
+	if credits <= 0 {
+		return credits
+	}
+	return credits * config.GetCreditRate()
 }
 
 func effectiveSourceCost(sourceCost, customerCharge float64) float64 {
@@ -4293,6 +4313,7 @@ func (h *Handler) apiGetSettings(w http.ResponseWriter, r *http.Request) {
 		"host":               config.GetHost(),
 		"allowOverUsage":     config.GetAllowOverUsage(),
 		"maxPayloadBytes":    config.GetMaxPayloadBytes(),
+		"creditRate":         config.GetCreditRate(),
 		"publicBaseURL":      config.GetPublicBaseURL(),
 		"limitNoticeMessage": config.GetLimitNoticeMessage(),
 		"supportContact":     config.GetSupportContact(),
@@ -4347,16 +4368,17 @@ func (h *Handler) apiUpdatePromptFilter(w http.ResponseWriter, r *http.Request) 
 
 func (h *Handler) apiUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ApiKey             *string `json:"apiKey,omitempty"`
-		RequireApiKey      *bool   `json:"requireApiKey,omitempty"`
-		Password           string  `json:"password,omitempty"`
-		AllowOverUsage     *bool   `json:"allowOverUsage,omitempty"`
-		MaxPayloadBytes    *int    `json:"maxPayloadBytes,omitempty"`
-		PublicBaseURL      *string `json:"publicBaseURL,omitempty"`
-		LimitNoticeMessage *string `json:"limitNoticeMessage,omitempty"`
-		SupportContact     *string `json:"supportContact,omitempty"`
-		ForceModel         *string `json:"forceModel,omitempty"`
-		IdentityModel      *string `json:"identityModel,omitempty"`
+		ApiKey             *string  `json:"apiKey,omitempty"`
+		RequireApiKey      *bool    `json:"requireApiKey,omitempty"`
+		Password           string   `json:"password,omitempty"`
+		AllowOverUsage     *bool    `json:"allowOverUsage,omitempty"`
+		MaxPayloadBytes    *int     `json:"maxPayloadBytes,omitempty"`
+		CreditRate         *float64 `json:"creditRate,omitempty"`
+		PublicBaseURL      *string  `json:"publicBaseURL,omitempty"`
+		LimitNoticeMessage *string  `json:"limitNoticeMessage,omitempty"`
+		SupportContact     *string  `json:"supportContact,omitempty"`
+		ForceModel         *string  `json:"forceModel,omitempty"`
+		IdentityModel      *string  `json:"identityModel,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
@@ -4385,6 +4407,24 @@ func (h *Handler) apiUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	// value takes effect on the next request — no restart or pool reload needed.
 	if req.MaxPayloadBytes != nil {
 		if err := config.UpdateMaxPayloadBytes(*req.MaxPayloadBytes); err != nil {
+			w.WriteHeader(500)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+	}
+
+	// creditRate is read per-request by chargeWithCreditRate, so it takes effect on
+	// the next request for every existing key — no restart, no re-issuing keys.
+	if req.CreditRate != nil {
+		rate := *req.CreditRate
+		if math.IsNaN(rate) || math.IsInf(rate, 0) || rate < 1 || rate > config.MaxCreditRate {
+			w.WriteHeader(400)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": fmt.Sprintf("creditRate must be between 1 and %g", config.MaxCreditRate),
+			})
+			return
+		}
+		if err := config.UpdateCreditRate(rate); err != nil {
 			w.WriteHeader(500)
 			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
