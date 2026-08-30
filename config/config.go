@@ -480,6 +480,17 @@ type Config struct {
 	// 0 means "use DefaultCreditRate".
 	CreditRate float64 `json:"creditRate,omitempty"`
 
+	// SourceCreditsSeeded records that the one-time backfill of
+	// ApiKeyEntry.SourceCreditsUsed has run. Keys that predate that field carry a
+	// CreditsUsed accumulated when charge always equalled cost, so the backfill
+	// copies one into the other and their reported margin starts at zero.
+	//
+	// An explicit flag rather than inferring "SourceCreditsUsed == 0 && CreditsUsed
+	// != 0": that condition also matches a key legitimately reset and then charged
+	// for a request whose upstream cost was zero, and re-seeding one of those would
+	// silently overstate the margin an operator prices against.
+	SourceCreditsSeeded bool `json:"sourceCreditsSeeded,omitempty"`
+
 	// Proxy configuration: optional outbound proxy for Kiro API requests
 	// Format: "socks5://host:port", "socks5://user:pass@host:port",
 	//         "http://host:port",  "http://user:pass@host:port"
@@ -738,6 +749,25 @@ func Load() error {
 		}
 	}
 	if lifetimeMigrated {
+		if err := saveLocked(); err != nil {
+			return err
+		}
+	}
+
+	// Migration: backfill SourceCreditsUsed for keys that predate it. Those keys
+	// accumulated CreditsUsed while charge always equalled cost, so copying one into
+	// the other makes their margin read 0 rather than the whole historical charge —
+	// otherwise a key billed 311 credits before the upgrade reports 311 of "margin"
+	// against a real cost of only what has accrued since. Guarded by a config flag so
+	// it runs exactly once; see Config.SourceCreditsSeeded.
+	if !cfg.SourceCreditsSeeded {
+		for i := range cfg.ApiKeys {
+			k := &cfg.ApiKeys[i]
+			if k.SourceCreditsUsed == 0 && k.CreditsUsed != 0 {
+				k.SourceCreditsUsed = k.CreditsUsed
+			}
+		}
+		cfg.SourceCreditsSeeded = true
 		if err := saveLocked(); err != nil {
 			return err
 		}
